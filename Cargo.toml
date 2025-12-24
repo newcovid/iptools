@@ -1,0 +1,37 @@
+[package]
+name = "iptools"
+version = "0.1.0"
+edition = "2021"
+authors = ["Your Name <you@example.com>"]
+description = "A modular, cross-platform IP management and testing CLI tool."
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+ratatui = "0.28"
+crossterm = { version = "0.28", features = ["event-stream"] }
+anyhow = "1.0"
+sysinfo = "0.33"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+clap = { version = "4.0", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+futures = "0.3"
+chrono = "0.4"
+reqwest = { version = "0.12", features = ["json"] }
+ipnetwork = "0.20"
+# 新增：用于主机名反向解析 (getnameinfo wrapper)
+dns-lookup = "2.0"
+
+# Windows 平台专用依赖
+[target.'cfg(windows)'.dependencies]
+ipconfig = "0.3"
+encoding_rs = "0.8" 
+winreg = "0.52"
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Networking_WinSock",
+    "Win32_NetworkManagement_Ndis", 
+    "Win32_NetworkManagement_WiFi",
+] }
