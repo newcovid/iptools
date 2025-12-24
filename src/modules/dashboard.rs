@@ -1,4 +1,5 @@
 use crate::app::App;
+use crate::ui::theme; // 引入主题
 use crate::utils::i18n::I18n;
 use crate::utils::net::{self, InterfaceInfo};
 use chrono::Local;
@@ -40,17 +41,12 @@ enum PublicInfoState {
 }
 
 pub struct Dashboard {
-    // 系统信息
     hostname: String,
     os_name: String,
     os_version: String,
-
-    // 网络信息
     sys_networks: Networks,
     active_interface: Option<InterfaceInfo>,
     traffic_stats: Option<DashTrafficStats>,
-
-    // 公网信息
     public_info: PublicInfoState,
     proxy_setting: Option<String>,
     rx: mpsc::Receiver<Result<IpApiResponse, (String, String)>>,
@@ -80,9 +76,6 @@ impl Dashboard {
 
         dashboard.detect_proxy();
         dashboard.refresh_active_interface();
-
-        // 修复 1: 移除默认的英文请求，避免启动时闪烁
-        // 这里什么都不做，等待 App 初始化完成后调用 fetch_public_ip
 
         dashboard
     }
@@ -264,7 +257,7 @@ fn draw_local_panel(f: &mut Frame, area: Rect, dash: &Dashboard, i18n: &I18n) {
 
     let key_style = Style::default().fg(Color::Gray);
     let val_highlight = Style::default()
-        .fg(Color::Cyan)
+        .fg(theme::COLOR_SECONDARY)
         .add_modifier(Modifier::BOLD);
 
     let mut rows = Vec::new();
@@ -276,7 +269,10 @@ fn draw_local_panel(f: &mut Frame, area: Rect, dash: &Dashboard, i18n: &I18n) {
     ]));
     rows.push(Row::new(vec![
         Cell::from(Span::styled(i18n.t("label_hostname"), key_style)),
-        Cell::from(format!("{} ({})", dash.hostname, dash.os_name)),
+        Cell::from(format!(
+            "{} ({} {})",
+            dash.hostname, dash.os_name, dash.os_version
+        )),
     ]));
 
     rows.push(Row::new(vec![Cell::from(""), Cell::from("")]).height(1));
@@ -336,7 +332,7 @@ fn draw_local_panel(f: &mut Frame, area: Rect, dash: &Dashboard, i18n: &I18n) {
                 Cell::from(Line::from(vec![
                     Span::styled(
                         format!("↓ {:<9}", format_speed(stats.rx_speed)),
-                        Style::default().fg(Color::Green),
+                        Style::default().fg(theme::COLOR_UP),
                     ),
                     Span::styled(
                         format!("↑ {:<9}", format_speed(stats.tx_speed)),
@@ -344,7 +340,6 @@ fn draw_local_panel(f: &mut Frame, area: Rect, dash: &Dashboard, i18n: &I18n) {
                     ),
                 ])),
             ]));
-            // 修复 2: 使用本地化的 dash_rx 和 dash_tx
             rows.push(Row::new(vec![
                 Cell::from(Span::styled(i18n.t("dash_usage"), key_style)),
                 Cell::from(Line::from(vec![
@@ -364,7 +359,7 @@ fn draw_local_panel(f: &mut Frame, area: Rect, dash: &Dashboard, i18n: &I18n) {
             Cell::from(Span::styled("Status", key_style)),
             Cell::from(Span::styled(
                 "No active interface found",
-                Style::default().fg(Color::Red),
+                Style::default().fg(theme::COLOR_ERROR),
             )),
         ]));
     }
@@ -416,12 +411,15 @@ fn draw_public_panel(f: &mut Frame, area: Rect, dash: &Dashboard, i18n: &I18n) {
                 Cell::from(Span::styled(i18n.t("dash_public_ip"), key_style)),
                 Cell::from(Span::styled(
                     i18n.t("dash_fetch_failed"),
-                    Style::default().fg(Color::Red),
+                    Style::default().fg(theme::COLOR_ERROR),
                 )),
             ]));
             rows.push(Row::new(vec![
-                Cell::from(Span::styled("Type", key_style)),
-                Cell::from(Span::styled(i18n.t(key), Style::default().fg(Color::Red))),
+                Cell::from(Span::styled(i18n.t("dash_type"), key_style)),
+                Cell::from(Span::styled(
+                    i18n.t(key),
+                    Style::default().fg(theme::COLOR_ERROR),
+                )),
             ]));
             let safe_msg = if debug_msg.len() > 30 {
                 format!("{}...", &debug_msg[..30])
@@ -429,7 +427,7 @@ fn draw_public_panel(f: &mut Frame, area: Rect, dash: &Dashboard, i18n: &I18n) {
                 debug_msg.clone()
             };
             rows.push(Row::new(vec![
-                Cell::from(Span::styled("Debug", key_style)),
+                Cell::from(Span::styled(i18n.t("dash_debug"), key_style)),
                 Cell::from(Span::styled(safe_msg, Style::default().fg(Color::DarkGray))),
             ]));
         }

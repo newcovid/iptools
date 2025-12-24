@@ -20,8 +20,13 @@ futures = "0.3"
 chrono = "0.4"
 reqwest = { version = "0.12", features = ["json"] }
 ipnetwork = "0.20"
-# 新增：用于主机名反向解析 (getnameinfo wrapper)
 dns-lookup = "2.0"
+unicode-width = "0.1"
+rand = "0.8"
+
+# 非 Windows 平台使用 surge-ping (需要 Root)
+[target.'cfg(not(windows))'.dependencies]
+surge-ping = "0.8"
 
 # Windows 平台专用依赖
 [target.'cfg(windows)'.dependencies]

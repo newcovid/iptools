@@ -28,8 +28,14 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         CurrentTab::Scanner => {
             crate::modules::scanner::draw(f, chunks[1], app);
         }
-        _ => {
-            render_placeholder(f, chunks[1], app);
+        CurrentTab::Traffic => {
+            crate::modules::traffic::draw(f, chunks[1], app);
+        }
+        CurrentTab::Diagnostics => {
+            crate::modules::diagnostics::draw(f, chunks[1], app, app.diag_focused);
+        }
+        CurrentTab::Settings => {
+            crate::modules::settings::draw(f, chunks[1], app);
         }
     }
 
@@ -50,6 +56,12 @@ fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
         (CurrentTab::Settings, "tab_settings"),
     ];
 
+    let (active_fg, active_bg) = if app.diag_focused {
+        (Color::White, Color::DarkGray)
+    } else {
+        (theme::COLOR_PRIMARY, theme::COLOR_HIGHLIGHT_BG)
+    };
+
     let titles: Vec<Line> = tabs_list
         .iter()
         .map(|(tab_enum, i18n_key)| {
@@ -58,8 +70,8 @@ fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
                 Line::from(Span::styled(
                     text,
                     Style::default()
-                        .fg(theme::COLOR_PRIMARY)
-                        .bg(theme::COLOR_HIGHLIGHT_BG)
+                        .fg(active_fg)
+                        .bg(active_bg)
                         .add_modifier(Modifier::BOLD),
                 ))
             } else {
@@ -83,6 +95,7 @@ fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(tabs, area);
 }
 
+#[allow(dead_code)]
 fn render_placeholder(f: &mut Frame, area: Rect, app: &App) {
     let text = format!("\n\n  {} {:?}  ", app.t("label_loading"), app.current_tab);
     let p = Paragraph::new(text)

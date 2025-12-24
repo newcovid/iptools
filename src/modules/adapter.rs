@@ -1,4 +1,5 @@
 use crate::app::App;
+use crate::ui::theme; // 引入主题
 use crate::utils::i18n::I18n;
 use crate::utils::net::{self, InterfaceInfo};
 use crossterm::event::{KeyCode, KeyEvent};
@@ -10,7 +11,6 @@ use std::collections::HashMap;
 use std::time::Instant;
 use sysinfo::Networks;
 
-/// 流量数据快照
 struct TrafficStats {
     total_rx: u64,
     total_tx: u64,
@@ -139,7 +139,6 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
     let i18n = &app.i18n;
     let adapter_module = &mut app.adapter;
 
-    // --- 左侧列表 ---
     let items: Vec<ListItem> = adapter_module
         .interfaces
         .iter()
@@ -149,11 +148,10 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
             } else {
                 Color::DarkGray
             };
-            // 简单标记：[P]hysical / [V]irtual
             let prefix = if iface.is_physical { "[P] " } else { "[V] " };
 
             ListItem::new(Line::from(vec![
-                Span::styled(prefix, Style::default().fg(Color::Cyan)),
+                Span::styled(prefix, Style::default().fg(theme::COLOR_SECONDARY)), // Use Theme Cyan
                 Span::styled(iface.name.clone(), Style::default().fg(color)),
             ]))
         })
@@ -165,12 +163,11 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
                 .borders(Borders::ALL)
                 .title(i18n.t("adapter_list_title")),
         )
-        .highlight_style(Style::default().bg(Color::DarkGray))
+        .highlight_style(Style::default().bg(theme::COLOR_HIGHLIGHT_BG)) // Use Theme
         .highlight_symbol("> ");
 
     f.render_stateful_widget(list, chunks[0], &mut adapter_module.state);
 
-    // --- 右侧详情 (使用 Table) ---
     let block = Block::default()
         .borders(Borders::ALL)
         .title(i18n.t("adapter_detail_title"));
@@ -191,27 +188,22 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
     }
 }
 
-/// 生成规整的详情表格
 fn render_detail_table<'a>(
     i18n: &'a I18n,
     iface: &'a InterfaceInfo,
     stats: Option<&TrafficStats>,
 ) -> Table<'a> {
-    // 样式定义
-    let key_style = Style::default().fg(Color::Gray);
+    let key_style = Style::default().fg(theme::COLOR_SUBTEXT);
     let val_style = Style::default().fg(Color::White);
     let val_highlight = Style::default()
-        .fg(Color::Cyan)
+        .fg(theme::COLOR_SECONDARY)
         .add_modifier(Modifier::BOLD);
 
     let mut rows = Vec::new();
 
-    // 1. 基础信息行 (Name & Desc)
-    // 名称较长时，这里单独作为一行高亮显示可能更好，或者放入表格第一行
-    // 这里选择放入表格，作为 "Name" 字段
     rows.push(
         Row::new(vec![
-            Cell::from(Span::styled("Name / Desc", key_style)),
+            Cell::from(Span::styled(i18n.t("adapter_name_desc"), key_style)),
             Cell::from(vec![
                 Line::from(Span::styled(&iface.name, val_highlight)),
                 Line::from(Span::styled(
@@ -221,18 +213,18 @@ fn render_detail_table<'a>(
             ]),
         ])
         .height(2),
-    ); // 给描述留2行高度，防止过紧
+    );
 
-    // 2. 状态 & SSID
     let status_str = if iface.is_up {
         i18n.t("adapter_status_up")
     } else {
         i18n.t("adapter_status_down")
     };
+    // Use Theme Colors
     let status_color = if iface.is_up {
-        Color::Green
+        theme::COLOR_UP
     } else {
-        Color::Red
+        theme::COLOR_DOWN
     };
 
     let ssid_str = if let Some(ssid) = &iface.ssid {
@@ -256,7 +248,6 @@ fn render_detail_table<'a>(
         ])),
     ]));
 
-    // 3. 连接类型
     let conn_type = if iface.is_physical {
         i18n.t("adapter_conn_physical")
     } else {
@@ -267,7 +258,6 @@ fn render_detail_table<'a>(
         Cell::from(format!("{} [{}]", conn_type, iface.interface_type)),
     ]));
 
-    // 4. IP 分配方式
     let ip_type = if iface.dhcp_enabled {
         i18n.t("adapter_type_dhcp")
     } else {
@@ -278,20 +268,32 @@ fn render_detail_table<'a>(
         Cell::from(ip_type),
     ]));
 
-    // 5. MAC 地址
     rows.push(Row::new(vec![
         Cell::from(Span::styled(i18n.t("adapter_mac"), key_style)),
         Cell::from(iface.mac.as_str()),
     ]));
 
-    // 6. IPv4 (支持多行)
+    // 修复：利用 cidr 字段优化显示
     let ipv4_content = if iface.ipv4.is_empty() {
         vec![Line::from("-")]
     } else {
         iface
             .ipv4
             .iter()
-            .map(|ip| Line::from(format!("• {}", ip)))
+            .map(|ip| {
+                // 如果 cidr 存在且当前 ip 包含在 cidr 字符串中 (简单匹配)，则显示 cidr
+                // 否则显示 ip
+                let display_text = if let Some(cidr) = &iface.cidr {
+                    if cidr.starts_with(ip) {
+                        format!("• {}", cidr) // 显示 "• 192.168.1.100/24"
+                    } else {
+                        format!("• {}", ip)
+                    }
+                } else {
+                    format!("• {}", ip)
+                };
+                Line::from(display_text)
+            })
             .collect()
     };
     rows.push(
@@ -300,9 +302,8 @@ fn render_detail_table<'a>(
             Cell::from(ipv4_content),
         ])
         .height(iface.ipv4.len().max(1) as u16),
-    ); // 自动调整高度
+    );
 
-    // 7. IPv6
     let ipv6_content = if iface.ipv6.is_empty() {
         vec![Line::from("-")]
     } else {
@@ -320,18 +321,16 @@ fn render_detail_table<'a>(
         .height(iface.ipv6.len().max(1) as u16),
     );
 
-    // 8. 实时速率 (分割线后)
-    // 插入一个空行作为视觉分隔
     rows.push(Row::new(vec![Cell::from(""), Cell::from("")]).height(1));
 
     if let Some(s) = stats {
         rows.push(Row::new(vec![
-            Cell::from(Span::styled("Traffic Rate", key_style)),
+            Cell::from(Span::styled(i18n.t("adapter_traffic_rate"), key_style)),
             Cell::from(Line::from(vec![
                 Span::styled(
                     format!("↓ {:<10}", format_speed(s.rx_speed)),
-                    Style::default().fg(Color::Green),
-                ),
+                    Style::default().fg(theme::COLOR_UP),
+                ), // Green
                 Span::styled(
                     format!("↑ {:<10}", format_speed(s.tx_speed)),
                     Style::default().fg(Color::Yellow),
@@ -339,14 +338,14 @@ fn render_detail_table<'a>(
             ])),
         ]));
         rows.push(Row::new(vec![
-            Cell::from(Span::styled("Total Data", key_style)),
+            Cell::from(Span::styled(i18n.t("adapter_traffic_total"), key_style)),
             Cell::from(Line::from(vec![
                 Span::styled(
-                    format!("Rx: {:<10}", format_bytes(s.total_rx)),
+                    format!("{}: {:<10}", i18n.t("dash_rx"), format_bytes(s.total_rx)),
                     Style::default().fg(Color::White),
                 ),
                 Span::styled(
-                    format!("Tx: {:<10}", format_bytes(s.total_tx)),
+                    format!("{}: {:<10}", i18n.t("dash_tx"), format_bytes(s.total_tx)),
                     Style::default().fg(Color::White),
                 ),
             ])),
@@ -361,16 +360,9 @@ fn render_detail_table<'a>(
         ]));
     }
 
-    // 构建表格
-    Table::new(
-        rows,
-        [
-            Constraint::Length(16), // 标签列固定宽度
-            Constraint::Min(0),     // 内容列自适应
-        ],
-    )
-    .column_spacing(1)
-    .style(val_style)
+    Table::new(rows, [Constraint::Length(16), Constraint::Min(0)])
+        .column_spacing(1)
+        .style(val_style)
 }
 
 fn format_speed(bps: u64) -> String {

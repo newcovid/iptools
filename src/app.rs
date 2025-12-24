@@ -1,7 +1,10 @@
 use crate::config::Config;
 use crate::modules::adapter::AdapterModule;
 use crate::modules::dashboard::Dashboard;
+use crate::modules::diagnostics::DiagnosticsModule;
 use crate::modules::scanner::ScannerModule;
+use crate::modules::settings::SettingsModule;
+use crate::modules::traffic::TrafficModule;
 use crate::utils::i18n::I18n;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -42,13 +45,17 @@ impl CurrentTab {
 pub struct App {
     pub running: bool,
     pub current_tab: CurrentTab,
+    pub diag_focused: bool,
+
     pub config: Config,
     pub i18n: I18n,
 
-    // 业务模块
     pub dashboard: Dashboard,
     pub adapter: AdapterModule,
     pub scanner: ScannerModule,
+    pub settings: SettingsModule,
+    pub traffic: TrafficModule,
+    pub diagnostics: DiagnosticsModule,
 }
 
 impl App {
@@ -59,14 +66,17 @@ impl App {
         let mut app = Self {
             running: true,
             current_tab: CurrentTab::Dashboard,
+            diag_focused: false,
             dashboard: Dashboard::new(),
             adapter: AdapterModule::new(),
             scanner: ScannerModule::new(),
+            settings: SettingsModule::new(),
+            traffic: TrafficModule::new(),
+            diagnostics: DiagnosticsModule::new(),
             config,
             i18n,
         };
 
-        // 初始化请求
         app.dashboard.fetch_public_ip(app.i18n.get_lang().as_str());
 
         app
@@ -86,10 +96,13 @@ impl App {
     }
 
     pub fn on_tick(&mut self) {
+        self.diagnostics.update();
         match self.current_tab {
             CurrentTab::Dashboard => self.dashboard.update(),
             CurrentTab::Adapter => self.adapter.update(),
             CurrentTab::Scanner => self.scanner.update(),
+            CurrentTab::Traffic => self.traffic.update(),
+            CurrentTab::Diagnostics => {}
             _ => {}
         }
     }
@@ -102,16 +115,39 @@ impl App {
                 self.running = false;
                 return;
             }
+            KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.toggle_language();
+                return;
+            }
+            _ => {}
+        }
+
+        if self.current_tab == CurrentTab::Diagnostics {
+            if self.diag_focused {
+                if key.code == KeyCode::Esc {
+                    self.diag_focused = false;
+                    return;
+                }
+                self.diagnostics.on_key(key);
+                return;
+            } else {
+                // 修复：使用 || 而不是 |
+                if key.code == KeyCode::Enter || key.code == KeyCode::Char(' ') {
+                    self.diag_focused = true;
+                    return;
+                }
+            }
+        }
+
+        match key.code {
             KeyCode::Tab => {
                 self.current_tab = self.current_tab.next();
+                self.diag_focused = false;
                 return;
             }
             KeyCode::BackTab => {
                 self.current_tab = self.current_tab.previous();
-                return;
-            }
-            KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.toggle_language();
+                self.diag_focused = false;
                 return;
             }
             _ => {}
@@ -121,10 +157,14 @@ impl App {
             CurrentTab::Dashboard => self.dashboard.on_key(key, self.i18n.get_lang().as_str()),
             CurrentTab::Adapter => self.adapter.on_key(key),
             CurrentTab::Scanner => {
-                // 传入配置中的扫描并发数
                 self.scanner.on_key(key, self.config.scan_concurrency);
             }
-            _ => {}
+            CurrentTab::Traffic => self.traffic.on_key(key),
+            CurrentTab::Settings => {
+                self.settings
+                    .on_key(key, &mut self.config, &mut self.i18n, &mut self.dashboard);
+            }
+            CurrentTab::Diagnostics => {}
         }
     }
 
