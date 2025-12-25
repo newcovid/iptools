@@ -63,17 +63,30 @@ impl TrafficModule {
 
         self.display_items.clear();
 
+        // 定义过滤关键词列表
+        // 包含这些词的接口通常是：回环、虚拟隧道、驱动钩子(Filter Drivers)或重复映射
+        let ignore_keywords = [
+            "loopback",      // 本地回环
+            "pseudo",        // 伪接口
+            "isatap",        // IPv6 隧道
+            "teredo",        // IPv6 隧道
+            "npcap",         // 抓包驱动
+            "packet driver", // 抓包驱动
+            "genicam",       // 工业相机 Ethernet 驱动钩子
+            "tpacket",       // TPacket 驱动钩子
+            "driver-",       // 通用驱动实例后缀，如 Driver-0000
+            "lltdio",        // 链路层拓扑发现
+            "rspndr",        // 链路层拓扑发现响应器
+            "virtual box",   // VirtualBox 虚拟网卡 (可选，视需求而定，暂不过滤)
+            "vmware",        // VMware 虚拟网卡 (可选，视需求而定，暂不过滤)
+        ];
+
         for (name, data) in &self.networks {
             // 1. 增强过滤逻辑：
             let name_lower = name.to_lowercase();
-            if name_lower.contains("loopback") 
-                || name_lower.contains("pseudo") 
-                || name_lower.contains("isatap")
-                || name_lower.contains("teredo")
-                // 过滤 Npcap 相关的虚拟钩子接口
-                || name_lower.contains("npcap")
-                || name_lower.contains("packet driver")
-            {
+
+            // 如果名称包含任何黑名单关键词，则跳过
+            if ignore_keywords.iter().any(|k| name_lower.contains(k)) {
                 continue;
             }
 
@@ -86,6 +99,7 @@ impl TrafficModule {
 
             if let Some(prev) = self.history.get_mut(name) {
                 let duration = now.duration_since(prev.last_update).as_secs_f64();
+                // 只有当时间间隔足够长时才更新速率，避免除零或波动过大
                 if duration > 0.1 {
                     rx_speed = ((current_rx - prev.total_rx) as f64 / duration) as u64;
                     tx_speed = ((current_tx - prev.total_tx) as f64 / duration) as u64;
@@ -117,7 +131,7 @@ impl TrafficModule {
             let session_rx = current_rx.saturating_sub(init_rx);
             let session_tx = current_tx.saturating_sub(init_tx);
 
-            // 4. 不再截断名称，直接保存完整名称
+            // 4. 保存完整名称
             self.display_items.push(DisplayItem {
                 name: name.clone(),
                 rx_speed,
@@ -129,7 +143,7 @@ impl TrafficModule {
             });
         }
 
-        // 5. 排序
+        // 5. 排序：优先按下载速率降序，其次按名称
         self.display_items.sort_by(|a, b| {
             b.rx_speed
                 .cmp(&a.rx_speed)
