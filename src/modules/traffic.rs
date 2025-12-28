@@ -72,7 +72,7 @@ impl TrafficModule {
             "teredo",        // IPv6 隧道
             "npcap",         // 抓包驱动
             "packet driver", // 抓包驱动
-            "genicam",       // 工业相机 Ethernet 驱动钩子
+            "genicam",       // 工业相机 Ethern et 驱动钩子
             "tpacket",       // TPacket 驱动钩子
             "driver-",       // 通用驱动实例后缀，如 Driver-0000
             "lltdio",        // 链路层拓扑发现
