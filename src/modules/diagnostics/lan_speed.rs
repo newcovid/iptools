@@ -202,6 +202,21 @@ impl LanSpeedTool {
                 return;
             }
         } else {
+            // MRU 历史下拉 / 行尾灰字采纳 / Ctrl+R 开下拉，仅对对端字段（idx==1）启用。
+            let on_peer = idx == 1;
+            if self.mru.open || on_peer {
+                if crate::ui::mru::handle_mru_key(
+                    &mut self.config.peer,
+                    &mut self.mru,
+                    &self.history.borrow().targets,
+                    key,
+                    action,
+                    self.running, // 此分支已在 !running 下（方法开头 early-return）
+                ) {
+                    return;
+                }
+            }
+
             // idx 1 对端 IP（主机名字符），idx 2 端口（数字）；均带光标编辑。
             let too_long =
                 matches!(key.code, KeyCode::Char(_)) && self.field_mut(idx).len() >= 64;
@@ -260,6 +275,14 @@ impl LanSpeedTool {
             return;
         }
 
+        // 仅客户端模式且对端非空时记录到历史。
+        if matches!(self.mode, Mode::Client) {
+            let peer = self.config.peer.value();
+            if !peer.trim().is_empty() {
+                self.history.borrow_mut().targets.record(&peer);
+            }
+        }
+
         self.running = true;
         self.error_key = None;
         self.status_key = None;
@@ -299,6 +322,16 @@ impl LanSpeedTool {
     ) {
         self.draw_main(f, main_area, i18n, is_focused, active_focus);
         self.draw_config(f, config_area, i18n, is_focused, active_focus);
+
+        // MRU 历史下拉：仅在配置栏聚焦时有效；失焦则关闭，避免下拉悬留。
+        if is_focused && active_focus == FocusArea::Config {
+            if self.mru.open {
+                let entries: Vec<String> = self.history.borrow().targets.entries().to_vec();
+                crate::ui::mru::draw_mru_popup(f, config_area, &entries, self.mru.sel, i18n);
+            }
+        } else {
+            self.mru.open = false;
+        }
     }
 
     fn draw_main(
@@ -494,26 +527,55 @@ impl LanSpeedTool {
             Line::from(mode_spans),
         ]));
 
-        for (i, (label, input)) in [
-            (i18n.t("diag_lan_peer"), &self.config.peer),
-            (i18n.t("diag_lan_port"), &self.config.port),
-        ]
-        .into_iter()
-        .enumerate()
+        // idx==1 对端 IP：带 MRU 灰字补全，手动拼装。
         {
-            let idx = i + 1;
-            let is_sel = selected == Some(idx);
+            let is_sel = selected == Some(1);
+            let active = is_sel && is_active && !self.running;
+            let val_base = if is_sel && is_active {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            let marker = if is_sel { ">> " } else { "   " };
+            let mut spans = vec![Span::styled(marker.to_string(), val_base)];
+            spans.extend(crate::ui::mru::mru_ghost_spans(
+                &self.config.peer,
+                &self.history.borrow().targets,
+                active,
+                val_base,
+            ));
+            if active {
+                spans.push(Span::styled(
+                    format!("  ({})", i18n.t("diag_hint_input")),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+            let label_line = Line::from(Span::styled(
+                format!("{}:", i18n.t("diag_lan_peer")),
+                Style::default().fg(if is_sel { Color::Yellow } else { Color::Gray }),
+            ));
+            list_items.push(ListItem::new(vec![label_line, Line::from(spans)]));
+        }
+
+        // idx==2 端口：纯数字，走统一字段渲染。
+        {
+            let is_sel = selected == Some(2);
             let active = is_sel && is_active && !self.running;
             let hint = if active {
-                Some(if idx == 1 {
-                    i18n.t("diag_hint_input")
-                } else {
-                    i18n.t("diag_hint_digits")
-                })
+                Some(i18n.t("diag_hint_digits"))
             } else {
                 None
             };
-            list_items.push(config_field_item(&label, is_sel, is_active, input, active, hint));
+            list_items.push(config_field_item(
+                &i18n.t("diag_lan_port"),
+                is_sel,
+                is_active,
+                &self.config.port,
+                active,
+                hint,
+            ));
         }
 
         f.render_widget(List::new(list_items), layout[0]);
