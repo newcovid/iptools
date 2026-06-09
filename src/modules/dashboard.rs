@@ -1,17 +1,18 @@
 use crate::app::App;
+use crate::config::Endpoint;
 use crate::keymap::Action;
 use crate::ui::theme; // 引入主题
 use crate::utils::format::{format_bytes, format_speed};
 use crate::utils::i18n::I18n;
 use crate::utils::net::{self, InterfaceInfo};
+use crate::utils::pubip::{self, PublicInfo};
 use chrono::Local;
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Cell, Row, Table},
 };
-use serde::Deserialize;
 use std::env;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use sysinfo::{Networks, System};
 use tokio::sync::mpsc;
 
@@ -23,21 +24,10 @@ struct DashTrafficStats {
     tx_speed: u64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-struct IpApiResponse {
-    #[serde(rename = "query")]
-    ip: String,
-    country: String,
-    #[serde(rename = "regionName")]
-    region: String,
-    city: String,
-    isp: String,
-}
-
 #[derive(Debug, Clone)]
 enum PublicInfoState {
     Loading,
-    Success(IpApiResponse),
+    Success(PublicInfo),
     Failed(String, String),
 }
 
@@ -50,8 +40,8 @@ pub struct Dashboard {
     traffic_stats: Option<DashTrafficStats>,
     public_info: PublicInfoState,
     proxy_setting: Option<String>,
-    rx: mpsc::Receiver<Result<IpApiResponse, (String, String)>>,
-    tx: mpsc::Sender<Result<IpApiResponse, (String, String)>>,
+    rx: mpsc::Receiver<Result<PublicInfo, (String, String)>>,
+    tx: mpsc::Sender<Result<PublicInfo, (String, String)>>,
 }
 
 impl Dashboard {
@@ -115,21 +105,23 @@ impl Dashboard {
         }
     }
 
-    pub fn fetch_public_ip(&mut self, lang_code: &str) {
+    /// 多端点 HTTPS 回退 + 尊重系统代理 + 8s 超时版本。
+    /// 按 `endpoints` 顺序尝试，首个成功即用；全部失败后回传最后一次错误。
+    pub fn fetch_public_ip_with(
+        &mut self,
+        endpoints: Vec<Endpoint>,
+        use_system_proxy: bool,
+    ) {
         self.public_info = PublicInfoState::Loading;
         let tx = self.tx.clone();
 
-        let api_lang = if lang_code.starts_with("zh") {
-            "zh-CN"
-        } else {
-            "en"
-        };
-        let url = format!("http://ip-api.com/json/?lang={}", api_lang);
-
         tokio::spawn(async move {
-            let client_builder = reqwest::Client::builder().no_proxy();
-
-            let client = match client_builder.build() {
+            let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(8));
+            if !use_system_proxy {
+                // 仅 power-user 强制直连时禁代理；默认尊重系统/环境代理。
+                builder = builder.no_proxy();
+            }
+            let client = match builder.build() {
                 Ok(c) => c,
                 Err(e) => {
                     let _ = tx
@@ -139,16 +131,41 @@ impl Dashboard {
                 }
             };
 
-            let result = match client.get(&url).send().await {
-                Ok(resp) => match resp.json::<IpApiResponse>().await {
-                    Ok(info) => Ok(info),
-                    Err(e) => Err(("dash_err_parse".to_string(), e.to_string())),
-                },
-                Err(e) => Err(("dash_err_req".to_string(), e.to_string())),
-            };
-
-            let _ = tx.send(result).await;
+            let mut last_err = ("dash_err_req".to_string(), String::new());
+            for ep in &endpoints {
+                match client.get(&ep.url).send().await {
+                    Ok(resp) => {
+                        let status = resp.status();
+                        match resp.text().await {
+                            Ok(body) => {
+                                if let Some(info) = pubip::parse(&ep.kind, &body) {
+                                    let _ = tx.send(Ok(info)).await;
+                                    return;
+                                } else {
+                                    last_err = (
+                                        "dash_err_parse".to_string(),
+                                        format!("{} ({})", ep.url, status),
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                last_err = ("dash_err_parse".to_string(), e.to_string());
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        last_err = ("dash_err_req".to_string(), e.to_string());
+                    }
+                }
+            }
+            let _ = tx.send(Err(last_err)).await;
         });
+    }
+
+    /// 兼容旧调用点：用默认端点链（ip.sb→ipinfo，尊重代理）抓取。
+    pub fn fetch_public_ip(&mut self, _lang_code: &str) {
+        let cfg = crate::config::PublicIpConfig::default();
+        self.fetch_public_ip_with(cfg.endpoints, cfg.use_system_proxy);
     }
 
     fn refresh_active_interface(&mut self) {

@@ -145,7 +145,9 @@ impl App {
         app.apply_session();
         app.last_session = app.snapshot_session();
 
-        app.dashboard.fetch_public_ip(app.i18n.get_lang().as_str());
+        let eps = app.config.public_ip.endpoints.clone();
+        let usp = app.config.public_ip.use_system_proxy;
+        app.dashboard.fetch_public_ip_with(eps, usp);
 
         app
     }
@@ -211,7 +213,10 @@ impl App {
         self.config.language = new_lang;
         self.config.save();
 
-        self.dashboard.fetch_public_ip(new_lang.as_str());
+        self.dashboard.fetch_public_ip_with(
+            self.config.public_ip.endpoints.clone(),
+            self.config.public_ip.use_system_proxy,
+        );
     }
 
     pub fn on_tick(&mut self) {
