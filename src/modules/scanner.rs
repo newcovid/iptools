@@ -97,7 +97,9 @@ impl ScannerModule {
             Some(Action::Edit) => {
                 self.input_mode = true;
             }
-            Some(Action::Confirm) => {
+            // Confirm(回车) 与 Toggle(空格) 都可开始扫描——扫描页无其它「切换」语义，
+            // 二者混用不引起歧义，符合「无冲突时主操作可多键触发」的交互约定。
+            Some(Action::Confirm) | Some(Action::Toggle) => {
                 if self.status != ScanStatus::Scanning {
                     self.start_scan(concurrency);
                 }

@@ -98,7 +98,7 @@
     "scan_title": " 局域网设备扫描 ",
     "scan_range_label": "扫描范围 (CIDR):",
     "scan_count_label": "预计数量:",
-    "scan_btn_start": "[回车] 开始",
+    "scan_btn_start": "[回车/空格] 开始",
     "scan_btn_stop": "[S] 停止",
     "scan_btn_edit": "[E] 编辑范围",
     "scan_status_idle": "空闲",

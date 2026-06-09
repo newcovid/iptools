@@ -1,8 +1,9 @@
 //! 公网下载测速工具。
 //!
-//! 通过流式下载 Cloudflare 测速端点并测量吞吐量，最长 15 秒或下载满 100MB 即止。
-//! 仅用 reqwest（已在依赖中），跨平台。计时与瞬时速率在异步任务内计算后回传，
-//! UI 只负责展示与维护速率曲线。
+//! 通过流式下载中国科学技术大学（USTC）测速端点并测量吞吐量，最长 15 秒或下载满
+//! 100MB 即止。该端点基于开源 LibreSpeed，`ckSize` 参数（单位 MB）指定回传的测试
+//! 数据量，国内教育网/公网均可靠。仅用 reqwest（已在依赖中），跨平台。计时与瞬时
+//! 速率在异步任务内计算后回传，UI 只负责展示与维护速率曲线。
 
 use super::FocusArea;
 use crate::keymap::Action;
@@ -18,8 +19,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::mpsc;
 
-const TEST_URL: &str = "https://speed.cloudflare.com/__down?bytes=104857600"; // 100 MB
-const TEST_SERVER: &str = "speed.cloudflare.com";
+// 中国科学技术大学（中科大）LibreSpeed 测速后端，ckSize 单位为 MB。
+const TEST_URL: &str = "https://test.ustc.edu.cn/backend/garbage.php?ckSize=100"; // 100 MB
+const TEST_SERVER: &str = "test.ustc.edu.cn";
 const MAX_DURATION_MS: u64 = 15_000;
 
 #[derive(Debug)]

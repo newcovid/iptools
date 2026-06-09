@@ -154,9 +154,27 @@ fn relevant_mods(m: KeyModifiers) -> KeyModifiers {
     m & (KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT)
 }
 
+/// 把 Shift+Tab 的多种编码统一成一个规范形式：`BackTab`（去掉 Shift）。
+///
+/// Shift+Tab 在不同终端 / 持久化往返后可能呈现为三种形态——`BackTab`(无修饰)、
+/// `BackTab`+Shift、或 `Tab`+Shift。尤其 `to_label()` 把 `BackTab` 写成 "Shift+Tab"，
+/// 重新解析时会变回 `Tab`+Shift，于是存盘再读后 `BackTab` 绑定被悄悄丢失，导致
+/// 「上一标签页」在 Windows（crossterm 上报 `BackTab`）失效。规范化后三种形态等价，
+/// 无论怎样存取都能匹配。
+fn normalize(code: KeyCode, mods: KeyModifiers) -> (KeyCode, KeyModifiers) {
+    let mods = relevant_mods(mods);
+    match code {
+        KeyCode::Tab if mods.contains(KeyModifiers::SHIFT) => {
+            (KeyCode::BackTab, mods & !KeyModifiers::SHIFT)
+        }
+        KeyCode::BackTab => (KeyCode::BackTab, mods & !KeyModifiers::SHIFT),
+        _ => (code, mods),
+    }
+}
+
 impl KeyCombo {
     pub fn matches(&self, ev: &KeyEvent) -> bool {
-        self.code == ev.code && self.mods == relevant_mods(ev.modifiers)
+        normalize(self.code, self.mods) == normalize(ev.code, ev.modifiers)
     }
 
     /// 解析 "Ctrl+c" / "Shift+Tab" / "Up" / "Space" / "j" 等。大小写不敏感的修饰键。
@@ -415,6 +433,51 @@ mod tests {
             km.action_for(ev(KeyCode::Char('c'), KeyModifiers::CONTROL)),
             Some(Action::Quit)
         );
+    }
+
+    #[test]
+    fn shift_tab_resolves_prev_tab_in_all_encodings() {
+        let km = KeyMap::default();
+        // 终端可能以三种形态上报 Shift+Tab，均应解析为 PrevTab。
+        for (code, mods) in [
+            (KeyCode::BackTab, KeyModifiers::NONE),
+            (KeyCode::BackTab, KeyModifiers::SHIFT),
+            (KeyCode::Tab, KeyModifiers::SHIFT),
+        ] {
+            assert_eq!(
+                km.action_for(ev(code, mods)),
+                Some(Action::PrevTab),
+                "Shift+Tab 编码 {:?}+{:?} 应解析为 PrevTab",
+                code,
+                mods
+            );
+        }
+        // 裸 Tab 仍是 NextTab，不被规范化波及。
+        assert_eq!(
+            km.action_for(ev(KeyCode::Tab, KeyModifiers::NONE)),
+            Some(Action::NextTab)
+        );
+    }
+
+    #[test]
+    fn prev_tab_survives_persist_roundtrip() {
+        // 回归：存盘再读后 BackTab 绑定一度被 to_label/parse 悄悄丢成 Tab+Shift，
+        // 使 Windows 上「上一标签页」失效。经规范化后任何编码都应仍命中 PrevTab。
+        let persisted = KeyMap::default().to_persisted();
+        let km = KeyMap::from_persisted(&persisted);
+        for (code, mods) in [
+            (KeyCode::BackTab, KeyModifiers::NONE),
+            (KeyCode::BackTab, KeyModifiers::SHIFT),
+            (KeyCode::Tab, KeyModifiers::SHIFT),
+        ] {
+            assert_eq!(
+                km.action_for(ev(code, mods)),
+                Some(Action::PrevTab),
+                "持久化往返后 {:?}+{:?} 仍应为 PrevTab",
+                code,
+                mods
+            );
+        }
     }
 
     #[test]
