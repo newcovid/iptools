@@ -154,6 +154,28 @@ impl TextInput {
         }
         spans
     }
+
+    /// 渲染并在行尾追加灰字「幽灵补全」。
+    /// 仅当 `active` 且光标在末尾且 `ghost` 非空时追加；否则退化为 `render_spans`。
+    /// `ghost` 为「已输入串之后的剩余部分」（调用方用 History::suggest 去前缀算出）。
+    pub fn render_spans_with_ghost(
+        &self,
+        active: bool,
+        base: Style,
+        ghost: Option<&str>,
+    ) -> Vec<Span<'static>> {
+        if let Some(g) = ghost {
+            if active && self.cursor == self.chars.len() && !g.is_empty() {
+                let typed: String = self.chars.iter().collect();
+                let ghost_style = Style::default().fg(Color::DarkGray);
+                return vec![
+                    Span::styled(typed, base),
+                    Span::styled(g.to_string(), ghost_style),
+                ];
+            }
+        }
+        self.render_spans(active, base)
+    }
 }
 
 /// 常用字符过滤器：IP / 掩码 / 网关 / DNS（数字与点）。
@@ -236,5 +258,19 @@ mod tests {
         // 越界点击夹到末尾
         t.set_cursor_col(999);
         assert_eq!(t.cursor(), 7);
+    }
+
+    #[test]
+    fn ghost_appended_only_at_end_active() {
+        let t = TextInput::with_text("192");
+        let base = Style::default();
+        // 光标在末尾 + active + 有 ghost → 末尾追加灰字 span，内容为剩余串。
+        let spans = t.render_spans_with_ghost(true, base, Some(".168.1.1"));
+        let last = spans.last().unwrap();
+        assert_eq!(last.content, ".168.1.1");
+        // 无 ghost → 等价 render_spans。
+        let spans2 = t.render_spans_with_ghost(true, base, None);
+        let spans_plain = t.render_spans(true, base);
+        assert_eq!(spans2.len(), spans_plain.len());
     }
 }
