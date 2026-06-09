@@ -7,6 +7,7 @@ use super::FocusArea;
 use crate::keymap::Action;
 use crate::ui::theme;
 use crate::utils::i18n::I18n;
+use crate::utils::textinput::{filter_host, TextInput};
 use crossterm::event::{KeyCode, KeyEvent};
 use futures::{stream, StreamExt};
 use ratatui::{
@@ -31,20 +32,20 @@ enum PortScanEvent {
 
 #[derive(Debug, Clone)]
 struct PortScanConfig {
-    /// 这些字段以字符串保存以便就地编辑，启动时再解析校验。
-    target: String,
-    start_port: String,
-    end_port: String,
-    timeout_ms: String,
+    /// 这些字段以带光标的文本输入保存以便就地编辑，启动时再解析校验。
+    target: TextInput,
+    start_port: TextInput,
+    end_port: TextInput,
+    timeout_ms: TextInput,
 }
 
 impl Default for PortScanConfig {
     fn default() -> Self {
         Self {
-            target: "127.0.0.1".to_string(),
-            start_port: "1".to_string(),
-            end_port: "1024".to_string(),
-            timeout_ms: "300".to_string(),
+            target: TextInput::with_text("127.0.0.1"),
+            start_port: TextInput::with_text("1"),
+            end_port: TextInput::with_text("1024"),
+            timeout_ms: TextInput::with_text("300"),
         }
     }
 }
@@ -134,30 +135,20 @@ impl PortScanTool {
     }
 
     fn handle_config_key(&mut self, key: KeyEvent, action: Option<Action>) {
-        // 运行中不允许改配置
+        // 运行中不允许改配置。带光标编辑：目标接受主机名字符，端口/超时仅数字。
         if !self.running {
             if let Some(idx) = self.config_state.selected() {
-                match key.code {
-                    KeyCode::Backspace => {
-                        self.field_mut(idx).pop();
+                let too_long =
+                    matches!(key.code, KeyCode::Char(_)) && self.field_mut(idx).len() >= 64;
+                if !too_long {
+                    let consumed = if idx == 0 {
+                        self.field_mut(idx).handle_key(key.code, filter_host)
+                    } else {
+                        self.field_mut(idx).handle_key(key.code, |c| c.is_ascii_digit())
+                    };
+                    if consumed {
                         return;
                     }
-                    KeyCode::Char(c) => {
-                        // 目标字段接受常规可见字符；端口/超时仅接受数字
-                        let accept = if idx == 0 {
-                            c.is_ascii() && !c.is_control() && c != ' '
-                        } else {
-                            c.is_ascii_digit()
-                        };
-                        if accept {
-                            let f = self.field_mut(idx);
-                            if f.len() < 64 {
-                                f.push(c);
-                            }
-                            return;
-                        }
-                    }
-                    _ => {}
                 }
             }
         }
@@ -169,7 +160,7 @@ impl PortScanTool {
         }
     }
 
-    fn field_mut(&mut self, idx: usize) -> &mut String {
+    fn field_mut(&mut self, idx: usize) -> &mut TextInput {
         match idx {
             0 => &mut self.config.target,
             1 => &mut self.config.start_port,
@@ -219,11 +210,17 @@ impl PortScanTool {
 
     fn start(&mut self, concurrency: usize) {
         // 解析与校验配置
-        let start: u32 = self.config.start_port.parse().unwrap_or(0);
-        let end: u32 = self.config.end_port.parse().unwrap_or(0);
-        let timeout_ms: u64 = self.config.timeout_ms.parse().unwrap_or(300).clamp(20, 10000);
+        let start: u32 = self.config.start_port.value().parse().unwrap_or(0);
+        let end: u32 = self.config.end_port.value().parse().unwrap_or(0);
+        let timeout_ms: u64 = self
+            .config
+            .timeout_ms
+            .value()
+            .parse()
+            .unwrap_or(300)
+            .clamp(20, 10000);
 
-        if self.config.target.trim().is_empty()
+        if self.config.target.value().trim().is_empty()
             || start == 0
             || end == 0
             || start > 65535
@@ -245,7 +242,7 @@ impl PortScanTool {
         let abort = self.abort_flag.clone();
         let tx = self.tx.clone();
         let scanned = self.scanned.clone();
-        let target = self.config.target.trim().to_string();
+        let target = self.config.target.value().trim().to_string();
         let concurrency = concurrency.clamp(1, 1024);
 
         tokio::spawn(async move {
@@ -458,28 +455,55 @@ impl PortScanTool {
         let inner = block.inner(area);
         f.render_widget(block, area);
 
-        let items = [
-            (i18n.t("diag_port_target"), self.config.target.clone()),
-            (i18n.t("diag_port_start"), self.config.start_port.clone()),
-            (i18n.t("diag_port_end"), self.config.end_port.clone()),
-            (i18n.t("diag_port_timeout"), self.config.timeout_ms.clone()),
-        ];
-        let list_items: Vec<ListItem> = items
-            .iter()
-            .map(|(k, v)| ListItem::new(format!("{}:\n  > {}", k, v)))
-            .collect();
-
         let is_active = is_focused && active_focus == FocusArea::Config;
-        let list = List::new(list_items)
-            .highlight_style(if is_active {
+        let labels = [
+            i18n.t("diag_port_target"),
+            i18n.t("diag_port_start"),
+            i18n.t("diag_port_end"),
+            i18n.t("diag_port_timeout"),
+        ];
+        let selected = self.config_state.selected();
+
+        let mut list_items: Vec<ListItem> = Vec::with_capacity(4);
+        for i in 0..4 {
+            let is_sel = selected == Some(i);
+            let label_line = Line::from(Span::styled(
+                format!("{}:", labels[i]),
+                Style::default().fg(if is_sel { Color::Yellow } else { Color::Gray }),
+            ));
+            let val_base = if is_sel && is_active {
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default()
-            })
-            .highlight_symbol(">> ");
-        f.render_stateful_widget(list, inner, &mut self.config_state);
+                Style::default().fg(Color::White)
+            };
+            let marker = if is_sel { ">> " } else { "   " };
+            let input = match i {
+                0 => &self.config.target,
+                1 => &self.config.start_port,
+                2 => &self.config.end_port,
+                _ => &self.config.timeout_ms,
+            };
+            let active = is_sel && is_active && !self.running;
+            let mut value_spans = vec![Span::styled(marker.to_string(), val_base)];
+            value_spans.extend(input.render_spans(active, val_base));
+            // 全部为「直接输入」字段；目标可含主机名，其余仅数字——提示分别标注。
+            if is_sel && is_active && !self.running {
+                let hint = if i == 0 {
+                    i18n.t("diag_hint_input")
+                } else {
+                    i18n.t("diag_hint_digits")
+                };
+                value_spans.push(Span::styled(
+                    format!("  ({})", hint),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+            list_items.push(ListItem::new(vec![label_line, Line::from(value_spans)]));
+        }
+
+        f.render_widget(List::new(list_items), inner);
     }
 }
 

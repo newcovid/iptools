@@ -1,6 +1,7 @@
 use crate::app::App;
 use crate::keymap::Action;
 use crate::ui::theme;
+use crate::utils::textinput::{filter_cidr, TextInput};
 use crate::utils::{net, oui};
 use crossterm::event::{KeyCode, KeyEvent};
 use futures::{stream, StreamExt};
@@ -13,7 +14,6 @@ use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
-use unicode_width::UnicodeWidthStr;
 
 #[derive(Debug, Clone)]
 pub struct ScanResult {
@@ -30,7 +30,7 @@ enum ScanStatus {
 }
 
 pub struct ScannerModule {
-    cidr_input: String,
+    cidr_input: TextInput,
     input_mode: bool,
     results: Vec<ScanResult>,
     status: ScanStatus,
@@ -64,7 +64,7 @@ impl ScannerModule {
         }
 
         Self {
-            cidr_input: default_cidr,
+            cidr_input: TextInput::with_text(&default_cidr),
             input_mode: false,
             results: Vec::new(),
             status: ScanStatus::Idle,
@@ -78,21 +78,16 @@ impl ScannerModule {
     }
 
     pub fn on_key(&mut self, key: KeyEvent, action: Option<Action>, concurrency: usize) {
-        // 编辑 CIDR 时需要原始按键做文本输入，不走语义动作
+        // 编辑 CIDR 时需要原始按键做文本输入，不走语义动作。
+        // 带光标：左右移动、Home/End、中间插入删除；Enter/Esc 退出编辑。
         if self.input_mode {
             match key.code {
                 KeyCode::Enter | KeyCode::Esc => {
                     self.input_mode = false;
                 }
-                KeyCode::Backspace => {
-                    self.cidr_input.pop();
+                _ => {
+                    self.cidr_input.handle_key(key.code, filter_cidr);
                 }
-                KeyCode::Char(c) => {
-                    if c.is_ascii_digit() || c == '.' || c == '/' {
-                        self.cidr_input.push(c);
-                    }
-                }
-                _ => {}
             }
             return;
         }
@@ -129,9 +124,9 @@ impl ScannerModule {
         *self.abort_flag.lock().unwrap() = false;
         let abort_flag = self.abort_flag.clone();
         let tx = self.tx.clone();
-        let cidr_str = self.cidr_input.clone();
+        let cidr_str = self.cidr_input.value();
 
-        if let Ok(network) = self.cidr_input.parse::<Ipv4Network>() {
+        if let Ok(network) = cidr_str.parse::<Ipv4Network>() {
             let count = if network.prefix() < 31 {
                 network.size().saturating_sub(2)
             } else {
@@ -264,7 +259,7 @@ impl ScannerModule {
     }
 
     fn calculate_ip_count(&self) -> String {
-        if let Ok(network) = self.cidr_input.parse::<Ipv4Network>() {
+        if let Ok(network) = self.cidr_input.value().parse::<Ipv4Network>() {
             let count = if network.prefix() < 31 {
                 network.size().saturating_sub(2)
             } else {
@@ -291,7 +286,8 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
     let scanner = &mut app.scanner;
 
     // --- 1. 顶部控制栏 ---
-    let input_style = if scanner.input_mode {
+    // 编辑态用黄色，并在 CIDR 文本里内联显示光标块（支持中间编辑）。
+    let base = if scanner.input_mode {
         Style::default().fg(Color::Yellow)
     } else {
         Style::default().fg(Color::White)
@@ -305,38 +301,31 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
 
     let count_text = scanner.calculate_ip_count();
 
-    let control_text = format!(
-        " {} {}   {} {}   [{}]   {} / {} / {}",
-        i18n.t("scan_range_label"),
-        scanner.cidr_input,
-        i18n.t("scan_count_label"),
-        count_text,
-        status_text,
-        i18n.t("scan_btn_edit"),
-        i18n.t("scan_btn_start"),
-        i18n.t("scan_btn_stop")
+    let mut spans: Vec<Span> = vec![Span::styled(
+        format!(" {} ", i18n.t("scan_range_label")),
+        base,
+    )];
+    spans.extend(scanner.cidr_input.render_spans(scanner.input_mode, base));
+    spans.push(Span::styled(
+        format!(
+            "   {} {}   [{}]   {} / {} / {}",
+            i18n.t("scan_count_label"),
+            count_text,
+            status_text,
+            i18n.t("scan_btn_edit"),
+            i18n.t("scan_btn_start"),
+            i18n.t("scan_btn_stop"),
+        ),
+        base,
+    ));
+
+    let control_block = Paragraph::new(Line::from(spans)).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(i18n.t("scan_title")),
     );
 
-    let control_block = Paragraph::new(control_text)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(i18n.t("scan_title")),
-        )
-        .style(input_style);
-
     f.render_widget(control_block, chunks[0]);
-
-    if scanner.input_mode {
-        let label_str = i18n.t("scan_range_label");
-        let prefix_width = label_str.width();
-        let x_offset = 1 + 1 + prefix_width + 1 + scanner.cidr_input.width();
-
-        f.set_cursor_position(Position::new(
-            chunks[0].x + x_offset as u16,
-            chunks[0].y + 1,
-        ));
-    }
 
     // --- 2. 结果列表 ---
 

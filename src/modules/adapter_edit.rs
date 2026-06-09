@@ -9,6 +9,7 @@ use crate::ui::theme;
 use crate::utils::i18n::I18n;
 use crate::utils::ipconfig;
 use crate::utils::net::InterfaceInfo;
+use crate::utils::textinput::{filter_ipv4, TextInput};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     prelude::*,
@@ -34,11 +35,11 @@ pub struct EditForm {
     guid: String,
     adapter_name: String,
     use_dhcp: bool,
-    ip: String,
-    mask: String,
-    gateway: String,
-    dns1: String,
-    dns2: String,
+    ip: TextInput,
+    mask: TextInput,
+    gateway: TextInput,
+    dns1: TextInput,
+    dns2: TextInput,
 
     field: usize,
     confirming: bool,
@@ -64,11 +65,11 @@ impl EditForm {
             guid: iface.guid.clone(),
             adapter_name: iface.name.clone(),
             use_dhcp: iface.dhcp_enabled,
-            ip,
-            mask,
-            gateway: String::new(),
-            dns1: String::new(),
-            dns2: String::new(),
+            ip: TextInput::with_text(&ip),
+            mask: TextInput::with_text(&mask),
+            gateway: TextInput::new(),
+            dns1: TextInput::new(),
+            dns2: TextInput::new(),
             field: 0,
             confirming: false,
             applying: false,
@@ -133,18 +134,12 @@ impl EditForm {
                 self.use_dhcp = !self.use_dhcp;
             }
         } else if !self.use_dhcp {
-            // 地址字段文本编辑（仅静态模式）
-            match key.code {
-                KeyCode::Backspace => {
-                    self.field_mut().pop();
-                }
-                KeyCode::Char(c) if c.is_ascii_digit() || c == '.' => {
-                    let f = self.field_mut();
-                    if f.len() < 15 {
-                        f.push(c);
-                    }
-                }
-                _ => {}
+            // 地址字段文本编辑（仅静态模式）：带光标，支持中间插入/删除、
+            // 左右移动、Home/End。最长 15 字符（IPv4 文本上限）。
+            let at_cap =
+                self.field_mut().len() >= 15 && matches!(key.code, KeyCode::Char(_));
+            if !at_cap && self.field_mut().handle_key(key.code, filter_ipv4) {
+                return EditOutcome::Stay;
             }
         }
 
@@ -162,8 +157,13 @@ impl EditForm {
         EditOutcome::Stay
     }
 
-    fn field_mut(&mut self) -> &mut String {
-        match self.field {
+    /// 当前选中字段对应的文本输入（仅对 1..=5 有效；字段 0 是模式开关）。
+    fn field_mut(&mut self) -> &mut TextInput {
+        self.input_mut(self.field)
+    }
+
+    fn input_mut(&mut self, idx: usize) -> &mut TextInput {
+        match idx {
             1 => &mut self.ip,
             2 => &mut self.mask,
             3 => &mut self.gateway,
@@ -172,22 +172,32 @@ impl EditForm {
         }
     }
 
+    fn input(&self, idx: usize) -> &TextInput {
+        match idx {
+            1 => &self.ip,
+            2 => &self.mask,
+            3 => &self.gateway,
+            4 => &self.dns1,
+            _ => &self.dns2,
+        }
+    }
+
     /// 返回校验错误对应的 i18n 键。
     fn validate(&self) -> Result<(), &'static str> {
         if self.use_dhcp {
             return Ok(());
         }
-        if !is_ipv4(&self.ip) {
+        if !is_ipv4(&self.ip.value()) {
             return Err("adapter_err_ip");
         }
-        if !is_valid_mask(&self.mask) {
+        if !is_valid_mask(&self.mask.value()) {
             return Err("adapter_err_mask");
         }
-        if !self.gateway.is_empty() && !is_ipv4(&self.gateway) {
+        if !self.gateway.is_empty() && !is_ipv4(&self.gateway.value()) {
             return Err("adapter_err_gw");
         }
-        if (!self.dns1.is_empty() && !is_ipv4(&self.dns1))
-            || (!self.dns2.is_empty() && !is_ipv4(&self.dns2))
+        if (!self.dns1.is_empty() && !is_ipv4(&self.dns1.value()))
+            || (!self.dns2.is_empty() && !is_ipv4(&self.dns2.value()))
         {
             return Err("adapter_err_dns");
         }
@@ -202,19 +212,19 @@ impl EditForm {
         let tx = self.tx.clone();
         let guid = self.guid.clone();
         let use_dhcp = self.use_dhcp;
-        let ip = self.ip.clone();
-        let mask = self.mask.clone();
+        let ip = self.ip.value();
+        let mask = self.mask.value();
         let gateway = if self.gateway.is_empty() {
             None
         } else {
-            Some(self.gateway.clone())
+            Some(self.gateway.value())
         };
         let mut dns = Vec::new();
         if !self.dns1.is_empty() {
-            dns.push(self.dns1.clone());
+            dns.push(self.dns1.value());
         }
         if !self.dns2.is_empty() {
-            dns.push(self.dns2.clone());
+            dns.push(self.dns2.value());
         }
 
         tokio::spawn(async move {
@@ -264,47 +274,54 @@ impl EditForm {
         } else {
             i18n.t("adapter_type_static")
         };
-        let rows: [(String, String, bool); FIELD_COUNT] = [
-            (i18n.t("adapter_edit_mode"), mode_val, true),
-            (i18n.t("adapter_field_ip"), self.ip.clone(), !self.use_dhcp),
-            (i18n.t("adapter_field_mask"), self.mask.clone(), !self.use_dhcp),
-            (i18n.t("adapter_field_gw"), self.gateway.clone(), !self.use_dhcp),
-            (i18n.t("adapter_field_dns1"), self.dns1.clone(), !self.use_dhcp),
-            (i18n.t("adapter_field_dns2"), self.dns2.clone(), !self.use_dhcp),
+        let labels = [
+            i18n.t("adapter_edit_mode"),
+            i18n.t("adapter_field_ip"),
+            i18n.t("adapter_field_mask"),
+            i18n.t("adapter_field_gw"),
+            i18n.t("adapter_field_dns1"),
+            i18n.t("adapter_field_dns2"),
         ];
 
-        let items: Vec<ListItem> = rows
-            .iter()
-            .enumerate()
-            .map(|(i, (label, value, enabled))| {
-                let selected = i == self.field;
-                let marker = if selected { "> " } else { "  " };
-                let val_style = if !enabled {
-                    dimmed
-                } else if selected {
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD)
+        let mut items: Vec<ListItem> = Vec::with_capacity(FIELD_COUNT);
+        for i in 0..FIELD_COUNT {
+            let selected = i == self.field;
+            // 模式字段恒可编辑；地址字段仅静态模式可编辑。
+            let enabled = i == 0 || !self.use_dhcp;
+            let marker = if selected { "> " } else { "  " };
+            let label_span = Span::styled(
+                format!("{}{:<14}", marker, labels[i]),
+                if selected {
+                    Style::default().fg(Color::Yellow)
                 } else {
-                    normal
-                };
-                let line = Line::from(vec![
-                    Span::styled(
-                        format!("{}{:<14}", marker, label),
-                        if selected {
-                            Style::default().fg(Color::Yellow)
-                        } else {
-                            Style::default().fg(Color::Gray)
-                        },
-                    ),
-                    Span::styled(
-                        if value.is_empty() { "-".to_string() } else { value.clone() },
-                        val_style,
-                    ),
-                ]);
-                ListItem::new(line)
-            })
-            .collect();
+                    Style::default().fg(Color::Gray)
+                },
+            );
+            let val_base = if !enabled {
+                dimmed
+            } else if selected {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                normal
+            };
+
+            let mut spans = vec![label_span];
+            if i == 0 {
+                spans.push(Span::styled(mode_val.clone(), val_base));
+            } else {
+                // 选中且可编辑时显示光标块，便于在中间插入/删除。
+                let active = selected && enabled;
+                let input = self.input(i);
+                if input.is_empty() && !active {
+                    spans.push(Span::styled("-".to_string(), dimmed));
+                } else {
+                    spans.extend(input.render_spans(active, val_base));
+                }
+            }
+            items.push(ListItem::new(Line::from(spans)));
+        }
         f.render_widget(List::new(items), chunks[0]);
 
         // 错误 / 应用状态行

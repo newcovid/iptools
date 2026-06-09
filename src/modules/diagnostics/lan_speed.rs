@@ -4,12 +4,13 @@
 //! 另一端设为「客户端(发送)」填入对端 IP 后启动，即可测得链路吞吐。
 //! 纯 tokio TCP，跨平台。（对端自动发现留作后续增强，当前手动填 IP。）
 
-use super::FocusArea;
+use super::{config_field_item, FocusArea};
 use crate::keymap::Action;
 use crate::ui::theme;
 use crate::utils::format::{format_bytes, format_speed_dual};
 use crate::utils::i18n::I18n;
 use crate::utils::net;
+use crate::utils::textinput::{filter_host, TextInput};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     prelude::*,
@@ -47,15 +48,15 @@ enum LanEvent {
 
 #[derive(Debug, Clone)]
 struct LanConfig {
-    peer: String,
-    port: String,
+    peer: TextInput,
+    port: TextInput,
 }
 
 impl Default for LanConfig {
     fn default() -> Self {
         Self {
-            peer: String::new(),
-            port: DEFAULT_PORT.to_string(),
+            peer: TextInput::new(),
+            port: TextInput::with_text(&DEFAULT_PORT.to_string()),
         }
     }
 }
@@ -168,26 +169,18 @@ impl LanSpeedTool {
                 return;
             }
         } else {
-            match key.code {
-                KeyCode::Backspace => {
-                    self.field_mut(idx).pop();
+            // idx 1 对端 IP（主机名字符），idx 2 端口（数字）；均带光标编辑。
+            let too_long =
+                matches!(key.code, KeyCode::Char(_)) && self.field_mut(idx).len() >= 64;
+            if !too_long {
+                let consumed = if idx == 1 {
+                    self.field_mut(idx).handle_key(key.code, filter_host)
+                } else {
+                    self.field_mut(idx).handle_key(key.code, |c| c.is_ascii_digit())
+                };
+                if consumed {
                     return;
                 }
-                KeyCode::Char(c) => {
-                    let accept = if idx == 1 {
-                        c.is_ascii() && !c.is_control() && c != ' '
-                    } else {
-                        c.is_ascii_digit()
-                    };
-                    if accept {
-                        let f = self.field_mut(idx);
-                        if f.len() < 64 {
-                            f.push(c);
-                        }
-                        return;
-                    }
-                }
-                _ => {}
             }
         }
 
@@ -198,7 +191,7 @@ impl LanSpeedTool {
         }
     }
 
-    fn field_mut(&mut self, idx: usize) -> &mut String {
+    fn field_mut(&mut self, idx: usize) -> &mut TextInput {
         match idx {
             1 => &mut self.config.peer,
             _ => &mut self.config.port,
@@ -228,7 +221,7 @@ impl LanSpeedTool {
     }
 
     fn start(&mut self) {
-        let port: u16 = self.config.port.parse().unwrap_or(DEFAULT_PORT);
+        let port: u16 = self.config.port.value().parse().unwrap_or(DEFAULT_PORT);
         if port == 0 {
             self.error_key = Some("diag_lan_err".to_string());
             return;
@@ -243,7 +236,7 @@ impl LanSpeedTool {
         let tx = self.tx.clone();
         let abort = self.abort_flag.clone();
         let mode = self.mode;
-        let peer = self.config.peer.trim().to_string();
+        let peer = self.config.peer.value().trim().to_string();
 
         tokio::spawn(async move {
             match mode {
@@ -315,23 +308,19 @@ impl LanSpeedTool {
             .split(inner);
 
         // 端点信息
+        let port_str = self.config.port.value();
         let endpoint = match self.mode {
             Mode::Server => format!(
                 "{}: {}:{}",
                 i18n.t("diag_lan_localip"),
                 self.local_ip,
-                self.config.port
+                port_str
             ),
-            Mode::Client => format!(
-                "{}: {}:{}",
-                i18n.t("diag_lan_peer"),
-                if self.config.peer.is_empty() {
-                    "-"
-                } else {
-                    &self.config.peer
-                },
-                self.config.port
-            ),
+            Mode::Client => {
+                let peer = self.config.peer.value();
+                let peer_disp = if peer.is_empty() { "-".to_string() } else { peer };
+                format!("{}: {}:{}", i18n.t("diag_lan_peer"), peer_disp, port_str)
+            }
         };
         f.render_widget(
             Paragraph::new(endpoint).style(Style::default().fg(theme::COLOR_SECONDARY)),
@@ -434,32 +423,67 @@ impl LanSpeedTool {
             Mode::Server => i18n.t("diag_lan_server"),
             Mode::Client => i18n.t("diag_lan_client"),
         };
-        let items = [
-            (i18n.t("diag_lan_mode"), mode_str),
-            (i18n.t("diag_lan_peer"), self.config.peer.clone()),
-            (i18n.t("diag_lan_port"), self.config.port.clone()),
-        ];
-        let list_items: Vec<ListItem> = items
-            .iter()
-            .map(|(k, v)| ListItem::new(format!("{}:\n  > {}", k, v)))
-            .collect();
-
         let is_active = is_focused && active_focus == FocusArea::Config;
+        let selected = self.config_state.selected();
         let layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(6), Constraint::Length(2)])
             .split(inner);
 
-        let list = List::new(list_items)
-            .highlight_style(if is_active {
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
+        // 第 0 行：模式（预设切换，←/→），手工拼装以匹配统一布局；
+        // 第 1/2 行：对端 IP / 端口（直接输入，带光标），复用统一字段渲染。
+        let mut list_items: Vec<ListItem> = Vec::with_capacity(3);
+
+        let mode_sel = selected == Some(0);
+        let mode_base = if mode_sel && is_active {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        let mode_marker = if mode_sel { ">> " } else { "   " };
+        let mut mode_spans = vec![
+            Span::styled(mode_marker.to_string(), mode_base),
+            Span::styled(mode_str, mode_base),
+        ];
+        if mode_sel && is_active {
+            mode_spans.push(Span::styled(
+                format!("  ({})", i18n.t("diag_hint_switch")),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        list_items.push(ListItem::new(vec![
+            Line::from(Span::styled(
+                format!("{}:", i18n.t("diag_lan_mode")),
+                Style::default().fg(if mode_sel { Color::Yellow } else { Color::Gray }),
+            )),
+            Line::from(mode_spans),
+        ]));
+
+        for (i, (label, input)) in [
+            (i18n.t("diag_lan_peer"), &self.config.peer),
+            (i18n.t("diag_lan_port"), &self.config.port),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let idx = i + 1;
+            let is_sel = selected == Some(idx);
+            let active = is_sel && is_active && !self.running;
+            let hint = if active {
+                Some(if idx == 1 {
+                    i18n.t("diag_hint_input")
+                } else {
+                    i18n.t("diag_hint_digits")
+                })
             } else {
-                Style::default()
-            })
-            .highlight_symbol(">> ");
-        f.render_stateful_widget(list, layout[0], &mut self.config_state);
+                None
+            };
+            list_items.push(config_field_item(&label, is_sel, is_active, input, active, hint));
+        }
+
+        f.render_widget(List::new(list_items), layout[0]);
 
         let hint = Paragraph::new(i18n.t("diag_lan_hint"))
             .style(Style::default().fg(Color::DarkGray))

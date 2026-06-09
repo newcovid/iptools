@@ -2,7 +2,8 @@ use super::FocusArea;
 use crate::keymap::Action;
 use crate::ui::theme;
 use crate::utils::i18n::I18n;
-use crossterm::event::{KeyCode, KeyEvent};
+use crate::utils::textinput::{filter_host, TextInput};
+use crossterm::event::KeyEvent;
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Sparkline},
@@ -19,7 +20,7 @@ use tokio::sync::mpsc;
 
 #[derive(Debug, Clone)]
 pub struct PingConfig {
-    target: String,
+    target: TextInput,
     interval_ms: u64,
     timeout_ms: u64,
     packet_size: u64,
@@ -28,7 +29,7 @@ pub struct PingConfig {
 impl Default for PingConfig {
     fn default() -> Self {
         Self {
-            target: "8.8.8.8".to_string(),
+            target: TextInput::with_text("8.8.8.8"),
             interval_ms: 1000,
             timeout_ms: 2000,
             packet_size: 32,
@@ -234,21 +235,11 @@ impl PingTool {
     }
 
     fn handle_config_key(&mut self, key: KeyEvent, action: Option<Action>) {
-        // 目标(IP/域名)是文本字段：未运行时优先用原始按键编辑，
-        // 这样 j/k/h/l 等字母能正常打进主机名（方向键仍可导航离开）。
+        // 目标(IP/域名)是文本字段：未运行时优先用原始按键做带光标编辑
+        // （字母能正常打进主机名，左右键移动光标而非调数值；方向上下仍可导航离开）。
         let on_target = self.config_state.selected() == Some(0);
-        if on_target && !self.running {
-            match key.code {
-                KeyCode::Backspace => {
-                    self.config.target.pop();
-                    return;
-                }
-                KeyCode::Char(c) if c.is_ascii() && !c.is_control() && c != ' ' => {
-                    self.config.target.push(c);
-                    return;
-                }
-                _ => {}
-            }
+        if on_target && !self.running && self.config.target.handle_key(key.code, filter_host) {
+            return;
         }
 
         match action {
@@ -327,7 +318,7 @@ impl PingTool {
 
         let abort = self.abort_flag.clone();
         let tx = self.tx.clone();
-        let target_str = self.config.target.clone();
+        let target_str = self.config.target.value();
         let config = self.config.clone();
 
         tokio::spawn(async move {
@@ -576,34 +567,68 @@ impl PingTool {
     }
 
     fn draw_config_list(&mut self, f: &mut Frame, area: Rect, i18n: &I18n, is_active: bool) {
-        let cfg = &self.config;
-        let items = vec![
-            (i18n.t("diag_ping_target"), cfg.target.clone()),
-            (i18n.t("diag_ping_interval"), format!("{}", cfg.interval_ms)),
-            (i18n.t("diag_ping_timeout"), format!("{}", cfg.timeout_ms)),
-            (i18n.t("diag_ping_size"), format!("{}", cfg.packet_size)),
+        let interval = format!("{}", self.config.interval_ms);
+        let timeout = format!("{}", self.config.timeout_ms);
+        let size = format!("{}", self.config.packet_size);
+        // 第 0 项是「直接输入」字段，其余是「←/→ 调整」字段——提示文案随之区分。
+        let labels = [
+            i18n.t("diag_ping_target"),
+            i18n.t("diag_ping_interval"),
+            i18n.t("diag_ping_timeout"),
+            i18n.t("diag_ping_size"),
         ];
+        let selected = self.config_state.selected();
 
-        let list_items: Vec<ListItem> = items
-            .iter()
-            .map(|(k, v)| {
-                let content = format!("{}:\n  > {}", k, v);
-                ListItem::new(content)
-            })
-            .collect();
-
-        let list = List::new(list_items)
-            .block(Block::default().borders(Borders::NONE))
-            .highlight_style(if is_active {
+        let mut items: Vec<ListItem> = Vec::with_capacity(4);
+        for i in 0..4 {
+            let is_sel = selected == Some(i);
+            let label_line = Line::from(Span::styled(
+                format!("{}:", labels[i]),
+                Style::default().fg(if is_sel { Color::Yellow } else { Color::Gray }),
+            ));
+            let val_base = if is_sel && is_active {
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default()
-            })
-            .highlight_symbol(">> ");
+                Style::default().fg(Color::White)
+            };
+            let marker = if is_sel { ">> " } else { "   " };
 
-        f.render_stateful_widget(list, area, &mut self.config_state);
+            let mut value_spans = vec![Span::styled(marker.to_string(), val_base)];
+            if i == 0 {
+                // 目标：直接输入，带光标
+                let active = is_sel && is_active && !self.running;
+                value_spans.extend(self.config.target.render_spans(active, val_base));
+                if is_sel && is_active {
+                    let hint = if self.running {
+                        i18n.t("diag_hint_locked")
+                    } else {
+                        i18n.t("diag_hint_input")
+                    };
+                    value_spans.push(Span::styled(
+                        format!("  ({})", hint),
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                }
+            } else {
+                let v = match i {
+                    1 => &interval,
+                    2 => &timeout,
+                    _ => &size,
+                };
+                value_spans.push(Span::styled(v.clone(), val_base));
+                if is_sel && is_active && !self.running {
+                    value_spans.push(Span::styled(
+                        format!("  ({})", i18n.t("diag_hint_adjust")),
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                }
+            }
+            items.push(ListItem::new(vec![label_line, Line::from(value_spans)]));
+        }
+
+        f.render_widget(List::new(items).block(Block::default().borders(Borders::NONE)), area);
     }
 }
 

@@ -3,11 +3,12 @@
 //! 向可靠目标发送一组 ICMP 探测，统计平均延迟、抖动、丢包，综合给出评级；
 //! 并识别当前连接介质（无线则显示 SSID）。复用 `icmp::echo_once`。
 
-use super::FocusArea;
+use super::{config_field_item, FocusArea};
 use crate::keymap::Action;
 use crate::ui::theme;
 use crate::utils::i18n::I18n;
 use crate::utils::net;
+use crate::utils::textinput::{filter_host, TextInput};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     prelude::*,
@@ -64,17 +65,17 @@ impl Grade {
 
 #[derive(Debug, Clone)]
 struct LinkConfig {
-    target: String,
-    count: String,
-    timeout_ms: String,
+    target: TextInput,
+    count: TextInput,
+    timeout_ms: TextInput,
 }
 
 impl Default for LinkConfig {
     fn default() -> Self {
         Self {
-            target: "8.8.8.8".to_string(),
-            count: "20".to_string(),
-            timeout_ms: "1000".to_string(),
+            target: TextInput::with_text("8.8.8.8"),
+            count: TextInput::with_text("20"),
+            timeout_ms: TextInput::with_text("1000"),
         }
     }
 }
@@ -156,28 +157,20 @@ impl LinkQualityTool {
     }
 
     fn handle_config_key(&mut self, key: KeyEvent, action: Option<Action>) {
+        // 带光标编辑：目标接受主机名字符，次数/超时仅数字。
         if !self.running {
             if let Some(idx) = self.config_state.selected() {
-                match key.code {
-                    KeyCode::Backspace => {
-                        self.field_mut(idx).pop();
+                let too_long =
+                    matches!(key.code, KeyCode::Char(_)) && self.field_mut(idx).len() >= 64;
+                if !too_long {
+                    let consumed = if idx == 0 {
+                        self.field_mut(idx).handle_key(key.code, filter_host)
+                    } else {
+                        self.field_mut(idx).handle_key(key.code, |c| c.is_ascii_digit())
+                    };
+                    if consumed {
                         return;
                     }
-                    KeyCode::Char(c) => {
-                        let accept = if idx == 0 {
-                            c.is_ascii() && !c.is_control() && c != ' '
-                        } else {
-                            c.is_ascii_digit()
-                        };
-                        if accept {
-                            let f = self.field_mut(idx);
-                            if f.len() < 64 {
-                                f.push(c);
-                            }
-                            return;
-                        }
-                    }
-                    _ => {}
                 }
             }
         }
@@ -188,7 +181,7 @@ impl LinkQualityTool {
         }
     }
 
-    fn field_mut(&mut self, idx: usize) -> &mut String {
+    fn field_mut(&mut self, idx: usize) -> &mut TextInput {
         match idx {
             0 => &mut self.config.target,
             1 => &mut self.config.count,
@@ -257,9 +250,15 @@ impl LinkQualityTool {
     }
 
     fn start(&mut self) {
-        let count: u64 = self.config.count.parse().unwrap_or(20).clamp(5, 100);
-        let timeout_ms: u32 = self.config.timeout_ms.parse().unwrap_or(1000).clamp(100, 10000);
-        let target = self.config.target.trim().to_string();
+        let count: u64 = self.config.count.value().parse().unwrap_or(20).clamp(5, 100);
+        let timeout_ms: u32 = self
+            .config
+            .timeout_ms
+            .value()
+            .parse()
+            .unwrap_or(1000)
+            .clamp(100, 10000);
+        let target = self.config.target.value().trim().to_string();
         if target.is_empty() {
             self.error_key = Some("diag_link_err".to_string());
             return;
@@ -491,25 +490,37 @@ impl LinkQualityTool {
         let inner = block.inner(area);
         f.render_widget(block, area);
 
-        let items = [
-            (i18n.t("diag_link_target"), self.config.target.clone()),
-            (i18n.t("diag_link_count"), self.config.count.clone()),
-            (i18n.t("diag_link_timeout"), self.config.timeout_ms.clone()),
+        let is_active = is_focused && active_focus == FocusArea::Config;
+        let labels = [
+            i18n.t("diag_link_target"),
+            i18n.t("diag_link_count"),
+            i18n.t("diag_link_timeout"),
         ];
-        let list_items: Vec<ListItem> = items
-            .iter()
-            .map(|(k, v)| ListItem::new(format!("{}:\n  > {}", k, v)))
+        let inputs = [
+            &self.config.target,
+            &self.config.count,
+            &self.config.timeout_ms,
+        ];
+        let selected = self.config_state.selected();
+
+        let list_items: Vec<ListItem> = (0..3)
+            .map(|i| {
+                let is_sel = selected == Some(i);
+                let active = is_sel && is_active && !self.running;
+                let hint = if active {
+                    Some(if i == 0 {
+                        i18n.t("diag_hint_input")
+                    } else {
+                        i18n.t("diag_hint_digits")
+                    })
+                } else {
+                    None
+                };
+                config_field_item(&labels[i], is_sel, is_active, inputs[i], active, hint)
+            })
             .collect();
 
-        let is_active = is_focused && active_focus == FocusArea::Config;
-        let list = List::new(list_items)
-            .highlight_style(if is_active {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            })
-            .highlight_symbol(">> ");
-        f.render_stateful_widget(list, inner, &mut self.config_state);
+        f.render_widget(List::new(list_items), inner);
     }
 }
 

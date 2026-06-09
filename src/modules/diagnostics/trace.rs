@@ -4,10 +4,11 @@
 //! 中间路由返回 `IP_TTL_EXPIRED_TRANSIT(11013)` 暴露其地址，到达目标时返回成功。
 //! 不依赖外部 `tracert` 程序。非 Windows 暂以"不支持"提示占位（后续统一迁移）。
 
-use super::FocusArea;
+use super::{config_field_item, FocusArea};
 use crate::keymap::Action;
 use crate::ui::theme;
 use crate::utils::i18n::I18n;
+use crate::utils::textinput::{filter_host, TextInput};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     prelude::*,
@@ -37,17 +38,17 @@ enum TraceEvent {
 
 #[derive(Debug, Clone)]
 struct TraceConfig {
-    target: String,
-    max_hops: String,
-    timeout_ms: String,
+    target: TextInput,
+    max_hops: TextInput,
+    timeout_ms: TextInput,
 }
 
 impl Default for TraceConfig {
     fn default() -> Self {
         Self {
-            target: "8.8.8.8".to_string(),
-            max_hops: DEFAULT_MAX_HOPS.to_string(),
-            timeout_ms: "1000".to_string(),
+            target: TextInput::with_text("8.8.8.8"),
+            max_hops: TextInput::with_text(&DEFAULT_MAX_HOPS.to_string()),
+            timeout_ms: TextInput::with_text("1000"),
         }
     }
 }
@@ -127,28 +128,20 @@ impl TraceTool {
     }
 
     fn handle_config_key(&mut self, key: KeyEvent, action: Option<Action>) {
+        // 带光标编辑：目标接受主机名字符，跳数/超时仅数字。
         if !self.running {
             if let Some(idx) = self.config_state.selected() {
-                match key.code {
-                    KeyCode::Backspace => {
-                        self.field_mut(idx).pop();
+                let too_long =
+                    matches!(key.code, KeyCode::Char(_)) && self.field_mut(idx).len() >= 64;
+                if !too_long {
+                    let consumed = if idx == 0 {
+                        self.field_mut(idx).handle_key(key.code, filter_host)
+                    } else {
+                        self.field_mut(idx).handle_key(key.code, |c| c.is_ascii_digit())
+                    };
+                    if consumed {
                         return;
                     }
-                    KeyCode::Char(c) => {
-                        let accept = if idx == 0 {
-                            c.is_ascii() && !c.is_control() && c != ' '
-                        } else {
-                            c.is_ascii_digit()
-                        };
-                        if accept {
-                            let f = self.field_mut(idx);
-                            if f.len() < 64 {
-                                f.push(c);
-                            }
-                            return;
-                        }
-                    }
-                    _ => {}
                 }
             }
         }
@@ -159,7 +152,7 @@ impl TraceTool {
         }
     }
 
-    fn field_mut(&mut self, idx: usize) -> &mut String {
+    fn field_mut(&mut self, idx: usize) -> &mut TextInput {
         match idx {
             0 => &mut self.config.target,
             1 => &mut self.config.max_hops,
@@ -210,11 +203,18 @@ impl TraceTool {
         let max_hops: u32 = self
             .config
             .max_hops
+            .value()
             .parse()
             .unwrap_or(DEFAULT_MAX_HOPS)
             .clamp(1, 64);
-        let timeout_ms: u32 = self.config.timeout_ms.parse().unwrap_or(1000).clamp(100, 10000);
-        let target = self.config.target.trim().to_string();
+        let timeout_ms: u32 = self
+            .config
+            .timeout_ms
+            .value()
+            .parse()
+            .unwrap_or(1000)
+            .clamp(100, 10000);
+        let target = self.config.target.value().trim().to_string();
         if target.is_empty() {
             self.error_key = Some("diag_trace_err".to_string());
             return;
@@ -368,27 +368,37 @@ impl TraceTool {
         let inner = block.inner(area);
         f.render_widget(block, area);
 
-        let items = [
-            (i18n.t("diag_trace_target"), self.config.target.clone()),
-            (i18n.t("diag_trace_maxhops"), self.config.max_hops.clone()),
-            (i18n.t("diag_trace_timeout"), self.config.timeout_ms.clone()),
+        let is_active = is_focused && active_focus == FocusArea::Config;
+        let labels = [
+            i18n.t("diag_trace_target"),
+            i18n.t("diag_trace_maxhops"),
+            i18n.t("diag_trace_timeout"),
         ];
-        let list_items: Vec<ListItem> = items
-            .iter()
-            .map(|(k, v)| ListItem::new(format!("{}:\n  > {}", k, v)))
+        let inputs = [
+            &self.config.target,
+            &self.config.max_hops,
+            &self.config.timeout_ms,
+        ];
+        let selected = self.config_state.selected();
+
+        let list_items: Vec<ListItem> = (0..3)
+            .map(|i| {
+                let is_sel = selected == Some(i);
+                let active = is_sel && is_active && !self.running;
+                let hint = if active {
+                    Some(if i == 0 {
+                        i18n.t("diag_hint_input")
+                    } else {
+                        i18n.t("diag_hint_digits")
+                    })
+                } else {
+                    None
+                };
+                config_field_item(&labels[i], is_sel, is_active, inputs[i], active, hint)
+            })
             .collect();
 
-        let is_active = is_focused && active_focus == FocusArea::Config;
-        let list = List::new(list_items)
-            .highlight_style(if is_active {
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            })
-            .highlight_symbol(">> ");
-        f.render_stateful_widget(list, inner, &mut self.config_state);
+        f.render_widget(List::new(list_items), inner);
     }
 }
 
