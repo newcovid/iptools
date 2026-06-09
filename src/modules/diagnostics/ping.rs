@@ -1,4 +1,5 @@
 use super::FocusArea;
+use crate::keymap::Action;
 use crate::ui::theme;
 use crate::utils::i18n::I18n;
 use crossterm::event::{KeyCode, KeyEvent};
@@ -216,10 +217,10 @@ impl PingTool {
     // 交互逻辑
     // -------------------------------------------------------------------------
 
-    pub fn on_key(&mut self, key: KeyEvent, active_focus: FocusArea) {
+    pub fn on_key(&mut self, key: KeyEvent, action: Option<Action>, active_focus: FocusArea) {
         match active_focus {
             FocusArea::Main => {
-                if key.code == KeyCode::Char(' ') {
+                if action == Some(Action::Toggle) {
                     if self.running {
                         self.stop();
                     } else {
@@ -227,27 +228,34 @@ impl PingTool {
                     }
                 }
             }
-            FocusArea::Config => self.handle_config_key(key),
+            FocusArea::Config => self.handle_config_key(key, action),
             _ => {}
         }
     }
 
-    fn handle_config_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Down | KeyCode::Char('j') => self.next_config(),
-            KeyCode::Up | KeyCode::Char('k') => self.prev_config(),
-
-            KeyCode::Left | KeyCode::Char('h') => self.adjust_numeric_config(-1),
-            KeyCode::Right | KeyCode::Char('l') => self.adjust_numeric_config(1),
-
-            KeyCode::Backspace => {
-                if self.config_state.selected() == Some(0) && !self.running {
+    fn handle_config_key(&mut self, key: KeyEvent, action: Option<Action>) {
+        // 目标(IP/域名)是文本字段：未运行时优先用原始按键编辑，
+        // 这样 j/k/h/l 等字母能正常打进主机名（方向键仍可导航离开）。
+        let on_target = self.config_state.selected() == Some(0);
+        if on_target && !self.running {
+            match key.code {
+                KeyCode::Backspace => {
                     self.config.target.pop();
+                    return;
                 }
+                KeyCode::Char(c) if c.is_ascii() && !c.is_control() && c != ' ' => {
+                    self.config.target.push(c);
+                    return;
+                }
+                _ => {}
             }
-            KeyCode::Char(c) => {
-                self.edit_config_value(c);
-            }
+        }
+
+        match action {
+            Some(Action::Down) => self.next_config(),
+            Some(Action::Up) => self.prev_config(),
+            Some(Action::Left) => self.adjust_numeric_config(-1),
+            Some(Action::Right) => self.adjust_numeric_config(1),
             _ => {}
         }
     }
@@ -280,19 +288,6 @@ impl PingTool {
             None => 0,
         };
         self.config_state.select(Some(i));
-    }
-
-    fn edit_config_value(&mut self, c: char) {
-        if self.running {
-            return;
-        }
-        if let Some(idx) = self.config_state.selected() {
-            if idx == 0 {
-                if c.is_ascii() {
-                    self.config.target.push(c);
-                }
-            }
-        }
     }
 
     fn adjust_numeric_config(&mut self, dir: i64) {

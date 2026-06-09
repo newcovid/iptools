@@ -1,5 +1,6 @@
 use crate::app::App;
-use crossterm::event::{KeyCode, KeyEvent};
+use crate::keymap::Action;
+use crossterm::event::KeyEvent;
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph}, // 修复：添加 Paragraph
@@ -74,30 +75,30 @@ impl DiagnosticsModule {
         }
     }
 
-    pub fn on_key(&mut self, key: KeyEvent) {
-        // 1. 全局焦点切换 (Tab)
-        if key.code == KeyCode::Tab {
+    pub fn on_key(&mut self, key: KeyEvent, action: Option<Action>) {
+        // 1. 诊断页内部用 NextTab(默认 Tab) 在 Menu/Main/Config 三栏间切换焦点
+        if action == Some(Action::NextTab) {
             self.active_focus = self.active_focus.next();
             return;
         }
 
         // 2. 根据焦点区域分发事件
         match self.active_focus {
-            FocusArea::Menu => self.handle_menu_key(key),
+            FocusArea::Menu => self.handle_menu_key(action),
             _ => {
-                // 将事件传递给当前选中的工具
+                // 将事件传递给当前选中的工具（ping 需原始按键做文本输入，故同时传 key）
                 match self.current_tool {
-                    DiagnosticTool::Ping => self.ping_tool.on_key(key, self.active_focus),
+                    DiagnosticTool::Ping => self.ping_tool.on_key(key, action, self.active_focus),
                     _ => {}
                 }
             }
         }
     }
 
-    fn handle_menu_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Down | KeyCode::Char('j') => self.next_tool(),
-            KeyCode::Up | KeyCode::Char('k') => self.prev_tool(),
+    fn handle_menu_key(&mut self, action: Option<Action>) {
+        match action {
+            Some(Action::Down) => self.next_tool(),
+            Some(Action::Up) => self.prev_tool(),
             _ => {}
         }
     }

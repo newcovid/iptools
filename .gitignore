@@ -1,2 +1,5 @@
 # Rust
 target/
+
+# 本地运行时配置（首次运行自动生成；参见 config.example.json）
+config.json

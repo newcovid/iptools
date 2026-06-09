@@ -1,9 +1,9 @@
 use crate::app::App;
+use crate::keymap::Action;
 use crate::ui::theme; // 引入主题
 use crate::utils::format::{format_bytes, format_speed};
 use crate::utils::i18n::I18n;
 use crate::utils::net::{self, InterfaceInfo};
-use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Cell, List, ListItem, ListState, Paragraph, Row, Table},
@@ -88,11 +88,11 @@ impl AdapterModule {
         }
     }
 
-    pub fn on_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Down | KeyCode::Char('j') => self.next(),
-            KeyCode::Up | KeyCode::Char('k') => self.previous(),
-            KeyCode::Char('r') => self.reload(),
+    pub fn on_key(&mut self, action: Option<Action>) {
+        match action {
+            Some(Action::Down) => self.next(),
+            Some(Action::Up) => self.previous(),
+            Some(Action::Refresh) => self.reload(),
             _ => {}
         }
     }

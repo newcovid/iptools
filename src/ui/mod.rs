@@ -1,4 +1,5 @@
 use crate::app::{App, CurrentTab};
+use crate::keymap::Action;
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Paragraph, Tabs},
@@ -39,11 +40,26 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         }
     }
 
-    let footer_text = app.t("footer_help");
-    let footer = Paragraph::new(footer_text)
+    let footer = Paragraph::new(footer_text(app))
         .style(Style::default().fg(theme::COLOR_SUBTEXT))
         .alignment(Alignment::Left);
     f.render_widget(footer, chunks[2]);
+}
+
+/// 动态生成底部帮助栏：按键标签直接取自当前键位映射，
+/// 用户在 config 里改了绑定，这里会随之更新（不再写死 Tab/Ctrl-c）。
+fn footer_text(app: &App) -> String {
+    let km = &app.keymap;
+    format!(
+        " [{}/{}] {}   [{}] {}   [{}] {} ",
+        km.primary_label(Action::NextTab),
+        km.primary_label(Action::PrevTab),
+        app.t("footer_switch"),
+        km.primary_label(Action::ToggleLanguage),
+        app.t("footer_lang"),
+        km.primary_label(Action::Quit),
+        app.t("footer_quit"),
+    )
 }
 
 fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
