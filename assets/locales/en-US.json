@@ -98,7 +98,7 @@
     "scan_title": " LAN Scanner ",
     "scan_range_label": "Scan Range (CIDR):",
     "scan_count_label": "Est. Count:",
-    "scan_btn_start": "[Enter] Start",
+    "scan_btn_start": "[Enter/Space] Start",
     "scan_btn_stop": "[S] Stop",
     "scan_btn_edit": "[E] Edit Range",
     "scan_status_idle": "Idle",
