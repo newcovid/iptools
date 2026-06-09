@@ -18,7 +18,7 @@ impl History {
     /// 从持久化的 Vec 构造（截断到 cap，保持顺序=最近在前）。
     pub fn from_vec(items: Vec<String>, cap: usize) -> Self {
         let mut h = Self::new(cap);
-        // 反向 record 可保持「输入顺序中靠前的更近」；这里直接按既有顺序填充并截断。
+        // 持久化格式已按「最近在前」存储，直接按既有顺序填充并截断即可保持顺序。
         h.items = items.into_iter().filter(|s| !s.trim().is_empty()).collect();
         h.items.truncate(h.cap);
         h
@@ -45,6 +45,7 @@ impl History {
 
     /// 前缀建议：返回以 `input` 为前缀且 ≠ `input` 的最近一条（最近在前→首个命中）。
     /// `input` trim 后为空返回 None（空框不打扰）。
+    /// 不变量：存储条目均经 `record` 的 trim 处理，故 `q`(trim 后) 与条目的 `starts_with`/`!=` 比较自洽。
     pub fn suggest(&self, input: &str) -> Option<String> {
         let q = input.trim();
         if q.is_empty() {
@@ -128,6 +129,18 @@ mod tests {
         assert_eq!(h.suggest("   "), None);
         // 无前缀命中
         assert_eq!(h.suggest("10."), None);
+    }
+
+    #[test]
+    fn from_vec_filters_blank_and_truncates() {
+        let items = vec![
+            "a".to_string(),
+            "  ".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+        ];
+        let h = History::from_vec(items, 2);
+        assert_eq!(h.entries(), &["a", "b"]); // 空白被滤掉，截断到 cap=2
     }
 
     #[test]
