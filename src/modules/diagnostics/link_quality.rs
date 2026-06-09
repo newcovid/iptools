@@ -652,11 +652,15 @@ impl LinkQualityTool {
                     Style::default().fg(theme::COLOR_SECONDARY),
                 ));
                 if s.is_wifi {
-                    if let Some(w) = &s.wireless {
-                        spans.push(Span::styled(
-                            format!("  {}", w.ssid),
+                    match &s.wireless {
+                        Some(w) => spans.push(Span::styled(
+                            format!("  {}: {}", i18n.t("diag_link_ssid"), w.ssid),
                             Style::default().fg(Color::White),
-                        ));
+                        )),
+                        None => spans.push(Span::styled(
+                            format!("  {}", i18n.t("diag_link_wifi_na")),
+                            Style::default().fg(Color::DarkGray),
+                        )),
                     }
                 } else if let Some(sp) = s.link_speed_bps {
                     spans.push(Span::styled(
