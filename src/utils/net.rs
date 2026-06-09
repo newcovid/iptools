@@ -272,6 +272,68 @@ fn get_dhcp_map_via_win32() -> std::collections::HashMap<String, bool> {
     map
 }
 
+/// 查询指定 GUID 网卡当前的发送链路速率（bit/s）。
+///
+/// 用于链路质量测试期间**实时刷新**有线协商速率：协商速率通常恒定，但链路
+/// 重协商 / 降速（如网线劣化使 1Gbps 退回 100Mbps）/ 断开时会变化或消失，
+/// 实时读取可如实反映，而非显示开始时的快照。未找到 / 无效值 / 失败返回 `None`。
+/// 比 `get_interfaces` 轻量：仅 `GetAdaptersAddresses`，不查 WLAN / DHCP。
+#[cfg(target_os = "windows")]
+pub fn link_speed_for_guid(guid: &str) -> Option<u64> {
+    use windows::Win32::Foundation::ERROR_BUFFER_OVERFLOW;
+    use windows::Win32::NetworkManagement::IpHelper::{
+        GetAdaptersAddresses, GAA_FLAG_INCLUDE_PREFIX, IP_ADAPTER_ADDRESSES_LH,
+    };
+    use windows::Win32::Networking::WinSock::AF_UNSPEC;
+
+    unsafe {
+        let mut out_buf_len: u32 = 15000;
+        let mut buffer: Vec<u8> = vec![0; out_buf_len as usize];
+
+        let mut ret = GetAdaptersAddresses(
+            AF_UNSPEC.0 as u32,
+            GAA_FLAG_INCLUDE_PREFIX,
+            None,
+            Some(buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH),
+            &mut out_buf_len,
+        );
+
+        if ret == ERROR_BUFFER_OVERFLOW.0 {
+            buffer.resize(out_buf_len as usize, 0);
+            ret = GetAdaptersAddresses(
+                AF_UNSPEC.0 as u32,
+                GAA_FLAG_INCLUDE_PREFIX,
+                None,
+                Some(buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH),
+                &mut out_buf_len,
+            );
+        }
+
+        if ret != 0 {
+            return None;
+        }
+
+        let mut p_curr = buffer.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
+        while !p_curr.is_null() {
+            let adapter = &*p_curr;
+            if !adapter.AdapterName.is_null() {
+                let name = adapter.AdapterName.to_string().unwrap_or_default();
+                if name.eq_ignore_ascii_case(guid) {
+                    let s = adapter.TransmitLinkSpeed;
+                    return if s == 0 || s == u64::MAX { None } else { Some(s) };
+                }
+            }
+            p_curr = adapter.Next;
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn link_speed_for_guid(_guid: &str) -> Option<u64> {
+    None
+}
+
 #[cfg(target_os = "windows")]
 pub fn resolve_mac_address(ip: Ipv4Addr) -> Option<String> {
     use std::ffi::CString;

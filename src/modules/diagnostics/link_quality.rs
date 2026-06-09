@@ -21,12 +21,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-/// 一轮探测采样：延迟 + 无线动态字段（仅无线时有值）。
+/// 一轮探测采样：延迟 + 无线动态字段（仅无线时有值）+ 有线实时协商速率。
 #[derive(Debug, Clone, Copy)]
 struct Sample {
     latency_ms: Option<u64>,
     rssi_dbm: Option<i32>,
     quality: Option<u32>,
+    /// 该轮读到的发送链路速率（bit/s）；有线每轮实时刷新，无线为 None（速率走 wireless）。
+    link_speed_bps: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -121,6 +123,8 @@ pub struct LinkQualityTool {
     samples: Vec<Sample>,
     lat_history: VecDeque<u64>,
     rssi_history: VecDeque<u64>, // 存 (rssi+100) 便于 sparkline 的 u64
+    /// 有线测试期间最近一次读到的实时协商速率（bit/s）；反映降速/重协商。
+    live_link_speed: Option<u64>,
     total: u64,
 
     snapshot: Option<LinkSnapshot>,
@@ -145,6 +149,7 @@ impl LinkQualityTool {
             samples: Vec::new(),
             lat_history: VecDeque::with_capacity(100),
             rssi_history: VecDeque::with_capacity(100),
+            live_link_speed: None,
             total: 0,
             snapshot: None,
             tx,
@@ -197,6 +202,9 @@ impl LinkQualityTool {
                     }
                     if let Some(r) = s.rssi_dbm {
                         push_cap(&mut self.rssi_history, (r + 100).max(0) as u64, 100);
+                    }
+                    if let Some(ls) = s.link_speed_bps {
+                        self.live_link_speed = Some(ls);
                     }
                     self.samples.push(s);
                 }
@@ -476,6 +484,7 @@ impl LinkQualityTool {
         self.samples.clear();
         self.lat_history.clear();
         self.rssi_history.clear();
+        self.live_link_speed = None;
         self.total = count;
         *self.abort_flag.lock().unwrap() = false;
 
@@ -516,15 +525,20 @@ impl LinkQualityTool {
 
                 let latency = if res.reached() { res.rtt_ms } else { None };
 
-                // 无线动态采样
-                let (rssi, quality) = if is_wifi {
+                // 动态采样：无线取 RSSI/信号质量，有线实时读协商速率（反映降速/重协商）。
+                let (rssi, quality, link_speed) = if is_wifi {
                     let g = guid.clone();
                     match tokio::task::spawn_blocking(move || wlan::query(&g)).await {
-                        Ok(Some(w)) => (Some(w.rssi_dbm), Some(w.signal_quality)),
-                        _ => (None, None),
+                        Ok(Some(w)) => (Some(w.rssi_dbm), Some(w.signal_quality), None),
+                        _ => (None, None, None),
                     }
                 } else {
-                    (None, None)
+                    let g = guid.clone();
+                    let ls = tokio::task::spawn_blocking(move || net::link_speed_for_guid(&g))
+                        .await
+                        .ok()
+                        .flatten();
+                    (None, None, ls)
                 };
 
                 let _ = tx
@@ -532,6 +546,7 @@ impl LinkQualityTool {
                         latency_ms: latency,
                         rssi_dbm: rssi,
                         quality,
+                        link_speed_bps: link_speed,
                     }))
                     .await;
 
@@ -807,10 +822,16 @@ impl LinkQualityTool {
             ]));
         } else {
             let s = self.snapshot.as_ref();
+            // 速率优先用实时采样（反映降速/重协商）；尚无采样时退回开始快照。
+            let speed_bps = if self.samples.is_empty() {
+                s.and_then(|s| s.link_speed_bps)
+            } else {
+                self.live_link_speed
+            };
             lines.push(Line::from(vec![
                 Span::styled(format!("{}: ", g("diag_link_speed")), Style::default().fg(Color::Gray)),
                 Span::styled(
-                    s.and_then(|s| s.link_speed_bps)
+                    speed_bps
                         .map(|sp| format::format_speed(sp / 8))
                         .unwrap_or_else(|| "-".into()),
                     Style::default().fg(Color::White),
