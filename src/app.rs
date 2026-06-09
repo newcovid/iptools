@@ -47,6 +47,8 @@ pub struct App {
     pub running: bool,
     pub current_tab: CurrentTab,
     pub diag_focused: bool,
+    /// 是否显示快捷键帮助浮层（模态）。
+    pub show_help: bool,
 
     pub config: Config,
     pub i18n: I18n,
@@ -70,6 +72,7 @@ impl App {
             running: true,
             current_tab: CurrentTab::Dashboard,
             diag_focused: false,
+            show_help: false,
             dashboard: Dashboard::new(),
             adapter: AdapterModule::new(),
             scanner: ScannerModule::new(),
@@ -114,6 +117,16 @@ impl App {
     pub fn on_key(&mut self, key: KeyEvent) {
         let action = self.keymap.action_for(key);
 
+        // 0. 帮助浮层是模态的：显示时除退出外的任意键都用于关闭它
+        if self.show_help {
+            if action == Some(Action::Quit) {
+                self.running = false;
+            } else {
+                self.show_help = false;
+            }
+            return;
+        }
+
         // 1. 全局动作：任何标签页 / 任何模式下都生效
         match action {
             Some(Action::Quit) => {
@@ -122,6 +135,10 @@ impl App {
             }
             Some(Action::ToggleLanguage) => {
                 self.toggle_language();
+                return;
+            }
+            Some(Action::Help) => {
+                self.show_help = true;
                 return;
             }
             _ => {}

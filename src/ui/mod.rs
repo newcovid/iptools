@@ -2,7 +2,7 @@ use crate::app::{App, CurrentTab};
 use crate::keymap::Action;
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Paragraph, Tabs},
+    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Tabs},
 };
 
 pub mod theme;
@@ -44,6 +44,75 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         .style(Style::default().fg(theme::COLOR_SUBTEXT))
         .alignment(Alignment::Left);
     f.render_widget(footer, chunks[2]);
+
+    // 模态：快捷键帮助浮层覆盖在最上层
+    if app.show_help {
+        render_help_overlay(f, app);
+    }
+}
+
+/// 居中弹层快捷键速查（内容取自当前键位映射，反映用户自定义绑定）。
+fn render_help_overlay(f: &mut Frame, app: &App) {
+    let area = centered_rect(f.area(), 60, 80);
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::COLOR_SECONDARY))
+        .title(format!(" {} ", app.t("help_title")));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(2)])
+        .split(inner);
+
+    let rows: Vec<Row> = Action::ALL
+        .iter()
+        .map(|a| {
+            Row::new(vec![
+                Cell::from(app.keymap.all_labels(*a))
+                    .style(Style::default().fg(theme::COLOR_PRIMARY)),
+                Cell::from(app.t(a.desc_key())).style(Style::default().fg(Color::White)),
+            ])
+        })
+        .collect();
+    let table = Table::new(rows, [Constraint::Length(20), Constraint::Min(0)]).column_spacing(2);
+    f.render_widget(table, layout[0]);
+
+    let hint = Paragraph::new(vec![
+        Line::from(Span::styled(
+            app.t("help_customize"),
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(Span::styled(
+            app.t("help_hint"),
+            Style::default().fg(Color::Yellow),
+        )),
+    ])
+    .alignment(Alignment::Center);
+    f.render_widget(hint, layout[1]);
+}
+
+/// 在给定区域内取居中的 percent_x% × percent_y% 子矩形。
+fn centered_rect(r: Rect, percent_x: u16, percent_y: u16) -> Rect {
+    let v = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(v[1])[1]
 }
 
 /// 动态生成底部帮助栏：按键标签直接取自当前键位映射，
@@ -51,12 +120,14 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 fn footer_text(app: &App) -> String {
     let km = &app.keymap;
     format!(
-        " [{}/{}] {}   [{}] {}   [{}] {} ",
+        " [{}/{}] {}   [{}] {}   [{}] {}   [{}] {} ",
         km.primary_label(Action::NextTab),
         km.primary_label(Action::PrevTab),
         app.t("footer_switch"),
         km.primary_label(Action::ToggleLanguage),
         app.t("footer_lang"),
+        km.primary_label(Action::Help),
+        app.t("footer_help_label"),
         km.primary_label(Action::Quit),
         app.t("footer_quit"),
     )

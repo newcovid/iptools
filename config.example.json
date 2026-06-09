@@ -6,6 +6,7 @@
     "confirm": ["Enter"],
     "down": ["Down", "j"],
     "edit": ["e"],
+    "help": ["F1"],
     "left": ["Left", "h"],
     "next_tab": ["Tab"],
     "prev_tab": ["Shift+Tab"],

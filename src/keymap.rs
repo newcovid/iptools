@@ -37,6 +37,7 @@ pub enum Action {
     Edit,
     Toggle,
     Stop,
+    Help,
 }
 
 impl Action {
@@ -57,6 +58,28 @@ impl Action {
             Action::Edit => "edit",
             Action::Toggle => "toggle",
             Action::Stop => "stop",
+            Action::Help => "help",
+        }
+    }
+
+    /// 帮助浮层中该动作说明文字的 i18n 键。
+    pub fn desc_key(self) -> &'static str {
+        match self {
+            Action::Quit => "action_quit",
+            Action::ToggleLanguage => "action_toggle_language",
+            Action::NextTab => "action_next_tab",
+            Action::PrevTab => "action_prev_tab",
+            Action::Up => "action_up",
+            Action::Down => "action_down",
+            Action::Left => "action_left",
+            Action::Right => "action_right",
+            Action::Confirm => "action_confirm",
+            Action::Back => "action_back",
+            Action::Refresh => "action_refresh",
+            Action::Edit => "action_edit",
+            Action::Toggle => "action_toggle",
+            Action::Stop => "action_stop",
+            Action::Help => "action_help",
         }
     }
 
@@ -65,7 +88,7 @@ impl Action {
     }
 
     /// 解析优先级顺序（全局动作在前）。`action_for` 按此顺序匹配。
-    pub const ALL: [Action; 14] = [
+    pub const ALL: [Action; 15] = [
         Action::Quit,
         Action::ToggleLanguage,
         Action::NextTab,
@@ -80,6 +103,7 @@ impl Action {
         Action::Edit,
         Action::Toggle,
         Action::Stop,
+        Action::Help,
     ];
 
     fn default_combos(self) -> Vec<KeyCombo> {
@@ -107,6 +131,7 @@ impl Action {
             Action::Edit => vec![plain(Char('e'))],
             Action::Toggle => vec![plain(Char(' '))],
             Action::Stop => vec![plain(Char('s'))],
+            Action::Help => vec![plain(F(1))],
         }
     }
 }
@@ -300,6 +325,16 @@ impl KeyMap {
             .and_then(|v| v.first())
             .map(|c| c.to_label())
             .unwrap_or_else(|| "?".to_string())
+    }
+
+    /// 某动作的全部组合键标签，以 " / " 连接（用于帮助浮层）；无绑定返回 "-"。
+    pub fn all_labels(&self, action: Action) -> String {
+        match self.map.get(&action) {
+            Some(v) if !v.is_empty() => {
+                v.iter().map(|c| c.to_label()).collect::<Vec<_>>().join(" / ")
+            }
+            _ => "-".to_string(),
+        }
     }
 }
 
