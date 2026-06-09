@@ -16,7 +16,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | Adapter 适配器 | 列出网卡 **+ 配置静态IP/DNS/DHCP**（item 4） | ⚠️ **只读**。展示已完成；**IP 配置功能尚未实现**（headline 待办） |
 | Scanner 扫描 | 局域网 IP/MAC/主机名扫描 | ⚠️ **仅 Windows**。`resolve_mac_address` 在非 Windows 返回 `None`，Unix 上扫不到结果 |
 | Traffic 流量 | 实时速率 / 会话 / 累计 | ✅ 完成 |
-| Diagnostics 诊断 | Ping/路由跟踪/端口扫描/链路质量/公网测速/内网测速 | 🔶 **3/6 已实现**：Ping ✅、端口扫描 ✅、公网测速 ✅；路由跟踪/链路质量/内网测速仍为 `"Coming Soon"` 占位 |
+| Diagnostics 诊断 | Ping/路由跟踪/端口扫描/链路质量/公网测速/内网测速 | ✅ **6/6 全部实现**：Ping、端口扫描、公网测速、路由跟踪、链路质量、内网测速 |
 | Settings 设置 | 并发数、语言等 | ✅ 语言 + 扫描并发数（快捷键可经 config.json 自定义） |
 
 修改任何模块前，先核对此表确认它是"已实现需维护"还是"待从零实现"。
@@ -74,12 +74,15 @@ cargo check              # 快速类型检查
 
 诊断页是唯一有两级焦点的页：`app.diag_focused`（是否进入交互模式，Confirm 进 / Back 出）+ 模块内 `FocusArea`（Menu/Main/Config，NextTab 循环切换）。新增诊断子工具时，需在 `diagnostics/mod.rs` 的 `update`/`on_key`/`draw` 三处 `match current_tool` 各加一个分支，并参照现有工具建子结构。
 
-已实现子工具及可参照的范式：
+六个子工具及可参照的范式：
 - `ping.rs`（`PingTool`）— 持续型：循环发包，结构化日志 `PingLog` 渲染时本地化。
 - `port_scan.rs`（`PortScanTool`）— 批量型：`stream::buffer_unordered` 并发 + 进度条 + abort，复用全局并发数。
-- `public_speed.rs`（`PublicSpeedTool`）— 流式型：异步任务内计时算瞬时速率回传，Sparkline 曲线。
+- `public_speed.rs`（`PublicSpeedTool`）— 流式型：reqwest 分块下载，任务内计时算瞬时速率，Sparkline 曲线。
+- `trace.rs`（`TraceTool`）— 逐跳 ICMP（TTL 递增），Windows 原生，复用 `icmp::echo_once`。
+- `link_quality.rs`（`LinkQualityTool`）— ICMP 突发采样 → 延迟/抖动/丢包 → 综合评级；识别有线/无线。
+- `lan_speed.rs`（`LanSpeedTool`）— 服务端/客户端 TCP 吞吐对测（iperf 风格），跨平台。
 
-子工具统一持有 config/state + `mpsc` 回传 + `Arc<Mutex<bool>>` abort flag；`draw(f, main_area, config_area, i18n, is_focused, active_focus)` 签名一致。
+`icmp.rs` 收敛单次 ICMP Echo 的 unsafe FFI（trace/link_quality 共用）；`ping.rs` 因用途不同保留自己的发包循环。子工具统一持有 config/state + `mpsc` 回传 + `Arc<Mutex<bool>>` abort flag；`draw(f, main_area, config_area, i18n, is_focused, active_focus)` 签名一致。**诊断 `match current_tool` 已无 `_` 兜底分支——新增工具须在 update/on_key/draw 三处显式补齐，否则编译报 non-exhaustive。**
 
 ### i18n（`utils/i18n.rs` + `assets/locales/*.json`）
 
@@ -103,6 +106,6 @@ cargo check              # 快速类型检查
 
 ## 添加新功能的提示
 
-- **实现剩余 Diagnostics 工具**（路由跟踪 / 链路质量 / 内网测速）：照 `port_scan.rs` / `public_speed.rs` 建独立子结构体，挂到 `diagnostics/mod.rs` 三处 match；务必加 locale key 并 `cargo test`。
-- **实现 Adapter 的 IP 配置（item 4，headline 待办）**：需 Windows 侧改写网卡配置（`netsh` 被禁用，可用 WMI `Win32_NetworkAdapterConfiguration` 或 `windows-rs` 的 `CreateUnicastIpAddressEntry`/`SetInterfaceDnsSettings`）。**高风险**：误配可使用户掉线，须做编辑态 UI + 校验 + 应用前确认。
-- **跨平台**：任何新增网络能力都要在 `cfg(target_os = "windows")` 与 `cfg(not(...))` 两侧都给实现或明确 stub，参照 `utils/net.rs`。当前阶段聚焦 Windows，非 Windows 可暂留 stub。
+- **实现 Adapter 的 IP 配置（item 4，最大 headline 待办）**：需 Windows 侧改写网卡配置（`netsh` 被禁用，可用 WMI `Win32_NetworkAdapterConfiguration` 或 `windows-rs` 的 `CreateUnicastIpAddressEntry`/`SetInterfaceDnsSettings`）。**高风险**：误配可使用户掉线，须做编辑态 UI + 校验 + 应用前确认。
+- **Scanner 厂商列（OUI）**：当前 vendor 列未实现，可内嵌常见 OUI 前缀→厂商映射补齐。
+- **跨平台**：任何新增网络能力都要在 `cfg(target_os = "windows")` 与 `cfg(not(...))` 两侧都给实现或明确 stub，参照 `utils/net.rs`。当前阶段聚焦 Windows；多个诊断工具（端口扫描/公网测速/内网测速）已天然跨平台，traceroute/链路质量仅 Windows、非 Windows 已本地化"不支持"提示。
