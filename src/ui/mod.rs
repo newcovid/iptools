@@ -6,6 +6,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
+pub mod mru;
 pub mod theme;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
