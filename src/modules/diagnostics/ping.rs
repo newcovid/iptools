@@ -266,6 +266,19 @@ impl PingTool {
         // 目标(IP/域名)是文本字段：未运行时优先用原始按键做带光标编辑
         // （字母能正常打进主机名，左右键移动光标而非调数值；方向上下仍可导航离开）。
         let on_target = self.config_state.selected() == Some(0);
+        // MRU：历史下拉 / 行尾灰字采纳 / Ctrl+R 开下拉，优先于普通文本编辑。
+        if self.mru.open || (on_target && !self.running) {
+            if crate::ui::mru::handle_mru_key(
+                &mut self.config.target,
+                &mut self.mru,
+                &self.history.borrow().targets,
+                key,
+                action,
+                self.running,
+            ) {
+                return;
+            }
+        }
         if on_target && !self.running && self.config.target.handle_key(key.code, filter_host) {
             return;
         }
@@ -347,6 +360,9 @@ impl PingTool {
         let abort = self.abort_flag.clone();
         let tx = self.tx.clone();
         let target_str = self.config.target.value();
+        if !target_str.trim().is_empty() {
+            self.history.borrow_mut().targets.record(&target_str);
+        }
         let config = self.config.clone();
 
         tokio::spawn(async move {
@@ -462,6 +478,12 @@ impl PingTool {
             i18n,
             is_focused && active_focus == FocusArea::Config,
         );
+
+        // MRU 历史下拉（覆盖在配置区顶部）。
+        if self.mru.open {
+            let entries: Vec<String> = self.history.borrow().targets.entries().to_vec();
+            crate::ui::mru::draw_mru_popup(f, config_area, &entries, self.mru.sel, i18n);
+        }
     }
 
     fn draw_dashboard(&self, f: &mut Frame, area: Rect, i18n: &I18n) {
@@ -627,7 +649,12 @@ impl PingTool {
             if i == 0 {
                 // 目标：直接输入，带光标
                 let active = is_sel && is_active && !self.running;
-                value_spans.extend(self.config.target.render_spans(active, val_base));
+                value_spans.extend(crate::ui::mru::mru_ghost_spans(
+                    &self.config.target,
+                    &self.history.borrow().targets,
+                    active,
+                    val_base,
+                ));
                 if is_sel && is_active {
                     let hint = if self.running {
                         i18n.t("diag_hint_locked")
