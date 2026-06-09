@@ -116,6 +116,16 @@ impl ScannerModule {
         // 编辑 CIDR 时需要原始按键做文本输入，不走语义动作。
         // 带光标：左右移动、Home/End、中间插入删除；Enter/Esc 退出编辑。
         if self.input_mode {
+            if crate::ui::mru::handle_mru_key(
+                &mut self.cidr_input,
+                &mut self.mru,
+                &self.history.borrow().cidrs,
+                key,
+                action,
+                false,
+            ) {
+                return;
+            }
             match key.code {
                 // 回车 / 空格 / Esc 均可结束编辑。CIDR 文本本不含空格
                 // （filter_cidr 已过滤），故空格用作「完成编辑」与诊断页一致。
@@ -161,6 +171,10 @@ impl ScannerModule {
         let abort_flag = self.abort_flag.clone();
         let tx = self.tx.clone();
         let cidr_str = self.cidr_input.value();
+
+        if !cidr_str.trim().is_empty() {
+            self.history.borrow_mut().cidrs.record(&cidr_str);
+        }
 
         if let Ok(network) = cidr_str.parse::<Ipv4Network>() {
             let count = if network.prefix() < 31 {
@@ -361,7 +375,12 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
         format!(" {} ", i18n.t("scan_range_label")),
         base,
     )];
-    spans.extend(scanner.cidr_input.render_spans(scanner.input_mode, base));
+    spans.extend(crate::ui::mru::mru_ghost_spans(
+        &scanner.cidr_input,
+        &scanner.history.borrow().cidrs,
+        scanner.input_mode,
+        base,
+    ));
     spans.push(Span::styled(
         format!(
             "   {} {}   [{}]   {} / {}",
@@ -494,5 +513,15 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
             .label(label);
 
         f.render_widget(gauge, chunks[2]);
+    }
+
+    // MRU CIDR 历史下拉：仅 input_mode 下有效；离开编辑则关闭，避免悬留。
+    if scanner.input_mode {
+        if scanner.mru.open {
+            let entries: Vec<String> = scanner.history.borrow().cidrs.entries().to_vec();
+            crate::ui::mru::draw_mru_popup(f, chunks[1], &entries, scanner.mru.sel, i18n);
+        }
+    } else {
+        scanner.mru.open = false;
     }
 }
