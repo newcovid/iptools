@@ -11,8 +11,15 @@ use ratatui::{
     widgets::{Block, Borders, Cell, List, ListItem, ListState, Paragraph, Row, Table},
 };
 use std::collections::HashMap;
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use sysinfo::Networks;
+use tokio::sync::mpsc;
+
+/// 后台重新枚举网卡的最小间隔——足够快地反映 USB 网卡插拔 / 链路启停，
+/// 又不至于每个 tick 都做一次系统 API 枚举。
+const IFACE_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
 struct TrafficStats {
     total_rx: u64,
@@ -29,6 +36,13 @@ pub struct AdapterModule {
     traffic_history: HashMap<String, TrafficStats>,
     /// 进入编辑态时为 Some；只读视图时为 None。
     pub edit: Option<EditForm>,
+    /// 后台网卡枚举结果回传通道（遵循模块异步契约：spawn → mpsc → update 消费）。
+    iface_tx: mpsc::UnboundedSender<Vec<InterfaceInfo>>,
+    iface_rx: mpsc::UnboundedReceiver<Vec<InterfaceInfo>>,
+    /// 防止多个后台枚举任务叠加。
+    scan_in_flight: Arc<AtomicBool>,
+    /// 上次发起后台枚举的时刻，用于节流。
+    last_scan: Instant,
 }
 
 impl AdapterModule {
@@ -39,18 +53,47 @@ impl AdapterModule {
             state.select(Some(0));
         }
 
+        let (iface_tx, iface_rx) = mpsc::unbounded_channel();
+
         Self {
             state,
             interfaces,
             networks: Networks::new_with_refreshed_list(),
             traffic_history: HashMap::new(),
             edit: None,
+            iface_tx,
+            iface_rx,
+            scan_in_flight: Arc::new(AtomicBool::new(false)),
+            last_scan: Instant::now(),
         }
     }
 
     pub fn update(&mut self) {
         if let Some(form) = &mut self.edit {
             form.update();
+        }
+
+        // 消费后台枚举结果：状态/插拔变化会在这里自动并入 UI。
+        while let Ok(list) = self.iface_rx.try_recv() {
+            self.apply_interface_update(list);
+        }
+
+        // 周期性地在后台线程重新枚举网卡，自动反映活跃/不活跃切换与插拔。
+        // 编辑态下暂停，避免列表在用户编辑时变动导致索引错位。
+        if self.edit.is_none()
+            && !self.scan_in_flight.load(Ordering::Relaxed)
+            && self.last_scan.elapsed() >= IFACE_REFRESH_INTERVAL
+        {
+            self.last_scan = Instant::now();
+            self.scan_in_flight.store(true, Ordering::Relaxed);
+            let tx = self.iface_tx.clone();
+            let flag = self.scan_in_flight.clone();
+            // get_interfaces 是同步 FFI，放进阻塞线程池，绝不阻塞渲染线程。
+            tokio::task::spawn_blocking(move || {
+                let list = net::get_interfaces();
+                let _ = tx.send(list);
+                flag.store(false, Ordering::Relaxed);
+            });
         }
 
         self.networks.refresh(true);
@@ -85,16 +128,37 @@ impl AdapterModule {
         }
     }
 
+    /// 手动刷新（'r' 键）：同步枚举一次，立即反馈。
     pub fn reload(&mut self) {
-        self.interfaces = net::get_interfaces();
-        if let Some(selected) = self.state.selected() {
-            if selected >= self.interfaces.len() {
-                self.state
-                    .select(Some(self.interfaces.len().saturating_sub(1)));
-            }
-        } else if !self.interfaces.is_empty() {
-            self.state.select(Some(0));
+        // 立刻拿到结果，同时重置节流计时器，避免随后又马上后台再扫一次。
+        self.last_scan = Instant::now();
+        let list = net::get_interfaces();
+        self.apply_interface_update(list);
+    }
+
+    /// 用新枚举结果替换网卡列表，并尽量保留当前选中项（按 GUID，退化按名称）。
+    /// 后台自动刷新与手动刷新共用，确保选中焦点在插拔/重排后不丢失。
+    fn apply_interface_update(&mut self, new_list: Vec<InterfaceInfo>) {
+        let selected_key = self
+            .state
+            .selected()
+            .and_then(|i| self.interfaces.get(i))
+            .map(|i| (i.guid.clone(), i.name.clone()));
+
+        self.interfaces = new_list;
+
+        if self.interfaces.is_empty() {
+            self.state.select(None);
+            return;
         }
+
+        let new_idx = selected_key.and_then(|(guid, name)| {
+            self.interfaces
+                .iter()
+                .position(|i| (!guid.is_empty() && i.guid == guid) || i.name == name)
+        });
+
+        self.state.select(Some(new_idx.unwrap_or(0)));
     }
 
     pub fn on_key(&mut self, key: KeyEvent, action: Option<Action>) {
