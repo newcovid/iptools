@@ -1,4 +1,5 @@
 use crate::app::App;
+use crate::utils::format::{format_bytes, format_speed};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     prelude::*,
@@ -101,8 +102,8 @@ impl TrafficModule {
                 let duration = now.duration_since(prev.last_update).as_secs_f64();
                 // 只有当时间间隔足够长时才更新速率，避免除零或波动过大
                 if duration > 0.1 {
-                    rx_speed = ((current_rx - prev.total_rx) as f64 / duration) as u64;
-                    tx_speed = ((current_tx - prev.total_tx) as f64 / duration) as u64;
+                    rx_speed = (current_rx.saturating_sub(prev.total_rx) as f64 / duration) as u64;
+                    tx_speed = (current_tx.saturating_sub(prev.total_tx) as f64 / duration) as u64;
 
                     prev.total_rx = current_rx;
                     prev.total_tx = current_tx;
@@ -268,24 +269,4 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
         );
 
     f.render_stateful_widget(t, area, &mut traffic.state);
-}
-
-fn format_speed(bps: u64) -> String {
-    let kbps = bps as f64 / 1024.0;
-    if kbps < 1024.0 {
-        format!("{:.1} KB/s", kbps)
-    } else {
-        format!("{:.2} MB/s", kbps / 1024.0)
-    }
-}
-
-fn format_bytes(bytes: u64) -> String {
-    let kb = bytes as f64 / 1024.0;
-    if kb < 1024.0 {
-        format!("{:.1} KB", kb)
-    } else if kb < 1024.0 * 1024.0 {
-        format!("{:.1} MB", kb / 1024.0)
-    } else {
-        format!("{:.1} GB", kb / 1024.0 / 1024.0)
-    }
 }

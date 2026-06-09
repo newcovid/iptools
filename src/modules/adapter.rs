@@ -1,5 +1,6 @@
 use crate::app::App;
 use crate::ui::theme; // 引入主题
+use crate::utils::format::{format_bytes, format_speed};
 use crate::utils::i18n::I18n;
 use crate::utils::net::{self, InterfaceInfo};
 use crossterm::event::{KeyCode, KeyEvent};
@@ -53,8 +54,9 @@ impl AdapterModule {
             if let Some(prev) = self.traffic_history.get_mut(name) {
                 let duration = now.duration_since(prev.last_update).as_secs_f64();
                 if duration > 0.1 {
-                    prev.rx_speed = ((rx - prev.total_rx) as f64 / duration) as u64;
-                    prev.tx_speed = ((tx - prev.total_tx) as f64 / duration) as u64;
+                    // saturating_sub：避免计数器回绕时下溢 panic
+                    prev.rx_speed = (rx.saturating_sub(prev.total_rx) as f64 / duration) as u64;
+                    prev.tx_speed = (tx.saturating_sub(prev.total_tx) as f64 / duration) as u64;
                     prev.total_rx = rx;
                     prev.total_tx = tx;
                     prev.last_update = now;
@@ -363,24 +365,4 @@ fn render_detail_table<'a>(
     Table::new(rows, [Constraint::Length(16), Constraint::Min(0)])
         .column_spacing(1)
         .style(val_style)
-}
-
-fn format_speed(bps: u64) -> String {
-    let kbps = bps as f64 / 1024.0;
-    if kbps < 1024.0 {
-        format!("{:.1} KB/s", kbps)
-    } else {
-        format!("{:.2} MB/s", kbps / 1024.0)
-    }
-}
-
-fn format_bytes(bytes: u64) -> String {
-    let kb = bytes as f64 / 1024.0;
-    if kb < 1024.0 {
-        format!("{:.1} KB", kb)
-    } else if kb < 1024.0 * 1024.0 {
-        format!("{:.1} MB", kb / 1024.0)
-    } else {
-        format!("{:.2} GB", kb / 1024.0 / 1024.0)
-    }
 }
