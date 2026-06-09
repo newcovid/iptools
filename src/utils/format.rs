@@ -14,6 +14,14 @@ pub fn format_speed(bytes_per_sec: u64) -> String {
     }
 }
 
+/// 同时给出 MB/s 与 Mbps 两种习惯单位，例如 "11.84 MB/s (99.3 Mbps)"。
+/// 测速类工具用：MB/s 以 1024 进制、Mbps 以 1000 进制 ×8（行业惯例）。
+pub fn format_speed_dual(bytes_per_sec: u64) -> String {
+    let mb_s = bytes_per_sec as f64 / 1024.0 / 1024.0;
+    let mbps = bytes_per_sec as f64 * 8.0 / 1_000_000.0;
+    format!("{:.2} MB/s ({:.1} Mbps)", mb_s, mbps)
+}
+
 /// 将字节数格式化为可读体积字符串（二进制单位）。
 pub fn format_bytes(bytes: u64) -> String {
     let kb = bytes as f64 / 1024.0;
@@ -48,5 +56,14 @@ mod tests {
         assert_eq!(format_bytes(1024), "1.0 KB");
         assert_eq!(format_bytes(1024 * 1024), "1.0 MB");
         assert_eq!(format_bytes(1024 * 1024 * 1024), "1.00 GB");
+    }
+
+    #[test]
+    fn speed_dual_shows_both_units() {
+        // 12.5 MB/s = 100 Mbps（12.5 * 1024 * 1024 字节/秒）
+        assert_eq!(
+            format_speed_dual(12_500_000),
+            "11.92 MB/s (100.0 Mbps)"
+        );
     }
 }

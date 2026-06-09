@@ -3,16 +3,18 @@ use crate::keymap::Action;
 use crossterm::event::KeyEvent;
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph}, // 修复：添加 Paragraph
+    widgets::{Block, Borders, List, ListItem, ListState},
 };
 
 pub mod icmp;
+pub mod lan_speed;
 pub mod link_quality;
 pub mod ping;
 pub mod port_scan;
 pub mod public_speed;
 pub mod trace;
 
+use lan_speed::LanSpeedTool;
 use link_quality::LinkQualityTool;
 use ping::PingTool;
 use port_scan::PortScanTool;
@@ -58,6 +60,7 @@ pub struct DiagnosticsModule {
     pub public_speed_tool: PublicSpeedTool,
     pub trace_tool: TraceTool,
     pub link_quality_tool: LinkQualityTool,
+    pub lan_speed_tool: LanSpeedTool,
 }
 
 impl DiagnosticsModule {
@@ -82,6 +85,7 @@ impl DiagnosticsModule {
             public_speed_tool: PublicSpeedTool::new(),
             trace_tool: TraceTool::new(),
             link_quality_tool: LinkQualityTool::new(),
+            lan_speed_tool: LanSpeedTool::new(),
         }
     }
 
@@ -92,7 +96,7 @@ impl DiagnosticsModule {
             DiagnosticTool::NetSpeed => self.public_speed_tool.update(),
             DiagnosticTool::Trace => self.trace_tool.update(),
             DiagnosticTool::LinkQuality => self.link_quality_tool.update(),
-            _ => {}
+            DiagnosticTool::LanSpeed => self.lan_speed_tool.update(),
         }
     }
 
@@ -121,7 +125,9 @@ impl DiagnosticsModule {
                     DiagnosticTool::LinkQuality => {
                         self.link_quality_tool.on_key(key, action, self.active_focus)
                     }
-                    _ => {}
+                    DiagnosticTool::LanSpeed => {
+                        self.lan_speed_tool.on_key(key, action, self.active_focus)
+                    }
                 }
             }
         }
@@ -240,24 +246,9 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App, is_focused: bool) {
             diag.link_quality_tool
                 .draw(f, chunks[1], chunks[2], i18n, is_focused, diag.active_focus);
         }
-        _ => {
-            // 占位符分支
-            let main_block = Block::default()
-                .borders(Borders::ALL)
-                .title(i18n.t("diag_main_title"))
-                .border_style(Style::default().fg(Color::DarkGray));
-            let conf_block = Block::default()
-                .borders(Borders::ALL)
-                .title(i18n.t("diag_config_title"))
-                .border_style(Style::default().fg(Color::DarkGray));
-
-            f.render_widget(
-                Paragraph::new(i18n.t("diag_coming_soon")).block(main_block),
-                chunks[1],
-            );
-
-            // 修复：直接渲染 conf_block，去掉错误的 .block(...) 调用
-            f.render_widget(conf_block, chunks[2]);
+        DiagnosticTool::LanSpeed => {
+            diag.lan_speed_tool
+                .draw(f, chunks[1], chunks[2], i18n, is_focused, diag.active_focus);
         }
     }
 }
