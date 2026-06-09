@@ -113,9 +113,33 @@ cargo check              # 快速类型检查
 - **掩码预填**：表单掩码取自 `InterfaceInfo.cidr`，而 `net.rs` 计算 cidr 时若用 `prefix_ip == ip` 匹配会命中 `/32` 主机路由（Windows 的 prefixes 同时含子网/主机/广播项），算出 `255.255.255.255`，使 `EnableStatic` 返回错误码 **66**。正确做法：在 prefixes 中按「网络地址匹配且 `0<len<32` 取最长前缀」选真实子网。
 - **`wmi::get_method` 对无入参方法返回 `Ok(None)`**（如 `EnableDHCP`），不是错误。`ipconfig::invoke` 据此：`None` 时以 `None` 入参直接 `exec_method`，勿当「方法不存在」报错。WMI 返回码经 `wmi_return_desc` 翻成中文。
 
+### 目标历史（MRU）（`history.rs` + `ui/mru.rs`）
+
+所有目标 IP/主机与 CIDR 输入框共享「最近使用」历史，免去重复输入：
+
+- **两个独立池**：`targets`（IP/主机，Ping/Trace/端口扫描/链路质量/内网对端跨工具**共享**）与 `cidrs`（扫描页 CIDR，**独立**）。上限各 15 条，最近在前，插入自动去重。
+- **共享所有权**：`App` 持 `Rc<RefCell<HistoryStore>>`，在 `new()` 里克隆注入各工具；工具保留 `Rc` 引用，对池的写入（`record()`）立即跨工具可见。
+- **键位零冲突**：
+  - 行尾 `→`（光标在末尾时）：采纳灰字补全整条。`↑↓`/`Tab` 在下拉关时仍走原义（切字段/切区域）。
+  - `Ctrl+R`（`Action::History`）：打开下拉浮层；`↑↓` 选、`Enter` 填入并关、`Esc`/其它键关（不改值）。下拉开时所有键盘事件均被 `handle_mru_key` 捕获，不穿透到字段切换。
+  - 灰字渲染经 `TextInput::render_spans_with_ghost` + `mru_ghost_spans`；下拉浮层经 `draw_mru_popup`（黄色边框，覆盖于配置区顶部，最多 8 行）。
+- **记录时机**：各工具在 `start()`（或扫描开始）时调 `history.borrow_mut().targets/cidrs.record(&value)`，确保「真正使用过的目标」才入历史，而非每次键入。
+- **持久化**：`SessionState.history: HistoryPersist`（两个 `Vec<String>`），随脏检查写盘（`maybe_persist`），`reset_session()` 一并清空（「清空参数记忆」涵盖历史）。启动时 `apply_session` 回灌到共享 store。
+
+### 公网信息抓取（`dashboard.rs` + `utils/pubip.rs` + `config.public_ip`）
+
+概览页公网信息改为多端点 HTTPS 回退链，修复了 TUN/代理/限流场景下取不到的问题：
+
+- **多端点回退**：`Config.public_ip.endpoints` 按序尝试，首个成功即用；默认链：`https://api.ip.sb/geoip`（kind=ipsb）→ `https://ipinfo.io/json`（kind=ipinfo）。用户可在 `config.json` 的 `public_ip` 段自定义端点顺序、增减条目。
+- **kind 声明解析器**：`utils/pubip.rs::parse(kind, body)` 按 `kind` 分派解析（`ipsb`/`ipinfo`/`plaintext`），归一化输出 `PublicInfo { ip, city, region, country, isp }`；各解析器有单测。
+- **尊重系统代理**：`use_system_proxy: true`（默认）时 `reqwest::Client` 不加 `no_proxy()`，自动读取 `HTTP_PROXY`/`HTTPS_PROXY` 等环境变量，TUN 软件设置的系统代理也生效。`false` = 强制直连（高级选项，无 UI 开关）。
+- **8s 超时**：`timeout(Duration::from_secs(8))`，避免长时间卡住概览页。
+- **地理名英文化**：ip.sb/ipinfo 返回英文地名，不再随界面语言变化（这两家不支持本地化）。
+- **无需改 Cargo**：`reqwest` 已开 `default-tls`（Windows 用 schannel），HTTPS 开箱即用。
+
 ### 配置（`config.rs`）
 
-`config.json` 默认在当前工作目录，可经 `-c/--config` 指定。`Config` 记录来源路径、`save()` 写回同一文件。字段：`language`、`scan_concurrency`、`keybindings`、`session`。该文件已**不再纳入 git**（本地运行时状态），参考样例见 `config.example.json`。
+`config.json` 默认在当前工作目录，可经 `-c/--config` 指定。`Config` 记录来源路径、`save()` 写回同一文件。字段：`language`、`scan_concurrency`、`keybindings`、`session`、`public_ip`。该文件已**不再纳入 git**（本地运行时状态），参考样例见 `config.example.json`。
 
 ### 会话参数持久化（`session.rs` + `app.rs::maybe_persist`）
 
@@ -127,6 +151,7 @@ cargo check              # 快速类型检查
 - **链路质量「按网卡保存」**：`LinkQualityTool` 持 `saved_adapters: BTreeMap<网卡键, LinkParams>` + `current_key`。网卡键由 `iface_key()` 取 **GUID→MAC→名称**回退（GUID 在 Windows 重启稳定）。←→ 切换网卡时 `stash_current()`（归档旧网卡 live 参数）→ 移动索引 → `load_current()`（载入新网卡参数，无记录则默认）。`export_persist` 把 live 参数合并进 `current_key` 再导出；`apply_persist` 恢复整张表并按 `selected` 键重新定位选中项。于是「无线网卡 / 有线网卡各记各的目标 IP，切换自动跟随，重启不丢」。BTreeMap 保证序列化顺序稳定，避免脏检查误判。
 - **界面位置记忆**（`SessionState.ui: UiPersist`）：`last_tab`/`last_diag_tool` 索引。`snapshot_session` 写入、`apply_session` 启动还原（`CurrentTab::from_index`、`DiagnosticsModule::set_tool_by_index`）。切标签/子工具会触发一次写盘（人手速度，可接受）。
 - **清空参数记忆**（设置页第 3 项 `ResetSession`）：设置模块够不到其他模块，故只置 `pending_reset` 标志，`App` 在 dispatch 后 `take_reset()` → `reset_session()`：把 `config.session` 重置为默认（**保留当前 `ui` 位置**，不把用户弹离设置页）→ 落盘 → `apply_session` 回灌 → `scanner.reset_to_default()`（CIDR 单独回到按网卡自动推断，因 `apply_persist` 对空 CIDR 是 no-op）。`Confirm` 触发，箭头不触发（防误清）。
+- **目标历史池持久化**（`SessionState.history: HistoryPersist`）：`targets`（跨工具共享）与 `cidrs`（扫描独立）两个 `Vec<String>` 随同其它 session 字段写盘；`reset_session()` 一并清空；`apply_session` 回灌到 `App` 的共享 `Rc<RefCell<HistoryStore>>`。详见上方「目标历史（MRU）」节。
 - 校验在 `start()` 而非持久化层：回灌的是**界面文本原样**（如端口/超时按 `TextInput` 字符串存），启动时各工具仍走原有 `parse().clamp()` 校验，故脏数据不会绕过下限/上限。
 
 ### 主机名解析三级回退（`utils/net.rs::resolve_hostname`）
@@ -148,7 +173,7 @@ cargo check              # 快速类型检查
 > 历史上的「计数器回绕 panic」「`-c/--config` 失效」「默认语言不一致」三项已修复。
 
 1. **Scanner 只能发现同二层子网主机**：基于 `SendARP`，跨网段、或目标禁 ARP/已离线但有缓存的情况都不可靠；且整列"厂商"(vendor) 在 locale 里标注"暂未实现"（尚无 OUI 数据库）。
-2. **公网 IP 用明文 HTTP**：`http://ip-api.com`（非 HTTPS，免费档 45 req/min 限流），并强制 `no_proxy()`。代理环境下仍直连。
+2. ~~**公网 IP 用明文 HTTP**~~（**已修**）：已改为 HTTPS 多端点回退（ip.sb→ipinfo）、尊重系统代理（去掉强制 `no_proxy`）、8s 超时，TUN/代理环境下可正常获取。详见「公网信息抓取」节。
 3. **Resize 事件被吞**：`app.on_resize` 为空实现（ratatui 每帧按 `f.area()` 重新布局，影响小）。鼠标已实现（见下）。
 
 ## 待办 / 提示
