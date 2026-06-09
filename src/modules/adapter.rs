@@ -175,12 +175,13 @@ impl AdapterModule {
             return;
         }
 
-        // 只读态
+        // 只读态。本页唯一的主操作就是「编辑选中网卡的 IP」，因此在不产生歧义的
+        // 前提下，Edit(e)/Confirm(Enter)/Toggle(Space) 都触发它，符合直觉。
         match action {
             Some(Action::Down) => self.next(),
             Some(Action::Up) => self.previous(),
             Some(Action::Refresh) => self.reload(),
-            Some(Action::Edit) => self.enter_edit(),
+            Some(Action::Edit) | Some(Action::Confirm) | Some(Action::Toggle) => self.enter_edit(),
             _ => {}
         }
     }
@@ -229,6 +230,8 @@ impl AdapterModule {
 }
 
 pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
+    // 动态取「编辑」动作的绑定键，避免写死 'e'（用户可在 config 改键）。
+    let edit_label = app.keymap.primary_label(Action::Edit);
     let i18n = &app.i18n;
     let adapter_module = &mut app.adapter;
 
@@ -277,7 +280,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
         .title(i18n.t("adapter_detail_title"))
         .title(
             Line::from(Span::styled(
-                format!(" {} ", i18n.t("adapter_edit_enter")),
+                format!(" [{}] {} ", edit_label, i18n.t("adapter_edit_enter")),
                 Style::default().fg(theme::COLOR_SECONDARY),
             ))
             .alignment(Alignment::Right),

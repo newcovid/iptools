@@ -120,7 +120,13 @@ impl Action {
             ],
             Action::ToggleLanguage => vec![c(Char('l'), KeyModifiers::CONTROL)],
             Action::NextTab => vec![plain(Tab)],
-            Action::PrevTab => vec![plain(BackTab)],
+            // Shift+Tab 在不同终端可能上报为：BackTab(无修饰)、BackTab+Shift、
+            // 或 Tab+Shift。三种都绑上，避免「上一标签页」在 Windows 终端失效。
+            Action::PrevTab => vec![
+                plain(BackTab),
+                c(BackTab, KeyModifiers::SHIFT),
+                c(Tab, KeyModifiers::SHIFT),
+            ],
             Action::Up => vec![plain(Up), plain(Char('k'))],
             Action::Down => vec![plain(Down), plain(Char('j'))],
             Action::Left => vec![plain(Left), plain(Char('h'))],
