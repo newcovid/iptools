@@ -105,5 +105,22 @@
     "diag_msg_start": "Press 'Space' to Start",
     "diag_msg_stop": "Press 'Space' to Stop",
     "diag_msg_focus_hint": "Press ENTER to Interact",
-    "diag_msg_interact_hint": "TAB: Switch Panel | ESC: Exit"
+    "diag_msg_interact_hint": "TAB: Switch Panel | ESC: Exit",
+    "common_status": "Status",
+    "common_traffic": "Traffic",
+    "dash_no_active_iface": "No active interface found",
+    "adapter_select_hint": "Select an adapter",
+    "adapter_none_selected": "No adapter selected",
+    "adapter_traffic_calc": "Calculating...",
+    "diag_coming_soon": "Coming Soon...",
+    "diag_ping_chart_title": "Latency History",
+    "diag_ping_log_title": "Log Stream",
+    "diag_ping_log_reply": "Reply",
+    "diag_ping_log_timeout": "Request timed out",
+    "diag_ping_log_error": "Error",
+    "diag_ping_err_dns_empty": "DNS returned no address",
+    "diag_ping_err_dns": "DNS resolution failed",
+    "diag_ping_err_ipv6": "IPv6 ping not supported on Windows",
+    "diag_ping_err_perm": "Permission denied (root required on Unix)",
+    "diag_ping_err_generic": "Ping error"
 }

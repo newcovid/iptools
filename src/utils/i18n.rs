@@ -60,6 +60,42 @@ fn system_locale_tag() -> String {
         .unwrap_or_default()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(json: &str) -> HashMap<String, String> {
+        serde_json::from_str(json).expect("locale JSON must parse")
+    }
+
+    /// 锁定不变量：两份语言包的 key 集合必须完全一致。
+    /// 任何新增 UI 文案若只加了一种语言，此测试会立即失败，
+    /// 从根上杜绝 `MISSING:<key>` 与硬编码漏翻。
+    #[test]
+    fn locale_keys_are_in_sync() {
+        let en = parse(include_str!("../../assets/locales/en-US.json"));
+        let zh = parse(include_str!("../../assets/locales/zh-CN.json"));
+
+        let only_en: Vec<&String> = en.keys().filter(|k| !zh.contains_key(*k)).collect();
+        let only_zh: Vec<&String> = zh.keys().filter(|k| !en.contains_key(*k)).collect();
+
+        assert!(
+            only_en.is_empty() && only_zh.is_empty(),
+            "locale key mismatch\n  only in en-US: {:?}\n  only in zh-CN: {:?}",
+            only_en,
+            only_zh
+        );
+    }
+
+    #[test]
+    fn falls_back_to_english_then_marks_missing() {
+        let i18n = I18n::new(Language::Zh);
+        assert_eq!(i18n.t("nonexistent_key_xyz"), "MISSING:nonexistent_key_xyz");
+        // 已知存在的 key 不应返回 MISSING
+        assert!(!i18n.t("tab_dashboard").starts_with("MISSING"));
+    }
+}
+
 pub struct I18n {
     current_lang: Language,
     dictionaries: HashMap<String, HashMap<String, String>>,

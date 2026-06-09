@@ -358,9 +358,9 @@ fn draw_local_panel(f: &mut Frame, area: Rect, dash: &Dashboard, i18n: &I18n) {
         }
     } else {
         rows.push(Row::new(vec![
-            Cell::from(Span::styled("Status", key_style)),
+            Cell::from(Span::styled(i18n.t("common_status"), key_style)),
             Cell::from(Span::styled(
-                "No active interface found",
+                i18n.t("dash_no_active_iface"),
                 Style::default().fg(theme::COLOR_ERROR),
             )),
         ]));

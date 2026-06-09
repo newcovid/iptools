@@ -105,5 +105,22 @@
     "diag_msg_start": "按 Space 键开始",
     "diag_msg_stop": "按 Space 键停止",
     "diag_msg_focus_hint": "按回车键进入交互模式",
-    "diag_msg_interact_hint": "TAB: 切换区域 | ESC: 退出交互"
+    "diag_msg_interact_hint": "TAB: 切换区域 | ESC: 退出交互",
+    "common_status": "状态",
+    "common_traffic": "流量",
+    "dash_no_active_iface": "未找到活跃网卡",
+    "adapter_select_hint": "请选择一个网卡",
+    "adapter_none_selected": "未选择网卡",
+    "adapter_traffic_calc": "计算中...",
+    "diag_coming_soon": "敬请期待...",
+    "diag_ping_chart_title": "延迟历史",
+    "diag_ping_log_title": "日志流",
+    "diag_ping_log_reply": "回复",
+    "diag_ping_log_timeout": "请求超时",
+    "diag_ping_log_error": "错误",
+    "diag_ping_err_dns_empty": "DNS 未返回地址",
+    "diag_ping_err_dns": "DNS 解析失败",
+    "diag_ping_err_ipv6": "Windows 暂不支持 IPv6 Ping",
+    "diag_ping_err_perm": "权限不足（Unix 下需要 root 权限）",
+    "diag_ping_err_generic": "Ping 出错"
 }
