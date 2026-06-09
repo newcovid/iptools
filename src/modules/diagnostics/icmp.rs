@@ -133,7 +133,7 @@ pub fn echo_once_from(
 
     let src_u32 = u32::from_le_bytes(src.octets());
     let dest_u32 = u32::from_le_bytes(dest.octets());
-    let payload = vec![0u8; payload_len.min(1472)];
+    let payload = vec![0u8; payload_len.clamp(1, 1472)];
     const REPLY_SIZE: usize = 2048 + 65535;
 
     let handle = match unsafe { IcmpCreateFile() } {
