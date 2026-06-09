@@ -55,7 +55,7 @@
     "adapter_name_desc": "Name / Desc",
     "adapter_traffic_rate": "Traffic Rate",
     "adapter_traffic_total": "Total Data",
-    "adapter_edit_enter": "[e] Edit IP",
+    "adapter_edit_enter": "Edit IP",
     "adapter_edit_title": "Edit IP Config",
     "adapter_edit_mode": "Assignment",
     "adapter_field_ip": "IPv4 Address",

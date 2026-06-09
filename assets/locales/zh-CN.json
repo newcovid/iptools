@@ -55,7 +55,7 @@
     "adapter_name_desc": "名称 / 描述",
     "adapter_traffic_rate": "实时速率",
     "adapter_traffic_total": "总流量",
-    "adapter_edit_enter": "[e] 编辑 IP",
+    "adapter_edit_enter": "编辑 IP",
     "adapter_edit_title": "编辑 IP 配置",
     "adapter_edit_mode": "分配方式",
     "adapter_field_ip": "IPv4 地址",
