@@ -351,6 +351,21 @@ impl LinkQualityTool {
             }
         }
 
+        // MRU 历史下拉 / 行尾灰字采纳 / Ctrl+R 开下拉，仅对目标字段（idx==1）启用。
+        let on_target = idx == 1;
+        if self.mru.open || (on_target && !self.running) {
+            if crate::ui::mru::handle_mru_key(
+                &mut self.config.target,
+                &mut self.mru,
+                &self.history.borrow().targets,
+                key,
+                action,
+                self.running,
+            ) {
+                return;
+            }
+        }
+
         // 文本字段（idx 1..=5）：带光标编辑
         if idx >= 1 && !self.running {
             let too_long =
@@ -558,6 +573,7 @@ impl LinkQualityTool {
             self.error_key = Some("diag_link_err".to_string());
             return;
         }
+        self.history.borrow_mut().targets.record(&target);
 
         // 静态快照：无线则查一次完整无线信息
         let wireless = if iface.is_wifi {
@@ -673,6 +689,16 @@ impl LinkQualityTool {
     ) {
         self.draw_main(f, main_area, i18n, is_focused, active_focus);
         self.draw_config(f, config_area, i18n, is_focused, active_focus);
+
+        // MRU 历史下拉：仅在配置栏聚焦时有效；失焦则关闭，避免下拉悬留。
+        if is_focused && active_focus == FocusArea::Config {
+            if self.mru.open {
+                let entries: Vec<String> = self.history.borrow().targets.entries().to_vec();
+                crate::ui::mru::draw_mru_popup(f, config_area, &entries, self.mru.sel, i18n);
+            }
+        } else {
+            self.mru.open = false;
+        }
     }
 
     fn draw_main(
@@ -1019,20 +1045,43 @@ impl LinkQualityTool {
                     None
                 };
                 items.push(config_field_item(&labels[0], is_sel, is_active, &iface_input, false, hint));
+            } else if i == 1 {
+                // 目标字段：带 MRU 灰字补全，手动拼装（不走 config_field_item）。
+                let val_base = if is_sel && is_active {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                let marker = if is_sel { ">> " } else { "   " };
+                let mut spans = vec![Span::styled(marker.to_string(), val_base)];
+                spans.extend(crate::ui::mru::mru_ghost_spans(
+                    &self.config.target,
+                    &self.history.borrow().targets,
+                    active,
+                    val_base,
+                ));
+                if active {
+                    spans.push(Span::styled(
+                        format!("  ({})", i18n.t("diag_hint_input")),
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                }
+                let label_line = Line::from(Span::styled(
+                    format!("{}:", labels[1]),
+                    Style::default().fg(if is_sel { Color::Yellow } else { Color::Gray }),
+                ));
+                items.push(ListItem::new(vec![label_line, Line::from(spans)]));
             } else {
                 let input = match i {
-                    1 => &self.config.target,
                     2 => &self.config.count,
                     3 => &self.config.interval_ms,
                     4 => &self.config.timeout_ms,
                     _ => &self.config.packet_size,
                 };
                 let hint = if active {
-                    Some(if i == 1 {
-                        i18n.t("diag_hint_input")
-                    } else {
-                        i18n.t("diag_hint_digits")
-                    })
+                    Some(i18n.t("diag_hint_digits"))
                 } else {
                     None
                 };
