@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::keymap::{Action, KeyMap};
 use crate::modules::adapter::AdapterModule;
 use crate::modules::dashboard::Dashboard;
 use crate::modules::diagnostics::DiagnosticsModule;
@@ -6,7 +7,7 @@ use crate::modules::scanner::ScannerModule;
 use crate::modules::settings::SettingsModule;
 use crate::modules::traffic::TrafficModule;
 use crate::utils::i18n::I18n;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::KeyEvent;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CurrentTab {
@@ -46,9 +47,12 @@ pub struct App {
     pub running: bool,
     pub current_tab: CurrentTab,
     pub diag_focused: bool,
+    /// 是否显示快捷键帮助浮层（模态）。
+    pub show_help: bool,
 
     pub config: Config,
     pub i18n: I18n,
+    pub keymap: KeyMap,
 
     pub dashboard: Dashboard,
     pub adapter: AdapterModule,
@@ -59,14 +63,16 @@ pub struct App {
 }
 
 impl App {
-    pub fn new() -> Self {
-        let config = Config::load();
+    pub fn new(config_path: Option<String>) -> Self {
+        let config = Config::load(config_path.as_deref());
         let i18n = I18n::new(config.language);
+        let keymap = config.keymap();
 
         let mut app = Self {
             running: true,
             current_tab: CurrentTab::Dashboard,
             diag_focused: false,
+            show_help: false,
             dashboard: Dashboard::new(),
             adapter: AdapterModule::new(),
             scanner: ScannerModule::new(),
@@ -75,6 +81,7 @@ impl App {
             diagnostics: DiagnosticsModule::new(),
             config,
             i18n,
+            keymap,
         };
 
         app.dashboard.fetch_public_ip(app.i18n.get_lang().as_str());
@@ -108,44 +115,59 @@ impl App {
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Char('q') | KeyCode::Char('c')
-                if key.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
+        let action = self.keymap.action_for(key);
+
+        // 0. 帮助浮层是模态的：显示时除退出外的任意键都用于关闭它
+        if self.show_help {
+            if action == Some(Action::Quit) {
+                self.running = false;
+            } else {
+                self.show_help = false;
+            }
+            return;
+        }
+
+        // 1. 全局动作：任何标签页 / 任何模式下都生效
+        match action {
+            Some(Action::Quit) => {
                 self.running = false;
                 return;
             }
-            KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(Action::ToggleLanguage) => {
                 self.toggle_language();
+                return;
+            }
+            Some(Action::Help) => {
+                self.show_help = true;
                 return;
             }
             _ => {}
         }
 
+        // 2. 诊断页的两级焦点模型（进入交互后按键交给子模块）
         if self.current_tab == CurrentTab::Diagnostics {
             if self.diag_focused {
-                if key.code == KeyCode::Esc {
+                if action == Some(Action::Back) {
                     self.diag_focused = false;
                     return;
                 }
-                self.diagnostics.on_key(key);
+                self.diagnostics
+                    .on_key(key, action, self.config.scan_concurrency);
                 return;
-            } else {
-                // 修复：使用 || 而不是 |
-                if key.code == KeyCode::Enter || key.code == KeyCode::Char(' ') {
-                    self.diag_focused = true;
-                    return;
-                }
+            } else if action == Some(Action::Confirm) {
+                self.diag_focused = true;
+                return;
             }
         }
 
-        match key.code {
-            KeyCode::Tab => {
+        // 3. 主标签页切换
+        match action {
+            Some(Action::NextTab) => {
                 self.current_tab = self.current_tab.next();
                 self.diag_focused = false;
                 return;
             }
-            KeyCode::BackTab => {
+            Some(Action::PrevTab) => {
                 self.current_tab = self.current_tab.previous();
                 self.diag_focused = false;
                 return;
@@ -153,16 +175,18 @@ impl App {
             _ => {}
         }
 
+        // 4. 分发给当前模块。需要原始按键做文本输入的模块（scanner）同时收到 key。
         match self.current_tab {
-            CurrentTab::Dashboard => self.dashboard.on_key(key, self.i18n.get_lang().as_str()),
-            CurrentTab::Adapter => self.adapter.on_key(key),
+            CurrentTab::Dashboard => self.dashboard.on_key(action, self.i18n.get_lang().as_str()),
+            CurrentTab::Adapter => self.adapter.on_key(key, action),
             CurrentTab::Scanner => {
-                self.scanner.on_key(key, self.config.scan_concurrency);
+                self.scanner
+                    .on_key(key, action, self.config.scan_concurrency);
             }
-            CurrentTab::Traffic => self.traffic.on_key(key),
+            CurrentTab::Traffic => self.traffic.on_key(action),
             CurrentTab::Settings => {
                 self.settings
-                    .on_key(key, &mut self.config, &mut self.i18n, &mut self.dashboard);
+                    .on_key(action, &mut self.config, &mut self.i18n, &mut self.dashboard);
             }
             CurrentTab::Diagnostics => {}
         }

@@ -5,6 +5,7 @@ use std::io;
 mod app;
 mod config;
 mod event;
+mod keymap;
 mod modules;
 mod tui;
 mod ui;
@@ -28,11 +29,12 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     // 解析命令行参数
-    let _args = Args::parse();
+    let args = Args::parse();
 
     // 1. 初始化应用状态
     // App 结构体负责持有所有业务模块和全局配置
-    let mut app = App::new();
+    // 透传 --config 指定的配置文件路径（缺省为 ./config.json）
+    let mut app = App::new(args.config);
 
     // 2. 初始化 TUI 终端环境
     // 使用 Crossterm 作为后端，并开启备用屏幕

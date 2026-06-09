@@ -1,0 +1,21 @@
+{
+  "language": "En",
+  "scan_concurrency": 50,
+  "keybindings": {
+    "back": ["Esc"],
+    "confirm": ["Enter"],
+    "down": ["Down", "j"],
+    "edit": ["e"],
+    "help": ["F1"],
+    "left": ["Left", "h"],
+    "next_tab": ["Tab"],
+    "prev_tab": ["Shift+Tab"],
+    "quit": ["Ctrl+c", "Ctrl+q"],
+    "refresh": ["r"],
+    "right": ["Right", "l"],
+    "stop": ["s"],
+    "toggle": ["Space"],
+    "toggle_language": ["Ctrl+l"],
+    "up": ["Up", "k"]
+  }
+}
