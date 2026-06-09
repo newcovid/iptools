@@ -27,6 +27,7 @@ pub struct SessionState {
     pub lan_speed: LanSpeedPersist,
     pub link_quality: LinkQualityPersist,
     pub ui: UiPersist,
+    pub history: HistoryPersist,
 }
 
 /// 界面位置记忆：上次所在标签页 + 诊断子工具，重启回到原处。
@@ -37,6 +38,16 @@ pub struct UiPersist {
     pub last_tab: u8,
     /// 诊断子工具索引（0=Ping…5=内网测速，对应 `DiagnosticTool` 声明序）。
     pub last_diag_tool: u8,
+}
+
+/// 目标历史（MRU）：两个池——IP/主机 与 CIDR。最近在前。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct HistoryPersist {
+    /// IP/主机历史（ping/trace/端口扫描/链路质量/内网对端共享）。
+    pub targets: Vec<String>,
+    /// CIDR 历史（扫描页独立）。
+    pub cidrs: Vec<String>,
 }
 
 /// 扫描页：CIDR 网段。空串表示「沿用按本机网卡自动推断的默认值」。
@@ -193,6 +204,20 @@ mod tests {
         assert_eq!(s.ping.timeout_ms, 2000);
         assert_eq!(s.ping.packet_size, 32);
         assert_eq!(s.lan_speed.port, "50505");
+    }
+
+    #[test]
+    fn history_defaults_and_partial() {
+        // 旧配置无 history 段 → 两池空。
+        let s: SessionState = serde_json::from_str("{}").unwrap();
+        assert!(s.history.targets.is_empty());
+        assert!(s.history.cidrs.is_empty());
+
+        // 只给 targets，cidrs 回退默认空。
+        let json = r#"{"history":{"targets":["8.8.8.8","1.1.1.1"]}}"#;
+        let s: SessionState = serde_json::from_str(json).unwrap();
+        assert_eq!(s.history.targets, vec!["8.8.8.8", "1.1.1.1"]);
+        assert!(s.history.cidrs.is_empty());
     }
 
     #[test]
