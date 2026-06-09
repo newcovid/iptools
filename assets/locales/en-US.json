@@ -143,5 +143,16 @@
     "diag_speed_elapsed": "Elapsed",
     "diag_speed_history": "Speed History",
     "diag_speed_note": "Source: Cloudflare (max 15s)",
-    "diag_speed_err": "Speed test failed, check network"
+    "diag_speed_err": "Speed test failed, check network",
+    "diag_trace_target": "Target IP/Domain",
+    "diag_trace_maxhops": "Max Hops",
+    "diag_trace_timeout": "Timeout (ms)",
+    "diag_trace_col_hop": "Hop",
+    "diag_trace_col_addr": "Address",
+    "diag_trace_col_rtt": "RTT",
+    "diag_trace_col_host": "Hostname",
+    "diag_trace_done": "Trace complete",
+    "diag_trace_err": "Trace failed: invalid target",
+    "diag_trace_unsupported": "Traceroute not supported on this platform",
+    "diag_trace_timeout_star": "*"
 }
