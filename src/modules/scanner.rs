@@ -31,6 +31,25 @@ enum ScanStatus {
     Done,
 }
 
+/// 按当前活动物理网卡（有 IPv4）推断默认扫描网段；无可用网卡时退回 192.168.1.0/24。
+fn detect_default_cidr() -> String {
+    let mut default_cidr = "192.168.1.0/24".to_string();
+    let interfaces = net::get_interfaces();
+    if let Some(iface) = interfaces
+        .iter()
+        .find(|i| i.is_up && i.is_physical && !i.ipv4.is_empty())
+    {
+        if let Some(first_ip) = iface.ipv4.first() {
+            if let Ok(ip) = first_ip.parse::<Ipv4Addr>() {
+                if let Ok(net) = Ipv4Network::new(ip, 24) {
+                    default_cidr = net.to_string();
+                }
+            }
+        }
+    }
+    default_cidr
+}
+
 pub struct ScannerModule {
     cidr_input: TextInput,
     input_mode: bool,
@@ -50,23 +69,8 @@ impl ScannerModule {
     pub fn new() -> Self {
         let (tx, rx) = mpsc::channel(100);
 
-        let mut default_cidr = "192.168.1.0/24".to_string();
-        let interfaces = net::get_interfaces();
-        if let Some(iface) = interfaces
-            .iter()
-            .find(|i| i.is_up && i.is_physical && !i.ipv4.is_empty())
-        {
-            if let Some(first_ip) = iface.ipv4.first() {
-                if let Ok(ip) = first_ip.parse::<Ipv4Addr>() {
-                    if let Ok(net) = Ipv4Network::new(ip, 24) {
-                        default_cidr = net.to_string();
-                    }
-                }
-            }
-        }
-
         Self {
-            cidr_input: TextInput::with_text(&default_cidr),
+            cidr_input: TextInput::with_text(&detect_default_cidr()),
             input_mode: false,
             results: Vec::new(),
             status: ScanStatus::Idle,
@@ -92,6 +96,11 @@ impl ScannerModule {
         if !cidr.is_empty() {
             self.cidr_input = TextInput::with_text(cidr);
         }
+    }
+
+    /// 重置 CIDR 为按当前活动物理网卡自动推断的默认值（「清空参数记忆」用）。
+    pub fn reset_to_default(&mut self) {
+        self.cidr_input = TextInput::with_text(&detect_default_cidr());
     }
 
     pub fn on_key(&mut self, key: KeyEvent, action: Option<Action>, concurrency: usize) {

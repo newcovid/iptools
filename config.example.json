@@ -30,6 +30,7 @@
         "{8C3B...-ETH-GUID}":  { "target": "10.0.0.1",    "count": "30", "interval_ms": "200", "timeout_ms": "1000", "packet_size": "32" }
       },
       "selected": "{2F1A...-WIFI-GUID}"
-    }
+    },
+    "ui": { "last_tab": 4, "last_diag_tool": 3 }
   }
 }

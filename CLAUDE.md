@@ -125,7 +125,19 @@ cargo check              # 快速类型检查
 - **工具契约**：每个相关工具实现一对 `export_persist()`（导出快照）/`apply_persist()`（回灌）。`DiagnosticsModule` 用 `export_into`/`apply_persist` 委派给六个子工具。新增需持久化参数的工具/字段时，在对应 `*Persist` 加字段并在工具的 export/apply 里接线。
 - **何时写盘**：`App::on_key`/`on_mouse` 是**包装器**——先 `handle_key`/`handle_mouse` 处理，再 `maybe_persist()`。`maybe_persist` 做**脏检查**：`snapshot_session()` 汇总当前快照，与 `last_session` 不等才 `config.save()`。因此每次真正改值才落盘一次，导航/滚动/tick 都不写盘（**绝不在 `on_tick` 持久化**，避免测试期间高频写）。启动时 `App::new` 调 `apply_session()` 回灌并记录基准快照。
 - **链路质量「按网卡保存」**：`LinkQualityTool` 持 `saved_adapters: BTreeMap<网卡键, LinkParams>` + `current_key`。网卡键由 `iface_key()` 取 **GUID→MAC→名称**回退（GUID 在 Windows 重启稳定）。←→ 切换网卡时 `stash_current()`（归档旧网卡 live 参数）→ 移动索引 → `load_current()`（载入新网卡参数，无记录则默认）。`export_persist` 把 live 参数合并进 `current_key` 再导出；`apply_persist` 恢复整张表并按 `selected` 键重新定位选中项。于是「无线网卡 / 有线网卡各记各的目标 IP，切换自动跟随，重启不丢」。BTreeMap 保证序列化顺序稳定，避免脏检查误判。
+- **界面位置记忆**（`SessionState.ui: UiPersist`）：`last_tab`/`last_diag_tool` 索引。`snapshot_session` 写入、`apply_session` 启动还原（`CurrentTab::from_index`、`DiagnosticsModule::set_tool_by_index`）。切标签/子工具会触发一次写盘（人手速度，可接受）。
+- **清空参数记忆**（设置页第 3 项 `ResetSession`）：设置模块够不到其他模块，故只置 `pending_reset` 标志，`App` 在 dispatch 后 `take_reset()` → `reset_session()`：把 `config.session` 重置为默认（**保留当前 `ui` 位置**，不把用户弹离设置页）→ 落盘 → `apply_session` 回灌 → `scanner.reset_to_default()`（CIDR 单独回到按网卡自动推断，因 `apply_persist` 对空 CIDR 是 no-op）。`Confirm` 触发，箭头不触发（防误清）。
 - 校验在 `start()` 而非持久化层：回灌的是**界面文本原样**（如端口/超时按 `TextInput` 字符串存），启动时各工具仍走原有 `parse().clamp()` 校验，故脏数据不会绕过下限/上限。
+
+### 主机名解析三级回退（`utils/net.rs::resolve_hostname`）
+
+局域网扫描显示设备名时，系统反向 DNS 在「无 PTR 记录」或「TUN/VPN 接管 DNS」场景常失败（甚至回填数字 IP），导致只剩 IP 没有名字。故 `resolve_hostname` 按序回退、任一步拿到「看起来像名字」（`looks_like_hostname` 过滤掉纯 IP 文本）即返回：
+
+1. **反向 DNS**（`dns_lookup::lookup_addr`）：走系统 DNS，最快；无 PTR 时会回填数字 IP，必须用 `looks_like_hostname` 滤掉。
+2. **NetBIOS 节点状态**（`resolve_netbios`，UDP/137，等价 `nbtstat -A`）：直接问设备本身要 NetBIOS 名称表，取后缀 `0x00` 的「工作站名」。**不经系统 DNS**，绕开 VPN。
+3. **mDNS 反向**（`resolve_mdns`，组播 224.0.0.251:5353 查 `in-addr.arpa` 的 PTR）：拿 `xxx.local` 名。
+
+报文/解析全手写（`parse_netbios_response`、`parse_mdns_ptr` + `decode_dns_name`/`skip_dns_name` 处理 DNS 压缩指针），纯 std UDP、跨平台、各带 250ms 超时、best-effort。纯解析函数有单测。只对 ARP 已发现的活跃主机触发，故附加延迟有界。**改动报文偏移/解析时务必同步更新对应单测**。
 
 ### 共享格式化（`utils/format.rs`）
 

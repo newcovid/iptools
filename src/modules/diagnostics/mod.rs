@@ -125,6 +125,24 @@ impl DiagnosticsModule {
         }
     }
 
+    /// 当前选中子工具在菜单中的索引（供持久化「上次所在子工具」）。
+    pub fn current_tool_index(&self) -> u8 {
+        self.tools
+            .iter()
+            .position(|t| *t == self.current_tool)
+            .unwrap_or(0) as u8
+    }
+
+    /// 按持久化索引还原选中的子工具（同步菜单高亮）；越界夹紧。
+    pub fn set_tool_by_index(&mut self, idx: u8) {
+        if self.tools.is_empty() {
+            return;
+        }
+        let i = (idx as usize).min(self.tools.len() - 1);
+        self.current_tool = self.tools[i];
+        self.menu_state.select(Some(i));
+    }
+
     /// 把各子工具的会话参数写进 `SessionState`（供持久化）。
     pub fn export_into(&self, s: &mut SessionState) {
         s.ping = self.ping_tool.export_persist();
