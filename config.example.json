@@ -17,5 +17,19 @@
     "toggle": ["Space"],
     "toggle_language": ["Ctrl+l"],
     "up": ["Up", "k"]
+  },
+  "session": {
+    "scanner": { "cidr": "192.168.1.0/24" },
+    "ping": { "target": "8.8.8.8", "interval_ms": 1000, "timeout_ms": 2000, "packet_size": 32 },
+    "port_scan": { "target": "127.0.0.1", "start_port": "1", "end_port": "1024", "timeout_ms": "300" },
+    "trace": { "target": "8.8.8.8", "max_hops": "30", "timeout_ms": "1000" },
+    "lan_speed": { "mode": "server", "peer": "", "port": "50505" },
+    "link_quality": {
+      "adapters": {
+        "{2F1A...-WIFI-GUID}": { "target": "192.168.1.1", "count": "20", "interval_ms": "200", "timeout_ms": "1000", "packet_size": "32" },
+        "{8C3B...-ETH-GUID}":  { "target": "10.0.0.1",    "count": "30", "interval_ms": "200", "timeout_ms": "1000", "packet_size": "32" }
+      },
+      "selected": "{2F1A...-WIFI-GUID}"
+    }
   }
 }

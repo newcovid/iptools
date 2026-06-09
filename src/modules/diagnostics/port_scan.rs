@@ -5,6 +5,7 @@
 
 use super::FocusArea;
 use crate::keymap::Action;
+use crate::session::PortScanPersist;
 use crate::ui::theme;
 use crate::utils::i18n::I18n;
 use crate::utils::textinput::{filter_host, TextInput};
@@ -86,6 +87,24 @@ impl PortScanTool {
             rx,
             abort_flag: Arc::new(Mutex::new(false)),
         }
+    }
+
+    /// 导出可持久化参数（按界面文本原样保存）。
+    pub fn export_persist(&self) -> PortScanPersist {
+        PortScanPersist {
+            target: self.config.target.value(),
+            start_port: self.config.start_port.value(),
+            end_port: self.config.end_port.value(),
+            timeout_ms: self.config.timeout_ms.value(),
+        }
+    }
+
+    /// 回灌持久化参数。
+    pub fn apply_persist(&mut self, p: &PortScanPersist) {
+        self.config.target = TextInput::with_text(&p.target);
+        self.config.start_port = TextInput::with_text(&p.start_port);
+        self.config.end_port = TextInput::with_text(&p.end_port);
+        self.config.timeout_ms = TextInput::with_text(&p.timeout_ms);
     }
 
     pub fn update(&mut self) {

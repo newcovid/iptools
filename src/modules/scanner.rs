@@ -1,5 +1,6 @@
 use crate::app::App;
 use crate::keymap::Action;
+use crate::session::ScannerPersist;
 use crate::ui::theme;
 use crate::utils::textinput::{filter_cidr, TextInput};
 use crate::utils::{net, oui};
@@ -75,6 +76,21 @@ impl ScannerModule {
             tx,
             rx,
             abort_flag: Arc::new(Mutex::new(false)),
+        }
+    }
+
+    /// 导出可持久化参数（当前 CIDR）。
+    pub fn export_persist(&self) -> ScannerPersist {
+        ScannerPersist {
+            cidr: self.cidr_input.value(),
+        }
+    }
+
+    /// 回灌持久化参数。空串保留按本机网卡推断的默认 CIDR。
+    pub fn apply_persist(&mut self, p: &ScannerPersist) {
+        let cidr = p.cidr.trim();
+        if !cidr.is_empty() {
+            self.cidr_input = TextInput::with_text(cidr);
         }
     }
 

@@ -5,6 +5,7 @@
 
 use super::{config_field_item, FocusArea};
 use crate::keymap::Action;
+use crate::session::{LinkParams, LinkQualityPersist};
 use crate::ui::theme;
 use crate::utils::i18n::I18n;
 use crate::utils::textinput::{filter_host, TextInput};
@@ -15,7 +16,7 @@ use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Gauge, List, ListItem, ListState, Paragraph, Sparkline},
 };
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -117,6 +118,11 @@ pub struct LinkQualityTool {
     ifaces: Vec<IfaceChoice>,
     iface_idx: usize,
 
+    /// 按网卡键（GUID→MAC→名称回退）保存的各自一套参数。
+    saved_adapters: BTreeMap<String, LinkParams>,
+    /// 当前 `config` 字段所属网卡的键（live 参数归属）；用于切换时归档/载入。
+    current_key: Option<String>,
+
     running: bool,
     error_key: Option<String>,
 
@@ -144,6 +150,8 @@ impl LinkQualityTool {
             config_state,
             ifaces: Vec::new(),
             iface_idx: 0,
+            saved_adapters: BTreeMap::new(),
+            current_key: None,
             running: false,
             error_key: None,
             samples: Vec::new(),
@@ -157,7 +165,78 @@ impl LinkQualityTool {
             abort_flag: Arc::new(Mutex::new(false)),
         };
         s.refresh_ifaces();
+        s.current_key = s.ifaces.get(s.iface_idx).map(iface_key);
         s
+    }
+
+    // -------------------------------------------------------------------------
+    // 按网卡持久化
+    // -------------------------------------------------------------------------
+
+    /// 当前 live 参数快照。
+    fn live_params(&self) -> LinkParams {
+        LinkParams {
+            target: self.config.target.value(),
+            count: self.config.count.value(),
+            interval_ms: self.config.interval_ms.value(),
+            timeout_ms: self.config.timeout_ms.value(),
+            packet_size: self.config.packet_size.value(),
+        }
+    }
+
+    /// 把一套参数写入 live 编辑字段。
+    fn set_live_params(&mut self, p: &LinkParams) {
+        self.config.target = TextInput::with_text(&p.target);
+        self.config.count = TextInput::with_text(&p.count);
+        self.config.interval_ms = TextInput::with_text(&p.interval_ms);
+        self.config.timeout_ms = TextInput::with_text(&p.timeout_ms);
+        self.config.packet_size = TextInput::with_text(&p.packet_size);
+    }
+
+    /// 把当前 live 参数归档到当前网卡键下（离开该网卡前调用）。
+    fn stash_current(&mut self) {
+        if let Some(k) = self.current_key.clone() {
+            let params = self.live_params();
+            self.saved_adapters.insert(k, params);
+        }
+    }
+
+    /// 按 `iface_idx` 指向的网卡载入其参数：已存则载入，未存则用默认。
+    fn load_current(&mut self) {
+        let key = self.ifaces.get(self.iface_idx).map(iface_key);
+        self.current_key = key.clone();
+        if let Some(k) = key {
+            let params = self
+                .saved_adapters
+                .get(&k)
+                .cloned()
+                .unwrap_or_default();
+            self.set_live_params(&params);
+        }
+    }
+
+    /// 导出可持久化参数（含当前 live 参数合并进当前网卡键）。
+    pub fn export_persist(&self) -> LinkQualityPersist {
+        let mut adapters = self.saved_adapters.clone();
+        if let Some(k) = &self.current_key {
+            adapters.insert(k.clone(), self.live_params());
+        }
+        LinkQualityPersist {
+            adapters,
+            selected: self.current_key.clone(),
+        }
+    }
+
+    /// 回灌持久化参数：恢复按网卡的参数表，并按上次选中的网卡键重新定位 + 载入。
+    pub fn apply_persist(&mut self, p: &LinkQualityPersist) {
+        self.saved_adapters = p.adapters.clone();
+        self.refresh_ifaces();
+        if let Some(sel) = &p.selected {
+            if let Some(idx) = self.ifaces.iter().position(|c| &iface_key(c) == sel) {
+                self.iface_idx = idx;
+            }
+        }
+        self.load_current();
     }
 
     /// 重新枚举可选网卡（活跃物理网卡且有 IPv4），并夹紧当前选择。
@@ -236,22 +315,27 @@ impl LinkQualityTool {
     fn handle_config_key(&mut self, key: KeyEvent, action: Option<Action>) {
         let idx = self.config_state.selected().unwrap_or(0);
 
-        // 网卡选择器：Left/Right 循环切换
+        // 网卡选择器：Left/Right 循环切换。切换前归档当前网卡参数，切换后载入目标网卡参数，
+        // 实现「无线/有线各记各的目标 IP 等参数，切换自动跟随」。
         if idx == 0 && !self.running {
             match action {
                 Some(Action::Left) => {
+                    self.stash_current();
                     self.refresh_ifaces();
                     if !self.ifaces.is_empty() {
                         self.iface_idx =
                             (self.iface_idx + self.ifaces.len() - 1) % self.ifaces.len();
                     }
+                    self.load_current();
                     return;
                 }
                 Some(Action::Right) => {
+                    self.stash_current();
                     self.refresh_ifaces();
                     if !self.ifaces.is_empty() {
                         self.iface_idx = (self.iface_idx + 1) % self.ifaces.len();
                     }
+                    self.load_current();
                     return;
                 }
                 _ => {}
@@ -428,6 +512,8 @@ impl LinkQualityTool {
 
     fn start(&mut self) {
         self.refresh_ifaces();
+        // 保持 live 参数归属键与选中项一致（刷新可能夹紧索引）。
+        self.current_key = self.ifaces.get(self.iface_idx).map(iface_key);
         let iface = match self.ifaces.get(self.iface_idx) {
             Some(c) => c.clone(),
             None => {
@@ -946,6 +1032,18 @@ impl LinkQualityTool {
         }
 
         f.render_widget(List::new(items), inner);
+    }
+}
+
+/// 网卡稳定标识：优先 GUID（Windows 重启稳定），次选 MAC，再退回名称。
+/// 用作「按网卡持久化」的键，使无线/有线各自记住自己的参数。
+fn iface_key(c: &IfaceChoice) -> String {
+    if !c.guid.is_empty() {
+        c.guid.clone()
+    } else if !c.mac.is_empty() {
+        c.mac.clone()
+    } else {
+        c.name.clone()
     }
 }
 

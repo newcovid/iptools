@@ -7,6 +7,7 @@ mod config;
 mod event;
 mod keymap;
 mod modules;
+mod session;
 mod tui;
 mod ui;
 mod utils;

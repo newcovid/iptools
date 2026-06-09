@@ -6,6 +6,7 @@
 
 use super::{config_field_item, FocusArea};
 use crate::keymap::Action;
+use crate::session::TracePersist;
 use crate::ui::theme;
 use crate::utils::i18n::I18n;
 use crate::utils::textinput::{filter_host, TextInput};
@@ -85,6 +86,22 @@ impl TraceTool {
             rx,
             abort_flag: Arc::new(Mutex::new(false)),
         }
+    }
+
+    /// 导出可持久化参数。
+    pub fn export_persist(&self) -> TracePersist {
+        TracePersist {
+            target: self.config.target.value(),
+            max_hops: self.config.max_hops.value(),
+            timeout_ms: self.config.timeout_ms.value(),
+        }
+    }
+
+    /// 回灌持久化参数。
+    pub fn apply_persist(&mut self, p: &TracePersist) {
+        self.config.target = TextInput::with_text(&p.target);
+        self.config.max_hops = TextInput::with_text(&p.max_hops);
+        self.config.timeout_ms = TextInput::with_text(&p.timeout_ms);
     }
 
     pub fn update(&mut self) {
