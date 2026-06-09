@@ -340,11 +340,30 @@ impl LinkQualityTool {
         Some((min, avg, max))
     }
 
+    /// 无线信号质量统计 (min, avg, max)%；无样本时 None。
+    fn quality_stats(&self) -> Option<(u32, u32, u32)> {
+        let v: Vec<u32> = self.samples.iter().filter_map(|s| s.quality).collect();
+        if v.is_empty() {
+            return None;
+        }
+        let min = *v.iter().min().unwrap();
+        let max = *v.iter().max().unwrap();
+        let avg = v.iter().sum::<u32>() / (v.len() as u32);
+        Some((min, avg, max))
+    }
+
     /// 计算各维度 (标签 i18n key, 子评分, 权重) 列表。
     fn dimensions(&self) -> Vec<(&'static str, f64, f64)> {
-        let (_, _, loss, _, avg, _, jitter) = self.stats();
-        let latency = score::latency_score(avg as f64);
-        let jit = score::jitter_score(jitter as f64);
+        let (_, recv, loss, _, avg, _, jitter) = self.stats();
+        // 无任何回包时延迟/抖动无有效测量，按最差计（否则 0ms 会被误判为满分）。
+        let (latency, jit) = if recv == 0 {
+            (0.0, 0.0)
+        } else {
+            (
+                score::latency_score(avg as f64),
+                score::jitter_score(jitter as f64),
+            )
+        };
         let los = score::loss_score(loss);
 
         let is_wifi = self.snapshot.as_ref().map(|s| s.is_wifi).unwrap_or(false);
@@ -382,8 +401,8 @@ impl LinkQualityTool {
     }
 
     fn overall_grade(&self) -> Option<(f64, Grade, usize)> {
-        let (sent, recv, _, _, _, _, _) = self.stats();
-        if sent == 0 || recv == 0 {
+        let (sent, _recv, _, _, _, _, _) = self.stats();
+        if sent == 0 {
             return None;
         }
         let dims = self.dimensions();
@@ -393,7 +412,7 @@ impl LinkQualityTool {
         let weakest = dims
             .iter()
             .enumerate()
-            .min_by(|a, b| a.1 .1.partial_cmp(&b.1 .1).unwrap())
+            .min_by(|a, b| a.1 .1.total_cmp(&b.1 .1))
             .map(|(i, _)| i)
             .unwrap_or(0);
         Some((o, score::grade_from_score(o), weakest))
@@ -577,6 +596,7 @@ impl LinkQualityTool {
         let is_wifi = self.snapshot.as_ref().map(|s| s.is_wifi).unwrap_or(false);
         let n_dims = if is_wifi { 6 } else { 3 };
         let rssi_rows = if is_wifi { 3 } else { 0 };
+        let metrics_rows = if is_wifi { 6 } else { 4 };
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -584,7 +604,7 @@ impl LinkQualityTool {
                 Constraint::Length(1),                 // header
                 Constraint::Length(1),                 // overall gauge
                 Constraint::Length(n_dims as u16),     // dim bars
-                Constraint::Length(4),                 // metrics grid
+                Constraint::Length(metrics_rows as u16), // metrics grid
                 Constraint::Min(3),                    // latency sparkline
                 Constraint::Length(rssi_rows as u16),  // rssi sparkline (wifi)
                 Constraint::Length(1),                 // status
@@ -724,26 +744,60 @@ impl LinkQualityTool {
             let w = self.snapshot.as_ref().and_then(|s| s.wireless.as_ref());
             let rssi_txt = match self.rssi_stats() {
                 Some((mn, av, mx)) => format!("{}/{}/{} dBm", mn, av, mx),
-                None => w.map(|w| format!("{} dBm", w.rssi_dbm)).unwrap_or_else(|| "-".into()),
+                None => w
+                    .map(|w| format!("{} dBm", w.rssi_dbm))
+                    .unwrap_or_else(|| "-".into()),
             };
+            // 行1：RSSI(min/avg/max) + 信道(频段, 频率)
             lines.push(Line::from(vec![
                 Span::styled(format!("{}: ", g("diag_link_rssi")), Style::default().fg(Color::Gray)),
                 Span::styled(format!("{}  ", rssi_txt), Style::default().fg(Color::White)),
                 Span::styled(format!("{}: ", g("diag_link_channel")), Style::default().fg(Color::Gray)),
                 Span::styled(
-                    w.map(|w| format!("{} ({})", w.channel, w.band)).unwrap_or_else(|| "-".into()),
+                    w.map(|w| format!("{} ({}, {} MHz)", w.channel, w.band, w.freq_mhz))
+                        .unwrap_or_else(|| "-".into()),
                     Style::default().fg(Color::White),
                 ),
             ]));
+            // 行2：信号质量(min/avg/max %) + 制式
+            let q_txt = match self.quality_stats() {
+                Some((mn, av, mx)) => format!("{}/{}/{} %", mn, av, mx),
+                None => w
+                    .map(|w| format!("{} %", w.signal_quality))
+                    .unwrap_or_else(|| "-".into()),
+            };
             lines.push(Line::from(vec![
+                Span::styled(format!("{}: ", g("diag_link_signal_q")), Style::default().fg(Color::Gray)),
+                Span::styled(format!("{}  ", q_txt), Style::default().fg(Color::White)),
                 Span::styled(format!("{}: ", g("diag_link_phy")), Style::default().fg(Color::Gray)),
                 Span::styled(
                     w.map(|w| w.phy_type.clone()).unwrap_or_else(|| "-".into()),
                     Style::default().fg(Color::White),
                 ),
-                Span::styled(format!("  {}/{}: ", g("diag_link_rate_tx"), g("diag_link_rate_rx")), Style::default().fg(Color::Gray)),
+            ]));
+            // 行3：发送/接收协商速率
+            lines.push(Line::from(vec![
                 Span::styled(
-                    w.map(|w| format!("{}/{} Mbps", w.tx_rate_mbps, w.rx_rate_mbps)).unwrap_or_else(|| "-".into()),
+                    format!("{}/{}: ", g("diag_link_rate_tx"), g("diag_link_rate_rx")),
+                    Style::default().fg(Color::Gray),
+                ),
+                Span::styled(
+                    w.map(|w| format!("{}/{} Mbps", w.tx_rate_mbps, w.rx_rate_mbps))
+                        .unwrap_or_else(|| "-".into()),
+                    Style::default().fg(Color::White),
+                ),
+            ]));
+            // 行4：BSSID + 加密(认证 / 加密算法)
+            lines.push(Line::from(vec![
+                Span::styled(format!("{}: ", g("diag_link_bssid")), Style::default().fg(Color::Gray)),
+                Span::styled(
+                    w.map(|w| w.bssid.clone()).unwrap_or_else(|| "-".into()),
+                    Style::default().fg(Color::White),
+                ),
+                Span::styled(format!("  {}: ", g("diag_link_auth")), Style::default().fg(Color::Gray)),
+                Span::styled(
+                    w.map(|w| format!("{} / {}", w.auth, w.cipher))
+                        .unwrap_or_else(|| "-".into()),
                     Style::default().fg(Color::White),
                 ),
             ]));
