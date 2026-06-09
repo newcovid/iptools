@@ -15,6 +15,9 @@ pub struct InterfaceInfo {
     pub is_physical: bool,
     pub interface_type: String,
     pub cidr: Option<String>,
+    /// 适配器 GUID（形如 `{XXXXXXXX-....}`），等同于 WMI
+    /// `Win32_NetworkAdapterConfiguration.SettingID`，用于定位待配置的网卡。
+    pub guid: String,
 }
 
 #[cfg(target_os = "windows")]
@@ -100,6 +103,7 @@ pub fn get_interfaces() -> Vec<InterfaceInfo> {
                     is_physical,
                     interface_type: format!("{:?}", adapter.if_type()),
                     cidr,
+                    guid: adapter.adapter_name().to_string(),
                 });
             }
         }
