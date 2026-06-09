@@ -1,10 +1,45 @@
 use crate::app::App;
 use crate::keymap::Action;
+use crate::utils::textinput::TextInput;
 use crossterm::event::KeyEvent;
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, List, ListItem, ListState},
 };
+
+/// 诊断各工具「参数配置」栏的统一字段渲染：标签行 + 取值行（带光标块）。
+/// 选中且可编辑时在右侧追加提示（直接输入 / 仅数字 / ←→ 调整 等），
+/// 让「该字段是输入还是切换」一目了然。返回两行的 ListItem。
+pub(super) fn config_field_item(
+    label: &str,
+    is_sel: bool,
+    is_active: bool,
+    input: &TextInput,
+    cursor_active: bool,
+    hint: Option<String>,
+) -> ListItem<'static> {
+    let label_line = Line::from(Span::styled(
+        format!("{}:", label),
+        Style::default().fg(if is_sel { Color::Yellow } else { Color::Gray }),
+    ));
+    let val_base = if is_sel && is_active {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::White)
+    };
+    let marker = if is_sel { ">> " } else { "   " };
+    let mut spans = vec![Span::styled(marker.to_string(), val_base)];
+    spans.extend(input.render_spans(cursor_active, val_base));
+    if let Some(h) = hint {
+        spans.push(Span::styled(
+            format!("  ({})", h),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    ListItem::new(vec![label_line, Line::from(spans)])
+}
 
 pub mod icmp;
 pub mod lan_speed;
