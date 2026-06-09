@@ -5,6 +5,7 @@ use std::io;
 mod app;
 mod config;
 mod event;
+mod history;
 mod keymap;
 mod modules;
 mod session;
