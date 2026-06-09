@@ -1,6 +1,8 @@
 use super::FocusArea;
+use crate::history::HistoryStore;
 use crate::keymap::Action;
 use crate::session::PingPersist;
+use crate::ui::mru::MruState;
 use crate::ui::theme;
 use crate::utils::i18n::I18n;
 use crate::utils::textinput::{filter_host, TextInput};
@@ -9,8 +11,10 @@ use ratatui::{
     prelude::*,
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Sparkline},
 };
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::net::IpAddr;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -119,10 +123,13 @@ pub struct PingTool {
     tx: mpsc::Sender<PingEvent>,
     rx: mpsc::Receiver<PingEvent>,
     abort_flag: Arc<Mutex<bool>>,
+
+    history: Rc<RefCell<HistoryStore>>,
+    mru: MruState,
 }
 
 impl PingTool {
-    pub fn new() -> Self {
+    pub fn new(history: Rc<RefCell<HistoryStore>>) -> Self {
         let mut config_state = ListState::default();
         config_state.select(Some(0));
         let (tx, rx) = mpsc::channel(100);
@@ -135,6 +142,8 @@ impl PingTool {
             tx,
             rx,
             abort_flag: Arc::new(Mutex::new(false)),
+            history,
+            mru: MruState::default(),
         }
     }
 

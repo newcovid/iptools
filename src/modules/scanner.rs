@@ -1,9 +1,13 @@
 use crate::app::App;
+use crate::history::HistoryStore;
 use crate::keymap::Action;
 use crate::session::ScannerPersist;
+use crate::ui::mru::MruState;
 use crate::ui::theme;
 use crate::utils::textinput::{filter_cidr, TextInput};
 use crate::utils::{net, oui};
+use std::cell::RefCell;
+use std::rc::Rc;
 use crossterm::event::{KeyCode, KeyEvent};
 use futures::{stream, StreamExt};
 use ipnetwork::Ipv4Network;
@@ -63,10 +67,13 @@ pub struct ScannerModule {
     tx: mpsc::Sender<ScanResult>,
     rx: mpsc::Receiver<ScanResult>,
     abort_flag: Arc<Mutex<bool>>,
+
+    history: Rc<RefCell<HistoryStore>>,
+    mru: MruState,
 }
 
 impl ScannerModule {
-    pub fn new() -> Self {
+    pub fn new(history: Rc<RefCell<HistoryStore>>) -> Self {
         let (tx, rx) = mpsc::channel(100);
 
         Self {
@@ -80,6 +87,8 @@ impl ScannerModule {
             tx,
             rx,
             abort_flag: Arc::new(Mutex::new(false)),
+            history,
+            mru: MruState::default(),
         }
     }
 

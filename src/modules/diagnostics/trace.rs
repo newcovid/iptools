@@ -5,8 +5,10 @@
 //! 不依赖外部 `tracert` 程序。非 Windows 暂以"不支持"提示占位（后续统一迁移）。
 
 use super::{config_field_item, FocusArea};
+use crate::history::HistoryStore;
 use crate::keymap::Action;
 use crate::session::TracePersist;
+use crate::ui::mru::MruState;
 use crate::ui::theme;
 use crate::utils::i18n::I18n;
 use crate::utils::textinput::{filter_host, TextInput};
@@ -15,7 +17,9 @@ use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Cell, List, ListItem, ListState, Paragraph, Row, Table, TableState},
 };
+use std::cell::RefCell;
 use std::net::Ipv4Addr;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
@@ -67,10 +71,13 @@ pub struct TraceTool {
     tx: mpsc::Sender<TraceEvent>,
     rx: mpsc::Receiver<TraceEvent>,
     abort_flag: Arc<Mutex<bool>>,
+
+    history: Rc<RefCell<HistoryStore>>,
+    mru: MruState,
 }
 
 impl TraceTool {
-    pub fn new() -> Self {
+    pub fn new(history: Rc<RefCell<HistoryStore>>) -> Self {
         let mut config_state = ListState::default();
         config_state.select(Some(0));
         let (tx, rx) = mpsc::channel(64);
@@ -85,6 +92,8 @@ impl TraceTool {
             tx,
             rx,
             abort_flag: Arc::new(Mutex::new(false)),
+            history,
+            mru: MruState::default(),
         }
     }
 

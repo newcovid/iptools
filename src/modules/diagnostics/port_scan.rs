@@ -4,8 +4,10 @@
 //! 遵循与 PingTool 一致的结构：config/state + mpsc 回传 + abort flag。
 
 use super::FocusArea;
+use crate::history::HistoryStore;
 use crate::keymap::Action;
 use crate::session::PortScanPersist;
+use crate::ui::mru::MruState;
 use crate::ui::theme;
 use crate::utils::i18n::I18n;
 use crate::utils::textinput::{filter_host, TextInput};
@@ -17,7 +19,9 @@ use ratatui::{
         Block, Borders, Cell, Gauge, List, ListItem, ListState, Paragraph, Row, Table, TableState,
     },
 };
+use std::cell::RefCell;
 use std::net::{IpAddr, SocketAddr};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -66,10 +70,13 @@ pub struct PortScanTool {
     tx: mpsc::Sender<PortScanEvent>,
     rx: mpsc::Receiver<PortScanEvent>,
     abort_flag: Arc<Mutex<bool>>,
+
+    history: Rc<RefCell<HistoryStore>>,
+    mru: MruState,
 }
 
 impl PortScanTool {
-    pub fn new() -> Self {
+    pub fn new(history: Rc<RefCell<HistoryStore>>) -> Self {
         let mut config_state = ListState::default();
         config_state.select(Some(0));
         let (tx, rx) = mpsc::channel(256);
@@ -86,6 +93,8 @@ impl PortScanTool {
             tx,
             rx,
             abort_flag: Arc::new(Mutex::new(false)),
+            history,
+            mru: MruState::default(),
         }
     }
 
