@@ -389,13 +389,15 @@ fn is_ipv4(s: &str) -> bool {
 }
 
 /// 子网掩码必须是合法 IPv4 且为连续前导 1 的位模式（如 255.255.255.0）。
+/// 同时排除全 0（/0）与全 1（/32）：/32 不是可用于接口的子网掩码，
+/// EnableStatic 会以错误码 66 拒绝它。
 fn is_valid_mask(s: &str) -> bool {
     match Ipv4Addr::from_str(s) {
         Ok(addr) => {
             let bits = u32::from(addr);
-            // 取反后应为 2^k-1（低位全 1），等价于 bits 是连续高位 1；0 掩码非法
+            // 取反后应为 2^k-1（低位全 1），等价于 bits 是连续高位 1；0 与全 1 掩码非法
             let inv = !bits;
-            bits != 0 && inv & inv.wrapping_add(1) == 0
+            bits != 0 && bits != u32::MAX && inv & inv.wrapping_add(1) == 0
         }
         Err(_) => false,
     }
@@ -450,7 +452,8 @@ mod tests {
     fn validates_subnet_mask() {
         assert!(is_valid_mask("255.255.255.0"));
         assert!(is_valid_mask("255.255.0.0"));
-        assert!(is_valid_mask("255.255.255.255"));
+        assert!(is_valid_mask("255.255.255.252")); // /30 仍可用
+        assert!(!is_valid_mask("255.255.255.255")); // /32 不可用于接口
         assert!(!is_valid_mask("255.0.255.0")); // 非连续
         assert!(!is_valid_mask("0.0.0.0"));
         assert!(!is_valid_mask("abc"));

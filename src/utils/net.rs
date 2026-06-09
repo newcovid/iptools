@@ -54,19 +54,33 @@ pub fn get_interfaces() -> Vec<InterfaceInfo> {
                 let mut ipv6 = Vec::new();
                 let mut cidr = None;
 
-                for (i, ip) in adapter.ip_addresses().iter().enumerate() {
+                for ip in adapter.ip_addresses().iter() {
                     match ip {
                         IpAddr::V4(v4) => {
                             ipv4.push(v4.to_string());
                             if cidr.is_none() {
-                                // 修复：prefixes 未使用的警告
-                                if let Some(_prefixes) = adapter.prefixes().get(i) {
-                                    for (prefix_ip, len) in adapter.prefixes() {
-                                        if prefix_ip == ip {
-                                            cidr = Some(format!("{}/{}", v4, len));
-                                            break;
+                                // 找出该 IPv4 所属的“真实子网”前缀，而非 /32 主机路由。
+                                // prefixes 同时包含子网(如 192.168.1.0/24)、主机路由
+                                // (192.168.1.x/32) 与广播(192.168.1.255/32)；只匹配
+                                // prefix_ip==ip 会错取 /32，导致掩码被算成 255.255.255.255，
+                                // 进而使 EnableStatic 返回错误码 66。取网络地址匹配且
+                                // 0<len<32 中最长（最具体）的一个。
+                                let ip_bits = u32::from(*v4);
+                                let mut best: Option<u32> = None;
+                                for (prefix_ip, len) in adapter.prefixes() {
+                                    if let IpAddr::V4(net) = prefix_ip {
+                                        if *len == 0 || *len >= 32 {
+                                            continue;
+                                        }
+                                        let mask = u32::MAX << (32 - *len);
+                                        if ip_bits & mask == u32::from(*net) {
+                                            best =
+                                                Some(best.map_or(*len, |b| b.max(*len)));
                                         }
                                     }
+                                }
+                                if let Some(len) = best {
+                                    cidr = Some(format!("{}/{}", v4, len));
                                 }
                             }
                         }
