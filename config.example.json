@@ -11,6 +11,7 @@
     "next_tab": ["Tab"],
     "prev_tab": ["Shift+Tab"],
     "quit": ["Ctrl+c", "Ctrl+q"],
+    "history": ["Ctrl+r"],
     "refresh": ["r"],
     "right": ["Right", "l"],
     "stop": ["s"],
@@ -31,6 +32,17 @@
       },
       "selected": "{2F1A...-WIFI-GUID}"
     },
-    "ui": { "last_tab": 4, "last_diag_tool": 3 }
+    "ui": { "last_tab": 4, "last_diag_tool": 3 },
+    "history": {
+      "targets": ["8.8.8.8", "192.168.1.1"],
+      "cidrs": ["192.168.1.0/24"]
+    }
+  },
+  "public_ip": {
+    "endpoints": [
+      { "url": "https://api.ip.sb/geoip", "kind": "ipsb" },
+      { "url": "https://ipinfo.io/json", "kind": "ipinfo" }
+    ],
+    "use_system_proxy": true
   }
 }
