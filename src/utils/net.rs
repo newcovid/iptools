@@ -18,6 +18,8 @@ pub struct InterfaceInfo {
     /// 适配器 GUID（形如 `{XXXXXXXX-....}`），等同于 WMI
     /// `Win32_NetworkAdapterConfiguration.SettingID`，用于定位待配置的网卡。
     pub guid: String,
+    /// 协商链路速率（bit/s）；取自 ipconfig 的 TransmitLinkSpeed。非 Windows 为 None。
+    pub link_speed_bps: Option<u64>,
 }
 
 #[cfg(target_os = "windows")]
@@ -118,6 +120,10 @@ pub fn get_interfaces() -> Vec<InterfaceInfo> {
                     interface_type: format!("{:?}", adapter.if_type()),
                     cidr,
                     guid: adapter.adapter_name().to_string(),
+                    link_speed_bps: {
+                        let s = adapter.transmit_link_speed();
+                        if s == 0 || s == u64::MAX { None } else { Some(s) }
+                    },
                 });
             }
         }
