@@ -29,7 +29,7 @@ pub fn band_and_channel(freq_khz: u32) -> (String, u32) {
         ("2.4 GHz".to_string(), ch)
     } else if (5150..=5895).contains(&mhz) {
         ("5 GHz".to_string(), (mhz - 5000) / 5)
-    } else if (5925..=7125).contains(&mhz) {
+    } else if (5955..=7125).contains(&mhz) {
         ("6 GHz".to_string(), (mhz - 5950) / 5)
     } else {
         ("-".to_string(), 0)
@@ -67,7 +67,8 @@ pub fn auth_label(a: i32) -> String {
         5 => "WPA-None",
         6 => "WPA2-Enterprise",
         7 => "WPA2-Personal",
-        8 => "WPA3-Personal",
+        8 => "WPA3-Enterprise",
+        9 => "WPA3-Personal",
         10 => "OWE",
         11 => "WPA3-Enterprise",
         _ => "-",
@@ -111,6 +112,9 @@ mod tests {
         assert_eq!(band_and_channel(5_180_000), ("5 GHz".to_string(), 36));
         assert_eq!(band_and_channel(5_955_000), ("6 GHz".to_string(), 1));
         assert_eq!(band_and_channel(1_000_000).0, "-".to_string());
+        assert_eq!(band_and_channel(5_895_000), ("5 GHz".to_string(), 179));
+        assert_eq!(band_and_channel(7_125_000), ("6 GHz".to_string(), 235));
+        assert_eq!(band_and_channel(5_925_000).0, "-".to_string());
     }
 
     #[test]
@@ -133,5 +137,9 @@ mod tests {
     fn labels() {
         assert_eq!(auth_label(7), "WPA2-Personal");
         assert_eq!(cipher_label(4), "CCMP (AES)");
+        assert_eq!(auth_label(8), "WPA3-Enterprise");
+        assert_eq!(auth_label(9), "WPA3-Personal");
+        assert_eq!(auth_label(99), "-");
+        assert_eq!(cipher_label(99), "-");
     }
 }
