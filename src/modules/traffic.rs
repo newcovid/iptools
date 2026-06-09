@@ -1,6 +1,6 @@
 use crate::app::App;
+use crate::keymap::Action;
 use crate::utils::format::{format_bytes, format_speed};
-use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Cell, Row, Table, TableState},
@@ -152,10 +152,10 @@ impl TrafficModule {
         });
     }
 
-    pub fn on_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Down | KeyCode::Char('j') => self.next(),
-            KeyCode::Up | KeyCode::Char('k') => self.previous(),
+    pub fn on_key(&mut self, action: Option<Action>) {
+        match action {
+            Some(Action::Down) => self.next(),
+            Some(Action::Up) => self.previous(),
             _ => {}
         }
     }

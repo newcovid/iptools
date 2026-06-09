@@ -1,10 +1,10 @@
 use crate::app::App;
+use crate::keymap::Action;
 use crate::ui::theme; // 引入主题
 use crate::utils::format::{format_bytes, format_speed};
 use crate::utils::i18n::I18n;
 use crate::utils::net::{self, InterfaceInfo};
 use chrono::Local;
-use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Cell, Row, Table},
@@ -207,14 +207,11 @@ impl Dashboard {
         }
     }
 
-    pub fn on_key(&mut self, key: KeyEvent, current_lang: &str) {
-        match key.code {
-            KeyCode::Char('r') => {
-                self.refresh_active_interface();
-                self.detect_proxy();
-                self.fetch_public_ip(current_lang);
-            }
-            _ => {}
+    pub fn on_key(&mut self, action: Option<Action>, current_lang: &str) {
+        if action == Some(Action::Refresh) {
+            self.refresh_active_interface();
+            self.detect_proxy();
+            self.fetch_public_ip(current_lang);
         }
     }
 }

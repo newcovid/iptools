@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::keymap::{KeyMap, PersistedKeymap};
 use crate::utils::i18n::Language;
 
 /// 默认配置文件名（相对当前工作目录）。
@@ -13,6 +14,10 @@ pub struct Config {
     /// 扫描并发数
     pub scan_concurrency: usize,
 
+    /// 用户自定义快捷键（动作名 -> 组合键列表）。缺省时回退内置默认绑定。
+    #[serde(default)]
+    pub keybindings: PersistedKeymap,
+
     /// 配置文件实际路径。不参与序列化，由 `load` 注入，`save` 时写回同一路径。
     #[serde(skip)]
     path: PathBuf,
@@ -23,6 +28,7 @@ impl Default for Config {
         Self {
             language: Language::En, // 仅作结构默认；首次创建时 load() 会用系统语言覆盖
             scan_concurrency: 50,
+            keybindings: KeyMap::default().to_persisted(),
             path: PathBuf::from(DEFAULT_CONFIG_PATH),
         }
     }
@@ -38,6 +44,11 @@ impl Config {
             if let Ok(content) = fs::read_to_string(&path) {
                 if let Ok(mut cfg) = serde_json::from_str::<Config>(&content) {
                     cfg.path = path;
+                    // 旧配置可能缺少 keybindings 段：补齐默认值并落盘，方便用户发现可改项
+                    if cfg.keybindings.is_empty() {
+                        cfg.keybindings = KeyMap::default().to_persisted();
+                        cfg.save();
+                    }
                     return cfg;
                 }
             }
@@ -47,10 +58,16 @@ impl Config {
         let cfg = Self {
             language: Language::detect_system(),
             scan_concurrency: 50,
+            keybindings: KeyMap::default().to_persisted(),
             path,
         };
         cfg.save();
         cfg
+    }
+
+    /// 由当前持久化绑定构建运行时键位映射表。
+    pub fn keymap(&self) -> KeyMap {
+        KeyMap::from_persisted(&self.keybindings)
     }
 
     pub fn save(&self) {
