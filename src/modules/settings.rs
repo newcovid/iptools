@@ -47,6 +47,13 @@ impl SettingsModule {
         }
     }
 
+    /// 鼠标：点击设置项第 `row` 行选中。
+    pub fn click_row(&mut self, row: usize) {
+        if row < self.items.len() {
+            self.state.select(Some(row));
+        }
+    }
+
     fn next(&mut self) {
         let i = match self.state.selected() {
             Some(i) => {
@@ -114,6 +121,9 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(3)])
         .split(area);
+
+    // 登记鼠标区域：设置项列表内容区（去掉边框）。
+    app.mouse.settings_list = Some(Block::default().borders(Borders::ALL).inner(chunks[0]));
 
     let i18n = &app.i18n;
     let config = &app.config;

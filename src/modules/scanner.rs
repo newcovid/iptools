@@ -14,6 +14,7 @@ use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Debug, Clone)]
 pub struct ScanResult {
@@ -258,6 +259,19 @@ impl ScannerModule {
         self.table_state.select(Some(i));
     }
 
+    /// 鼠标：点击 CIDR 行进入编辑并把光标定位到点击列。
+    pub fn click_cidr(&mut self, col: usize) {
+        self.input_mode = true;
+        self.cidr_input.set_cursor_col(col);
+    }
+
+    /// 鼠标：点击结果表第 `row` 行选中。
+    pub fn click_result(&mut self, row: usize) {
+        if row < self.results.len() {
+            self.table_state.select(Some(row));
+        }
+    }
+
     fn calculate_ip_count(&self) -> String {
         if let Ok(network) = self.cidr_input.value().parse::<Ipv4Network>() {
             let count = if network.prefix() < 31 {
@@ -326,6 +340,18 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
     );
 
     f.render_widget(control_block, chunks[0]);
+
+    // 登记鼠标区域：CIDR 取值文本起点（用于点击定位光标）+ 结果表体。
+    let label_w = format!(" {} ", i18n.t("scan_range_label")).width() as u16;
+    app.mouse.scanner_cidr = Some((chunks[0].x + 1 + label_w, chunks[0].y + 1));
+    let body = Block::default().borders(Borders::ALL).inner(chunks[1]);
+    // 表头占 1 行 + bottom_margin 1 行，数据从 +2 起。
+    app.mouse.scanner_results = Some(Rect::new(
+        body.x,
+        body.y + 2,
+        body.width,
+        body.height.saturating_sub(2),
+    ));
 
     // --- 2. 结果列表 ---
 

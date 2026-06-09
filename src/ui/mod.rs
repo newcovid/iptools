@@ -2,12 +2,16 @@ use crate::app::{App, CurrentTab};
 use crate::keymap::Action;
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Tabs},
+    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table},
 };
+use unicode_width::UnicodeWidthStr;
 
 pub mod theme;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
+    // 每帧重置可点击区域，由 render_tabs 与各模块 draw 重新登记，杜绝陈旧坐标。
+    app.mouse = crate::app::MouseRegions::default();
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -133,8 +137,9 @@ fn footer_text(app: &App) -> String {
     )
 }
 
-fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
-    let tabs_list = vec![
+/// 手工渲染标签栏（而非 Tabs widget），以便登记每个标签的精确点击矩形。
+fn render_tabs(f: &mut Frame, area: Rect, app: &mut App) {
+    let tabs_list = [
         (CurrentTab::Dashboard, "tab_dashboard"),
         (CurrentTab::Adapter, "tab_adapter"),
         (CurrentTab::Scanner, "tab_scanner"),
@@ -143,43 +148,48 @@ fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
         (CurrentTab::Settings, "tab_settings"),
     ];
 
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" IP Tools CLI ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
     let (active_fg, active_bg) = if app.diag_focused {
         (Color::White, Color::DarkGray)
     } else {
         (theme::COLOR_PRIMARY, theme::COLOR_HIGHLIGHT_BG)
     };
 
-    let titles: Vec<Line> = tabs_list
-        .iter()
-        .map(|(tab_enum, i18n_key)| {
-            let text = format!(" {} ", app.t(i18n_key));
-            if *tab_enum == app.current_tab {
-                Line::from(Span::styled(
-                    text,
-                    Style::default()
-                        .fg(active_fg)
-                        .bg(active_bg)
-                        .add_modifier(Modifier::BOLD),
-                ))
-            } else {
-                Line::from(Span::styled(
-                    text,
-                    Style::default().fg(theme::COLOR_PRIMARY),
-                ))
-            }
-        })
-        .collect();
-
-    let tabs = Tabs::new(titles)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" IP Tools CLI "),
-        )
-        .divider(Span::raw("|").fg(theme::COLOR_SUBTEXT))
-        .select(app.current_tab as usize);
-
-    f.render_widget(tabs, area);
+    let y = inner.y;
+    let max_x = inner.x + inner.width;
+    let mut x = inner.x;
+    for (i, (tab_enum, key)) in tabs_list.iter().enumerate() {
+        if x >= max_x {
+            break;
+        }
+        let label = format!(" {} ", app.t(key));
+        let w = (label.width() as u16).min(max_x - x);
+        let style = if *tab_enum == app.current_tab {
+            Style::default()
+                .fg(active_fg)
+                .bg(active_bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme::COLOR_PRIMARY)
+        };
+        let rect = Rect::new(x, y, w, 1);
+        f.render_widget(Paragraph::new(Span::styled(label, style)), rect);
+        app.mouse.tabs.push((rect, *tab_enum));
+        x += w;
+        // 分隔符
+        if i + 1 < tabs_list.len() && x < max_x {
+            f.render_widget(
+                Paragraph::new(Span::styled("|", Style::default().fg(theme::COLOR_SUBTEXT))),
+                Rect::new(x, y, 1, 1),
+            );
+            x += 1;
+        }
+    }
 }
 
 #[allow(dead_code)]
