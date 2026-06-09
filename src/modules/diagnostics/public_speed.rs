@@ -1,9 +1,10 @@
 //! 公网下载测速工具。
 //!
-//! 通过流式下载中国科学技术大学（USTC）测速端点并测量吞吐量，最长 15 秒或下载满
-//! 100MB 即止。该端点基于开源 LibreSpeed，`ckSize` 参数（单位 MB）指定回传的测试
-//! 数据量，国内教育网/公网均可靠。仅用 reqwest（已在依赖中），跨平台。计时与瞬时
-//! 速率在异步任务内计算后回传，UI 只负责展示与维护速率曲线。
+//! 通过流式下载测速端点并测量吞吐量，最长 15 秒或读完即止。为兼顾国内可用性，
+//! 内置一组候选端点（教育网 / 阿里云 CDN / 国际），按顺序尝试，第一个能成功连接
+//! （HTTP 2xx）的即用于测速，避免单一端点失效导致整体不可用。仅用 reqwest（已在
+//! 依赖中），跨平台。计时与瞬时速率在异步任务内计算后回传，UI 只负责展示与维护
+//! 速率曲线。
 
 use super::FocusArea;
 use crate::keymap::Action;
@@ -16,16 +17,28 @@ use ratatui::{
 };
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
-// 中国科学技术大学（中科大）LibreSpeed 测速后端，ckSize 单位为 MB。
-const TEST_URL: &str = "https://test.ustc.edu.cn/backend/garbage.php?ckSize=100"; // 100 MB
-const TEST_SERVER: &str = "test.ustc.edu.cn";
+// 候选测速端点 (下载 URL, 展示用主机名)，按优先级排序：国内教育网 → 阿里云 CDN
+// → 国际。逐个尝试，第一个 HTTP 2xx 的即用于测速。均为大文件，15 秒内难以下完，
+// 故 ckSize/字节数仅为上限。修改时务必保证至少一个国内端点在前。
+const TEST_ENDPOINTS: &[(&str, &str)] = &[
+    ("https://speedtest.zju.edu.cn/1000M", "speedtest.zju.edu.cn"),
+    (
+        "https://wirelesscdn-download.xuexi.cn/publish/xuexi_android/latest/xuexi_android_10002068.apk",
+        "wirelesscdn-download.xuexi.cn",
+    ),
+    ("https://speed.cloudflare.com/__down?bytes=104857600", "speed.cloudflare.com"),
+];
 const MAX_DURATION_MS: u64 = 15_000;
+// 单个候选端点的连接超时：超时则快速跳到下一个，避免某节点不可达时整体卡住。
+const CONNECT_TIMEOUT_SECS: u64 = 6;
 
 #[derive(Debug)]
 enum SpeedEvent {
+    /// 成功连接的端点主机名（用于在配置栏展示实际所用节点）。
+    Server(&'static str),
     Progress {
         total_bytes: u64,
         elapsed_ms: u64,
@@ -39,6 +52,8 @@ enum SpeedEvent {
 pub struct PublicSpeedTool {
     running: bool,
     error_key: Option<String>,
+    /// 实际选中的端点主机名（None = 尚未连接，显示「自动」）。
+    server: Option<&'static str>,
 
     total_bytes: u64,
     elapsed_ms: u64,
@@ -57,6 +72,7 @@ impl PublicSpeedTool {
         Self {
             running: false,
             error_key: None,
+            server: None,
             total_bytes: 0,
             elapsed_ms: 0,
             current_bps: 0,
@@ -71,6 +87,9 @@ impl PublicSpeedTool {
     pub fn update(&mut self) {
         while let Ok(event) = self.rx.try_recv() {
             match event {
+                SpeedEvent::Server(host) => {
+                    self.server = Some(host);
+                }
                 SpeedEvent::Progress {
                     total_bytes,
                     elapsed_ms,
@@ -120,6 +139,7 @@ impl PublicSpeedTool {
     fn start(&mut self) {
         self.running = true;
         self.error_key = None;
+        self.server = None;
         self.total_bytes = 0;
         self.elapsed_ms = 0;
         self.current_bps = 0;
@@ -131,7 +151,11 @@ impl PublicSpeedTool {
         let abort = self.abort_flag.clone();
 
         tokio::spawn(async move {
-            let client = match reqwest::Client::builder().no_proxy().build() {
+            let client = match reqwest::Client::builder()
+                .no_proxy()
+                .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
+                .build()
+            {
                 Ok(c) => c,
                 Err(_) => {
                     let _ = tx.send(SpeedEvent::Error("diag_speed_err".into())).await;
@@ -139,9 +163,28 @@ impl PublicSpeedTool {
                 }
             };
 
-            let mut resp = match client.get(TEST_URL).send().await {
-                Ok(r) => r,
-                Err(_) => {
+            // 依次尝试候选端点：第一个能连通且返回 HTTP 2xx 的即用于测速。
+            // 端点返回 4xx/5xx 时 reqwest 仍是 Ok，但响应体往往只有几字节错误页，
+            // 若不校验状态码会被当成「下载完成」瞬间结束（无任何提示）——必须拦截。
+            let mut resp = None;
+            for (url, host) in TEST_ENDPOINTS {
+                if *abort.lock().unwrap() {
+                    let _ = tx.send(SpeedEvent::Done).await;
+                    return;
+                }
+                match client.get(*url).send().await {
+                    Ok(r) if r.status().is_success() => {
+                        let _ = tx.send(SpeedEvent::Server(host)).await;
+                        resp = Some(r);
+                        break;
+                    }
+                    _ => continue, // 连接失败或非 2xx，换下一个候选
+                }
+            }
+            let mut resp = match resp {
+                Some(r) => r,
+                None => {
+                    // 所有候选端点都不可用。
                     let _ = tx.send(SpeedEvent::Error("diag_speed_err".into())).await;
                     return;
                 }
@@ -354,13 +397,18 @@ impl PublicSpeedTool {
         let inner = block.inner(area);
         f.render_widget(block, area);
 
+        // 未连接前显示「自动」，连通后显示实际命中的端点主机名。
+        let server_label = self
+            .server
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| i18n.t("diag_speed_server_auto"));
         let lines = vec![
             Line::from(vec![
                 Span::styled(
                     format!("{}: ", i18n.t("diag_speed_server")),
                     Style::default().fg(Color::Gray),
                 ),
-                Span::styled(TEST_SERVER, Style::default().fg(theme::COLOR_SECONDARY)),
+                Span::styled(server_label, Style::default().fg(theme::COLOR_SECONDARY)),
             ]),
             Line::from(""),
             Line::from(Span::styled(
