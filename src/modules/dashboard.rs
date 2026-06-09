@@ -437,8 +437,10 @@ fn draw_public_panel(f: &mut Frame, area: Rect, dash: &Dashboard, i18n: &I18n) {
                     Style::default().fg(theme::COLOR_ERROR),
                 )),
             ]));
-            let safe_msg = if debug_msg.len() > 30 {
-                format!("{}...", &debug_msg[..30])
+            // 按字符（非字节）截断：错误串可能含 OS 本地化/非 ASCII 文本，
+            // 直接 &str[..30] 在非字符边界会 panic 崩溃渲染线程。
+            let safe_msg = if debug_msg.chars().count() > 30 {
+                format!("{}...", debug_msg.chars().take(30).collect::<String>())
             } else {
                 debug_msg.clone()
             };
