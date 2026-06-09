@@ -164,6 +164,19 @@ impl PortScanTool {
 
     fn handle_config_key(&mut self, key: KeyEvent, action: Option<Action>) {
         // 运行中不允许改配置。带光标编辑：目标接受主机名字符，端口/超时仅数字。
+        let on_target = self.config_state.selected() == Some(0);
+        if self.mru.open || (on_target && !self.running) {
+            if crate::ui::mru::handle_mru_key(
+                &mut self.config.target,
+                &mut self.mru,
+                &self.history.borrow().targets,
+                key,
+                action,
+                self.running,
+            ) {
+                return;
+            }
+        }
         if !self.running {
             if let Some(idx) = self.config_state.selected() {
                 let too_long =
@@ -271,6 +284,9 @@ impl PortScanTool {
         let tx = self.tx.clone();
         let scanned = self.scanned.clone();
         let target = self.config.target.value().trim().to_string();
+        if !target.is_empty() {
+            self.history.borrow_mut().targets.record(&target);
+        }
         let concurrency = concurrency.clamp(1, 1024);
 
         tokio::spawn(async move {
@@ -342,6 +358,16 @@ impl PortScanTool {
     ) {
         self.draw_main(f, main_area, i18n, is_focused, active_focus);
         self.draw_config(f, config_area, i18n, is_focused, active_focus);
+
+        // MRU 历史下拉：仅在配置栏聚焦时有效；失焦则关闭，避免下拉悬留。
+        if is_focused && active_focus == FocusArea::Config {
+            if self.mru.open {
+                let entries: Vec<String> = self.history.borrow().targets.entries().to_vec();
+                crate::ui::mru::draw_mru_popup(f, config_area, &entries, self.mru.sel, i18n);
+            }
+        } else {
+            self.mru.open = false;
+        }
     }
 
     fn draw_main(
@@ -515,7 +541,17 @@ impl PortScanTool {
             };
             let active = is_sel && is_active && !self.running;
             let mut value_spans = vec![Span::styled(marker.to_string(), val_base)];
-            value_spans.extend(input.render_spans(active, val_base));
+            if i == 0 {
+                // 目标字段：带灰字历史补全。
+                value_spans.extend(crate::ui::mru::mru_ghost_spans(
+                    &self.config.target,
+                    &self.history.borrow().targets,
+                    active,
+                    val_base,
+                ));
+            } else {
+                value_spans.extend(input.render_spans(active, val_base));
+            }
             // 全部为「直接输入」字段；目标可含主机名，其余仅数字——提示分别标注。
             if is_sel && is_active && !self.running {
                 let hint = if i == 0 {
