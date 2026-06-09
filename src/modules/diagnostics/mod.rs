@@ -1,13 +1,25 @@
 use crate::app::App;
-use crossterm::event::{KeyCode, KeyEvent};
+use crate::keymap::Action;
+use crossterm::event::KeyEvent;
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph}, // 修复：添加 Paragraph
+    widgets::{Block, Borders, List, ListItem, ListState},
 };
 
+pub mod icmp;
+pub mod lan_speed;
+pub mod link_quality;
 pub mod ping;
+pub mod port_scan;
+pub mod public_speed;
+pub mod trace;
 
+use lan_speed::LanSpeedTool;
+use link_quality::LinkQualityTool;
 use ping::PingTool;
+use port_scan::PortScanTool;
+use public_speed::PublicSpeedTool;
+use trace::TraceTool;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticTool {
@@ -44,6 +56,11 @@ pub struct DiagnosticsModule {
 
     // Sub-tools
     pub ping_tool: PingTool,
+    pub port_scan_tool: PortScanTool,
+    pub public_speed_tool: PublicSpeedTool,
+    pub trace_tool: TraceTool,
+    pub link_quality_tool: LinkQualityTool,
+    pub lan_speed_tool: LanSpeedTool,
 }
 
 impl DiagnosticsModule {
@@ -64,40 +81,62 @@ impl DiagnosticsModule {
                 DiagnosticTool::LanSpeed,
             ],
             ping_tool: PingTool::new(),
+            port_scan_tool: PortScanTool::new(),
+            public_speed_tool: PublicSpeedTool::new(),
+            trace_tool: TraceTool::new(),
+            link_quality_tool: LinkQualityTool::new(),
+            lan_speed_tool: LanSpeedTool::new(),
         }
     }
 
     pub fn update(&mut self) {
         match self.current_tool {
             DiagnosticTool::Ping => self.ping_tool.update(),
-            _ => {}
+            DiagnosticTool::PortScan => self.port_scan_tool.update(),
+            DiagnosticTool::NetSpeed => self.public_speed_tool.update(),
+            DiagnosticTool::Trace => self.trace_tool.update(),
+            DiagnosticTool::LinkQuality => self.link_quality_tool.update(),
+            DiagnosticTool::LanSpeed => self.lan_speed_tool.update(),
         }
     }
 
-    pub fn on_key(&mut self, key: KeyEvent) {
-        // 1. 全局焦点切换 (Tab)
-        if key.code == KeyCode::Tab {
+    pub fn on_key(&mut self, key: KeyEvent, action: Option<Action>, concurrency: usize) {
+        // 1. 诊断页内部用 NextTab(默认 Tab) 在 Menu/Main/Config 三栏间切换焦点
+        if action == Some(Action::NextTab) {
             self.active_focus = self.active_focus.next();
             return;
         }
 
         // 2. 根据焦点区域分发事件
         match self.active_focus {
-            FocusArea::Menu => self.handle_menu_key(key),
+            FocusArea::Menu => self.handle_menu_key(action),
             _ => {
-                // 将事件传递给当前选中的工具
+                // 将事件传递给当前选中的工具（需原始按键做文本输入的工具同时收到 key）
                 match self.current_tool {
-                    DiagnosticTool::Ping => self.ping_tool.on_key(key, self.active_focus),
-                    _ => {}
+                    DiagnosticTool::Ping => self.ping_tool.on_key(key, action, self.active_focus),
+                    DiagnosticTool::PortScan => {
+                        self.port_scan_tool
+                            .on_key(key, action, self.active_focus, concurrency)
+                    }
+                    DiagnosticTool::NetSpeed => self.public_speed_tool.on_key(action),
+                    DiagnosticTool::Trace => {
+                        self.trace_tool.on_key(key, action, self.active_focus)
+                    }
+                    DiagnosticTool::LinkQuality => {
+                        self.link_quality_tool.on_key(key, action, self.active_focus)
+                    }
+                    DiagnosticTool::LanSpeed => {
+                        self.lan_speed_tool.on_key(key, action, self.active_focus)
+                    }
                 }
             }
         }
     }
 
-    fn handle_menu_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Down | KeyCode::Char('j') => self.next_tool(),
-            KeyCode::Up | KeyCode::Char('k') => self.prev_tool(),
+    fn handle_menu_key(&mut self, action: Option<Action>) {
+        match action {
+            Some(Action::Down) => self.next_tool(),
+            Some(Action::Up) => self.prev_tool(),
             _ => {}
         }
     }
@@ -191,24 +230,25 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App, is_focused: bool) {
             diag.ping_tool
                 .draw(f, chunks[1], chunks[2], i18n, is_focused, diag.active_focus);
         }
-        _ => {
-            // 占位符分支
-            let main_block = Block::default()
-                .borders(Borders::ALL)
-                .title(i18n.t("diag_main_title"))
-                .border_style(Style::default().fg(Color::DarkGray));
-            let conf_block = Block::default()
-                .borders(Borders::ALL)
-                .title(i18n.t("diag_config_title"))
-                .border_style(Style::default().fg(Color::DarkGray));
-
-            f.render_widget(
-                Paragraph::new("Coming Soon...").block(main_block),
-                chunks[1],
-            );
-
-            // 修复：直接渲染 conf_block，去掉错误的 .block(...) 调用
-            f.render_widget(conf_block, chunks[2]);
+        DiagnosticTool::PortScan => {
+            diag.port_scan_tool
+                .draw(f, chunks[1], chunks[2], i18n, is_focused, diag.active_focus);
+        }
+        DiagnosticTool::NetSpeed => {
+            diag.public_speed_tool
+                .draw(f, chunks[1], chunks[2], i18n, is_focused, diag.active_focus);
+        }
+        DiagnosticTool::Trace => {
+            diag.trace_tool
+                .draw(f, chunks[1], chunks[2], i18n, is_focused, diag.active_focus);
+        }
+        DiagnosticTool::LinkQuality => {
+            diag.link_quality_tool
+                .draw(f, chunks[1], chunks[2], i18n, is_focused, diag.active_focus);
+        }
+        DiagnosticTool::LanSpeed => {
+            diag.lan_speed_tool
+                .draw(f, chunks[1], chunks[2], i18n, is_focused, diag.active_focus);
         }
     }
 }

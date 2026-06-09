@@ -1,5 +1,7 @@
 use crate::app::App;
-use crate::utils::net;
+use crate::keymap::Action;
+use crate::ui::theme;
+use crate::utils::{net, oui};
 use crossterm::event::{KeyCode, KeyEvent};
 use futures::{stream, StreamExt};
 use ipnetwork::Ipv4Network;
@@ -75,7 +77,8 @@ impl ScannerModule {
         }
     }
 
-    pub fn on_key(&mut self, key: KeyEvent, concurrency: usize) {
+    pub fn on_key(&mut self, key: KeyEvent, action: Option<Action>, concurrency: usize) {
+        // 编辑 CIDR 时需要原始按键做文本输入，不走语义动作
         if self.input_mode {
             match key.code {
                 KeyCode::Enter | KeyCode::Esc => {
@@ -91,26 +94,27 @@ impl ScannerModule {
                 }
                 _ => {}
             }
-        } else {
-            match key.code {
-                KeyCode::Char('e') => {
-                    self.input_mode = true;
-                }
-                KeyCode::Enter => {
-                    if self.status != ScanStatus::Scanning {
-                        self.start_scan(concurrency);
-                    }
-                }
-                KeyCode::Char('s') => {
-                    if self.status == ScanStatus::Scanning {
-                        *self.abort_flag.lock().unwrap() = true;
-                        self.status = ScanStatus::Done;
-                    }
-                }
-                KeyCode::Down | KeyCode::Char('j') => self.next(),
-                KeyCode::Up | KeyCode::Char('k') => self.previous(),
-                _ => {}
+            return;
+        }
+
+        match action {
+            Some(Action::Edit) => {
+                self.input_mode = true;
             }
+            Some(Action::Confirm) => {
+                if self.status != ScanStatus::Scanning {
+                    self.start_scan(concurrency);
+                }
+            }
+            Some(Action::Stop) => {
+                if self.status == ScanStatus::Scanning {
+                    *self.abort_flag.lock().unwrap() = true;
+                    self.status = ScanStatus::Done;
+                }
+            }
+            Some(Action::Down) => self.next(),
+            Some(Action::Up) => self.previous(),
+            _ => {}
         }
     }
 
@@ -342,6 +346,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
     let header_cells = vec![
         Cell::from(col_ip_header).style(Style::default().fg(Color::Gray)),
         Cell::from(i18n.t("scan_col_mac")).style(Style::default().fg(Color::Gray)),
+        Cell::from(i18n.t("scan_col_vendor")).style(Style::default().fg(Color::Gray)),
         Cell::from(i18n.t("scan_col_host")).style(Style::default().fg(Color::Gray)),
     ];
 
@@ -366,9 +371,16 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
             Color::White
         };
 
+        let vendor = oui::lookup(&item.mac).unwrap_or("-");
+
         let cells = vec![
             Cell::from(ip_text).style(Style::default().fg(text_color)),
             Cell::from(item.mac.clone()).style(Style::default().fg(text_color)),
+            Cell::from(vendor).style(Style::default().fg(if is_selected {
+                Color::Cyan
+            } else {
+                theme::COLOR_SECONDARY
+            })),
             Cell::from(item.hostname.clone()).style(Style::default().fg(text_color)),
         ];
 
@@ -378,9 +390,10 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
     let t = Table::new(
         rows,
         [
-            Constraint::Percentage(25),
-            Constraint::Percentage(35),
-            Constraint::Percentage(40),
+            Constraint::Percentage(22),
+            Constraint::Percentage(28),
+            Constraint::Percentage(22),
+            Constraint::Percentage(28),
         ],
     )
     .header(header)

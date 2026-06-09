@@ -1,8 +1,11 @@
 use crate::app::App;
+use crate::keymap::Action;
+use crate::modules::adapter_edit::{EditForm, EditOutcome};
 use crate::ui::theme; // 引入主题
+use crate::utils::format::{format_bytes, format_speed};
 use crate::utils::i18n::I18n;
 use crate::utils::net::{self, InterfaceInfo};
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::KeyEvent;
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Cell, List, ListItem, ListState, Paragraph, Row, Table},
@@ -24,6 +27,8 @@ pub struct AdapterModule {
     pub interfaces: Vec<InterfaceInfo>,
     networks: Networks,
     traffic_history: HashMap<String, TrafficStats>,
+    /// 进入编辑态时为 Some；只读视图时为 None。
+    pub edit: Option<EditForm>,
 }
 
 impl AdapterModule {
@@ -39,10 +44,15 @@ impl AdapterModule {
             interfaces,
             networks: Networks::new_with_refreshed_list(),
             traffic_history: HashMap::new(),
+            edit: None,
         }
     }
 
     pub fn update(&mut self) {
+        if let Some(form) = &mut self.edit {
+            form.update();
+        }
+
         self.networks.refresh(true);
         let now = Instant::now();
 
@@ -53,8 +63,9 @@ impl AdapterModule {
             if let Some(prev) = self.traffic_history.get_mut(name) {
                 let duration = now.duration_since(prev.last_update).as_secs_f64();
                 if duration > 0.1 {
-                    prev.rx_speed = ((rx - prev.total_rx) as f64 / duration) as u64;
-                    prev.tx_speed = ((tx - prev.total_tx) as f64 / duration) as u64;
+                    // saturating_sub：避免计数器回绕时下溢 panic
+                    prev.rx_speed = (rx.saturating_sub(prev.total_rx) as f64 / duration) as u64;
+                    prev.tx_speed = (tx.saturating_sub(prev.total_tx) as f64 / duration) as u64;
                     prev.total_rx = rx;
                     prev.total_tx = tx;
                     prev.last_update = now;
@@ -86,12 +97,35 @@ impl AdapterModule {
         }
     }
 
-    pub fn on_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Down | KeyCode::Char('j') => self.next(),
-            KeyCode::Up | KeyCode::Char('k') => self.previous(),
-            KeyCode::Char('r') => self.reload(),
+    pub fn on_key(&mut self, key: KeyEvent, action: Option<Action>) {
+        // 编辑态：所有按键交给表单处理
+        if let Some(form) = &mut self.edit {
+            match form.on_key(key, action) {
+                EditOutcome::Stay => {}
+                EditOutcome::Cancel => self.edit = None,
+                EditOutcome::Done => {
+                    self.edit = None;
+                    self.reload();
+                }
+            }
+            return;
+        }
+
+        // 只读态
+        match action {
+            Some(Action::Down) => self.next(),
+            Some(Action::Up) => self.previous(),
+            Some(Action::Refresh) => self.reload(),
+            Some(Action::Edit) => self.enter_edit(),
             _ => {}
+        }
+    }
+
+    fn enter_edit(&mut self) {
+        if let Some(idx) = self.state.selected() {
+            if let Some(iface) = self.interfaces.get(idx) {
+                self.edit = Some(EditForm::from_interface(iface));
+            }
         }
     }
 
@@ -131,13 +165,19 @@ impl AdapterModule {
 }
 
 pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
+    let i18n = &app.i18n;
+    let adapter_module = &mut app.adapter;
+
+    // 编辑态：整块区域交给编辑表单
+    if let Some(form) = &adapter_module.edit {
+        form.draw(f, area, i18n);
+        return;
+    }
+
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
         .split(area);
-
-    let i18n = &app.i18n;
-    let adapter_module = &mut app.adapter;
 
     let items: Vec<ListItem> = adapter_module
         .interfaces
@@ -170,7 +210,14 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(i18n.t("adapter_detail_title"));
+        .title(i18n.t("adapter_detail_title"))
+        .title(
+            Line::from(Span::styled(
+                format!(" {} ", i18n.t("adapter_edit_enter")),
+                Style::default().fg(theme::COLOR_SECONDARY),
+            ))
+            .alignment(Alignment::Right),
+        );
 
     if let Some(index) = adapter_module.state.selected() {
         if let Some(iface) = adapter_module.interfaces.get(index) {
@@ -178,11 +225,14 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
             let table = render_detail_table(i18n, iface, stats);
             f.render_widget(table.block(block), chunks[1]);
         } else {
-            f.render_widget(Paragraph::new("Select an adapter").block(block), chunks[1]);
+            f.render_widget(
+                Paragraph::new(i18n.t("adapter_select_hint")).block(block),
+                chunks[1],
+            );
         }
     } else {
         f.render_widget(
-            Paragraph::new("No adapter selected").block(block),
+            Paragraph::new(i18n.t("adapter_none_selected")).block(block),
             chunks[1],
         );
     }
@@ -352,9 +402,9 @@ fn render_detail_table<'a>(
         ]));
     } else {
         rows.push(Row::new(vec![
-            Cell::from(Span::styled("Traffic", key_style)),
+            Cell::from(Span::styled(i18n.t("common_traffic"), key_style)),
             Cell::from(Span::styled(
-                "Calculating...",
+                i18n.t("adapter_traffic_calc"),
                 Style::default().fg(Color::DarkGray),
             )),
         ]));
@@ -363,24 +413,4 @@ fn render_detail_table<'a>(
     Table::new(rows, [Constraint::Length(16), Constraint::Min(0)])
         .column_spacing(1)
         .style(val_style)
-}
-
-fn format_speed(bps: u64) -> String {
-    let kbps = bps as f64 / 1024.0;
-    if kbps < 1024.0 {
-        format!("{:.1} KB/s", kbps)
-    } else {
-        format!("{:.2} MB/s", kbps / 1024.0)
-    }
-}
-
-fn format_bytes(bytes: u64) -> String {
-    let kb = bytes as f64 / 1024.0;
-    if kb < 1024.0 {
-        format!("{:.1} KB", kb)
-    } else if kb < 1024.0 * 1024.0 {
-        format!("{:.1} MB", kb / 1024.0)
-    } else {
-        format!("{:.2} GB", kb / 1024.0 / 1024.0)
-    }
 }

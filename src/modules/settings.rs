@@ -1,8 +1,8 @@
 use crate::app::App;
 use crate::config::Config;
+use crate::keymap::Action;
 use crate::modules::dashboard::Dashboard;
 use crate::utils::i18n::{I18n, Language};
-use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
@@ -32,17 +32,17 @@ impl SettingsModule {
 
     pub fn on_key(
         &mut self,
-        key: KeyEvent,
+        action: Option<Action>,
         config: &mut Config,
         i18n: &mut I18n,
         dashboard: &mut Dashboard,
     ) {
-        match key.code {
-            KeyCode::Down | KeyCode::Char('j') => self.next(),
-            KeyCode::Up | KeyCode::Char('k') => self.previous(),
-            KeyCode::Left | KeyCode::Char('h') => self.change_value(config, i18n, dashboard, -1),
-            KeyCode::Right | KeyCode::Char('l') => self.change_value(config, i18n, dashboard, 1),
-            KeyCode::Enter => self.change_value(config, i18n, dashboard, 1),
+        match action {
+            Some(Action::Down) => self.next(),
+            Some(Action::Up) => self.previous(),
+            Some(Action::Left) => self.change_value(config, i18n, dashboard, -1),
+            Some(Action::Right) => self.change_value(config, i18n, dashboard, 1),
+            Some(Action::Confirm) => self.change_value(config, i18n, dashboard, 1),
             _ => {}
         }
     }
