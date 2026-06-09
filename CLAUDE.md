@@ -59,6 +59,23 @@ cargo check              # 快速类型检查
 - **需要文本输入的模块**（scanner 的 CIDR、ping/port_scan 的目标框）同时收到原始 `KeyEvent`，文本态走 `key.code`，普通态走 `action`。
 - 底部帮助栏由 `ui/mod.rs::footer_text` 依当前绑定动态生成，勿写死按键名。
 
+### 鼠标交互（`app.rs::MouseRegions` + `on_mouse`）
+
+每帧 `ui::draw` 开头把 `app.mouse` 重置为空，随后 `render_tabs` 与各模块 `draw`
+把自己的可点击矩形登记进去（标签页、各列表内容区、诊断三栏、扫描 CIDR 取值起点等）。
+`on_mouse` 据此命中测试：左键点击切标签 / 选列表项 / 切诊断焦点 / 定位文本光标；
+滚轮经 `route_nav` 复用键盘上下导航。**新增可点击 UI 时**：在该模块 `draw` 里
+往 `app.mouse` 登记矩形（直接字段访问，与 `&mut app.<module>` 是不相交借用），
+并在 `on_mouse::handle_click` 加分支。坐标随布局自动更新，勿缓存跨帧。
+
+### 文本输入（`utils/textinput.rs::TextInput`）
+
+所有可编辑文本框（适配器 IP/掩码/网关/DNS、扫描 CIDR、诊断各目标/参数）统一用
+`TextInput`：维护光标，支持中间插入/删除、左右/Home/End、点击定位（`set_cursor_col`）。
+模块在文本态把原始 `key.code` 交给 `handle_key(code, filter)`（`filter_ipv4`/`filter_cidr`/
+`filter_host` 或自定义闭包限制可输入字符）；渲染调 `render_spans(active, base)` 显示光标块。
+诊断「参数配置」栏统一经 `diagnostics::config_field_item` 渲染并按字段类型附输入/切换提示。
+
 ### 模块契约（关键模式）
 
 每个模块（`src/modules/*.rs`）遵循同一套约定，新增/修改模块务必沿用：
@@ -110,7 +127,7 @@ cargo check              # 快速类型检查
 
 1. **Scanner 只能发现同二层子网主机**：基于 `SendARP`，跨网段、或目标禁 ARP/已离线但有缓存的情况都不可靠；且整列"厂商"(vendor) 在 locale 里标注"暂未实现"（尚无 OUI 数据库）。
 2. **公网 IP 用明文 HTTP**：`http://ip-api.com`（非 HTTPS，免费档 45 req/min 限流），并强制 `no_proxy()`。代理环境下仍直连。
-3. **Mouse/Resize 事件被吞**：`app.on_mouse`/`on_resize` 为空实现（`EnableMouseCapture` 已开但无逻辑）。
+3. **Resize 事件被吞**：`app.on_resize` 为空实现（ratatui 每帧按 `f.area()` 重新布局，影响小）。鼠标已实现（见下）。
 
 ## 待办 / 提示
 

@@ -194,6 +194,20 @@ impl AdapterModule {
         }
     }
 
+    /// 鼠标：点击只读列表第 `row` 行选中该网卡。
+    pub fn click_list(&mut self, row: usize) {
+        if row < self.interfaces.len() {
+            self.state.select(Some(row));
+        }
+    }
+
+    /// 鼠标：点击编辑表单，选中对应字段并（文本字段）定位光标。
+    pub fn click_edit(&mut self, x: u16, y: u16, area: Rect) {
+        if let Some(form) = &mut self.edit {
+            form.click(x, y, area);
+        }
+    }
+
     fn next(&mut self) {
         if self.interfaces.is_empty() {
             return;
@@ -232,6 +246,18 @@ impl AdapterModule {
 pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
     // 动态取「编辑」动作的绑定键，避免写死 'e'（用户可在 config 改键）。
     let edit_label = app.keymap.primary_label(Action::Edit);
+
+    // 登记鼠标可点击区域（编辑态登记字段区，只读态登记网卡列表区）。
+    if app.adapter.edit.is_some() {
+        app.mouse.adapter_edit = Some(EditForm::field_list_rect(area));
+    } else {
+        let list_area = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
+            .split(area)[0];
+        app.mouse.adapter_list = Some(Block::default().borders(Borders::ALL).inner(list_area));
+    }
+
     let i18n = &app.i18n;
     let adapter_module = &mut app.adapter;
 

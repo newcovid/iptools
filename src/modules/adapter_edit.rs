@@ -241,6 +241,47 @@ impl EditForm {
         });
     }
 
+    /// 字段列表所占的矩形（供鼠标命中测试）。**必须与 `draw` 内的布局一致**。
+    pub fn field_list_rect(area: Rect) -> Rect {
+        let inner = Block::default().borders(Borders::ALL).inner(area);
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(8),
+                Constraint::Length(2),
+                Constraint::Length(2),
+            ])
+            .split(inner)[0]
+    }
+
+    /// 鼠标点击编辑表单：选中点击到的字段；若为可编辑文本字段，定位光标到点击列。
+    /// `area` 为整个编辑区域（与 draw 收到的一致）。
+    pub fn click(&mut self, x: u16, y: u16, area: Rect) {
+        if self.confirming || self.applying || self.result.is_some() {
+            return;
+        }
+        let fields = Self::field_list_rect(area);
+        let inside = x >= fields.x
+            && x < fields.x + fields.width
+            && y >= fields.y
+            && y < fields.y + fields.height;
+        if !inside {
+            return;
+        }
+        let row = (y - fields.y) as usize;
+        if row >= FIELD_COUNT {
+            return;
+        }
+        self.field = row;
+        // 文本字段（1..=5）且静态模式：把光标定位到点击列。
+        // 取值文本起点 = 字段区左缘 + 2(标记) + 14(标签 {:<14})。
+        if row >= 1 && !self.use_dhcp {
+            let val_x = fields.x + 16;
+            let col = x.saturating_sub(val_x) as usize;
+            self.input_mut(row).set_cursor_col(col);
+        }
+    }
+
     // -------------------------------------------------------------------------
     // 绘图
     // -------------------------------------------------------------------------

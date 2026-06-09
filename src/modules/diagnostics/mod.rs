@@ -168,6 +168,20 @@ impl DiagnosticsModule {
         }
     }
 
+    /// 鼠标：直接设置当前焦点区域（点击中/右栏时用）。
+    pub fn set_focus(&mut self, focus: FocusArea) {
+        self.active_focus = focus;
+    }
+
+    /// 鼠标：点击左侧菜单第 `row` 项，聚焦菜单并切换到该工具。
+    pub fn click_menu(&mut self, row: usize) {
+        self.active_focus = FocusArea::Menu;
+        if row < self.tools.len() {
+            self.menu_state.select(Some(row));
+            self.current_tool = self.tools[row];
+        }
+    }
+
     fn handle_menu_key(&mut self, action: Option<Action>) {
         match action {
             Some(Action::Down) => self.next_tool(),
@@ -216,6 +230,11 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App, is_focused: bool) {
             Constraint::Percentage(30), // Config
         ])
         .split(area);
+
+    // 登记鼠标区域：左栏菜单内容区（用于选工具）+ 中/右栏整列（用于切焦点）。
+    app.mouse.diag_menu = Some(Block::default().borders(Borders::ALL).inner(chunks[0]));
+    app.mouse.diag_main = Some(chunks[1]);
+    app.mouse.diag_config = Some(chunks[2]);
 
     let i18n = &app.i18n;
     let diag = &mut app.diagnostics;
