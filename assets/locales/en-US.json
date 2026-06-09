@@ -134,5 +134,14 @@
     "diag_port_col_service": "Service",
     "diag_port_stat_open": "Open",
     "diag_port_stat_scanned": "Scanned",
-    "diag_port_err_target": "Invalid target or port range"
+    "diag_port_err_target": "Invalid target or port range",
+    "diag_speed_server": "Test Server",
+    "diag_speed_current": "Current",
+    "diag_speed_avg": "Avg",
+    "diag_speed_peak": "Peak",
+    "diag_speed_downloaded": "Downloaded",
+    "diag_speed_elapsed": "Elapsed",
+    "diag_speed_history": "Speed History",
+    "diag_speed_note": "Source: Cloudflare (max 15s)",
+    "diag_speed_err": "Speed test failed, check network"
 }

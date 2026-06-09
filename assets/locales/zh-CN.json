@@ -134,5 +134,14 @@
     "diag_port_col_service": "服务",
     "diag_port_stat_open": "开放",
     "diag_port_stat_scanned": "已扫",
-    "diag_port_err_target": "无效目标或端口范围"
+    "diag_port_err_target": "无效目标或端口范围",
+    "diag_speed_server": "测速服务器",
+    "diag_speed_current": "当前速率",
+    "diag_speed_avg": "平均",
+    "diag_speed_peak": "峰值",
+    "diag_speed_downloaded": "已下载",
+    "diag_speed_elapsed": "用时",
+    "diag_speed_history": "速率曲线",
+    "diag_speed_note": "数据来源：Cloudflare（最长 15 秒）",
+    "diag_speed_err": "测速失败，请检查网络"
 }
