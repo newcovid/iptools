@@ -7,7 +7,7 @@
 use super::FocusArea;
 use crate::keymap::Action;
 use crate::ui::theme;
-use crate::utils::format::format_bytes;
+use crate::utils::format::{format_bytes, format_speed_dual};
 use crate::utils::i18n::I18n;
 use ratatui::{
     prelude::*,
@@ -256,7 +256,7 @@ impl PublicSpeedTool {
                 Style::default().fg(Color::Gray),
             ),
             Span::styled(
-                speed_dual(self.current_bps),
+                format_speed_dual(self.current_bps),
                 Style::default()
                     .fg(theme::COLOR_PRIMARY)
                     .add_modifier(Modifier::BOLD),
@@ -271,14 +271,14 @@ impl PublicSpeedTool {
                 Style::default().fg(Color::Gray),
             ),
             Span::styled(
-                format!("{:<22}", speed_dual(self.avg_bps())),
+                format!("{:<22}", format_speed_dual(self.avg_bps())),
                 Style::default().fg(theme::COLOR_SECONDARY),
             ),
             Span::styled(
                 format!("{}: ", i18n.t("diag_speed_peak")),
                 Style::default().fg(Color::Gray),
             ),
-            Span::styled(speed_dual(self.peak_bps), Style::default().fg(Color::Yellow)),
+            Span::styled(format_speed_dual(self.peak_bps), Style::default().fg(Color::Yellow)),
         ]);
         f.render_widget(Paragraph::new(avg_peak), chunks[1]);
 
@@ -368,11 +368,4 @@ impl PublicSpeedTool {
         ];
         f.render_widget(Paragraph::new(lines), inner);
     }
-}
-
-/// 同时给出 MB/s 与 Mbps 两种习惯单位，例如 "11.84 MB/s (94.7 Mbps)"。
-fn speed_dual(bps: u64) -> String {
-    let mb_s = bps as f64 / 1024.0 / 1024.0;
-    let mbps = bps as f64 * 8.0 / 1_000_000.0;
-    format!("{:.2} MB/s ({:.1} Mbps)", mb_s, mbps)
 }
