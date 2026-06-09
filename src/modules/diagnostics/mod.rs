@@ -7,8 +7,10 @@ use ratatui::{
 };
 
 pub mod ping;
+pub mod port_scan;
 
 use ping::PingTool;
+use port_scan::PortScanTool;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticTool {
@@ -45,6 +47,7 @@ pub struct DiagnosticsModule {
 
     // Sub-tools
     pub ping_tool: PingTool,
+    pub port_scan_tool: PortScanTool,
 }
 
 impl DiagnosticsModule {
@@ -65,17 +68,19 @@ impl DiagnosticsModule {
                 DiagnosticTool::LanSpeed,
             ],
             ping_tool: PingTool::new(),
+            port_scan_tool: PortScanTool::new(),
         }
     }
 
     pub fn update(&mut self) {
         match self.current_tool {
             DiagnosticTool::Ping => self.ping_tool.update(),
+            DiagnosticTool::PortScan => self.port_scan_tool.update(),
             _ => {}
         }
     }
 
-    pub fn on_key(&mut self, key: KeyEvent, action: Option<Action>) {
+    pub fn on_key(&mut self, key: KeyEvent, action: Option<Action>, concurrency: usize) {
         // 1. 诊断页内部用 NextTab(默认 Tab) 在 Menu/Main/Config 三栏间切换焦点
         if action == Some(Action::NextTab) {
             self.active_focus = self.active_focus.next();
@@ -86,9 +91,13 @@ impl DiagnosticsModule {
         match self.active_focus {
             FocusArea::Menu => self.handle_menu_key(action),
             _ => {
-                // 将事件传递给当前选中的工具（ping 需原始按键做文本输入，故同时传 key）
+                // 将事件传递给当前选中的工具（需原始按键做文本输入的工具同时收到 key）
                 match self.current_tool {
                     DiagnosticTool::Ping => self.ping_tool.on_key(key, action, self.active_focus),
+                    DiagnosticTool::PortScan => {
+                        self.port_scan_tool
+                            .on_key(key, action, self.active_focus, concurrency)
+                    }
                     _ => {}
                 }
             }
@@ -190,6 +199,10 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App, is_focused: bool) {
     match diag.current_tool {
         DiagnosticTool::Ping => {
             diag.ping_tool
+                .draw(f, chunks[1], chunks[2], i18n, is_focused, diag.active_focus);
+        }
+        DiagnosticTool::PortScan => {
+            diag.port_scan_tool
                 .draw(f, chunks[1], chunks[2], i18n, is_focused, diag.active_focus);
         }
         _ => {

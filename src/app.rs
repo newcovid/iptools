@@ -134,7 +134,8 @@ impl App {
                     self.diag_focused = false;
                     return;
                 }
-                self.diagnostics.on_key(key, action);
+                self.diagnostics
+                    .on_key(key, action, self.config.scan_concurrency);
                 return;
             } else if action == Some(Action::Confirm) {
                 self.diag_focused = true;

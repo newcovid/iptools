@@ -124,5 +124,15 @@
     "diag_ping_err_dns": "DNS resolution failed",
     "diag_ping_err_ipv6": "IPv6 ping not supported on Windows",
     "diag_ping_err_perm": "Permission denied (root required on Unix)",
-    "diag_ping_err_generic": "Ping error"
+    "diag_ping_err_generic": "Ping error",
+    "diag_port_target": "Target IP/Domain",
+    "diag_port_start": "Start Port",
+    "diag_port_end": "End Port",
+    "diag_port_timeout": "Timeout (ms)",
+    "diag_port_open_title": "Open Ports",
+    "diag_port_col_port": "Port",
+    "diag_port_col_service": "Service",
+    "diag_port_stat_open": "Open",
+    "diag_port_stat_scanned": "Scanned",
+    "diag_port_err_target": "Invalid target or port range"
 }
