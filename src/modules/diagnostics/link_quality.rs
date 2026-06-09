@@ -1,14 +1,15 @@
 //! 链路质量评测（有线/无线）。
 //!
-//! 向可靠目标发送一组 ICMP 探测，统计平均延迟、抖动、丢包，综合给出评级；
-//! 并识别当前连接介质（无线则显示 SSID）。复用 `icmp::echo_once`。
+//! 可选定具体网卡，探测从该网卡源 IP 发出（IcmpSendEcho2Ex）；测试期间持续采样
+//! 延迟与无线射频状态（RSSI/信号质量/速率），按多维加权模型给出评级。
 
 use super::{config_field_item, FocusArea};
 use crate::keymap::Action;
 use crate::ui::theme;
 use crate::utils::i18n::I18n;
-use crate::utils::net;
 use crate::utils::textinput::{filter_host, TextInput};
+use crate::utils::wlan::{self, WirelessInfo};
+use crate::utils::{format, net};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     prelude::*,
@@ -20,16 +21,24 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
+/// 一轮探测采样：延迟 + 无线动态字段（仅无线时有值）。
+#[derive(Debug, Clone, Copy)]
+struct Sample {
+    latency_ms: Option<u64>,
+    rssi_dbm: Option<i32>,
+    quality: Option<u32>,
+}
+
 #[derive(Debug)]
 enum LinkEvent {
-    Sample { latency_ms: Option<u64> },
+    Sample(Sample),
     Done,
     /// i18n 键
     Error(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Grade {
+pub enum Grade {
     Excellent,
     Good,
     Fair,
@@ -53,21 +62,26 @@ impl Grade {
             Grade::Poor => Color::Red,
         }
     }
-    fn ratio(self) -> f64 {
-        match self {
-            Grade::Excellent => 1.0,
-            Grade::Good => 0.75,
-            Grade::Fair => 0.45,
-            Grade::Poor => 0.2,
-        }
-    }
+}
+
+/// 一块可选网卡。
+#[derive(Debug, Clone)]
+struct IfaceChoice {
+    name: String,
+    ipv4: Ipv4Addr,
+    guid: String,
+    is_wifi: bool,
+    link_speed_bps: Option<u64>,
+    mac: String,
 }
 
 #[derive(Debug, Clone)]
 struct LinkConfig {
     target: TextInput,
     count: TextInput,
+    interval_ms: TextInput,
     timeout_ms: TextInput,
+    packet_size: TextInput,
 }
 
 impl Default for LinkConfig {
@@ -75,23 +89,41 @@ impl Default for LinkConfig {
         Self {
             target: TextInput::with_text("8.8.8.8"),
             count: TextInput::with_text("20"),
+            interval_ms: TextInput::with_text("200"),
             timeout_ms: TextInput::with_text("1000"),
+            packet_size: TextInput::with_text("32"),
         }
     }
 }
 
+/// 开始测试时对所选网卡静态信息的快照。
+#[derive(Debug, Clone)]
+struct LinkSnapshot {
+    iface_name: String,
+    is_wifi: bool,
+    link_speed_bps: Option<u64>,
+    mac: String,
+    ipv4: Ipv4Addr,
+    wireless: Option<WirelessInfo>,
+}
+
+const N_FIELDS: usize = 6; // 0=网卡选择器 + 5 文本字段
+
 pub struct LinkQualityTool {
     config: LinkConfig,
     config_state: ListState,
+    ifaces: Vec<IfaceChoice>,
+    iface_idx: usize,
+
     running: bool,
     error_key: Option<String>,
 
-    samples: Vec<Option<u64>>,
-    history: VecDeque<u64>,
+    samples: Vec<Sample>,
+    lat_history: VecDeque<u64>,
+    rssi_history: VecDeque<u64>, // 存 (rssi+100) 便于 sparkline 的 u64
     total: u64,
 
-    medium_wifi: bool,
-    ssid: Option<String>,
+    snapshot: Option<LinkSnapshot>,
 
     tx: mpsc::Sender<LinkEvent>,
     rx: mpsc::Receiver<LinkEvent>,
@@ -103,33 +135,70 @@ impl LinkQualityTool {
         let mut config_state = ListState::default();
         config_state.select(Some(0));
         let (tx, rx) = mpsc::channel(128);
-        Self {
+        let mut s = Self {
             config: LinkConfig::default(),
             config_state,
+            ifaces: Vec::new(),
+            iface_idx: 0,
             running: false,
             error_key: None,
             samples: Vec::new(),
-            history: VecDeque::with_capacity(100),
+            lat_history: VecDeque::with_capacity(100),
+            rssi_history: VecDeque::with_capacity(100),
             total: 0,
-            medium_wifi: false,
-            ssid: None,
+            snapshot: None,
             tx,
             rx,
             abort_flag: Arc::new(Mutex::new(false)),
+        };
+        s.refresh_ifaces();
+        s
+    }
+
+    /// 重新枚举可选网卡（活跃物理网卡且有 IPv4），并夹紧当前选择。
+    fn refresh_ifaces(&mut self) {
+        let mut choices = Vec::new();
+        for i in net::get_interfaces() {
+            if !(i.is_up && i.is_physical && !i.ipv4.is_empty()) {
+                continue;
+            }
+            let ipv4 = i
+                .ipv4
+                .iter()
+                .find_map(|s| s.parse::<Ipv4Addr>().ok());
+            let ipv4 = match ipv4 {
+                Some(v) => v,
+                None => continue,
+            };
+            let is_wifi = i.interface_type.contains("Ieee80211") || i.ssid.is_some();
+            choices.push(IfaceChoice {
+                name: i.name.clone(),
+                ipv4,
+                guid: i.guid.clone(),
+                is_wifi,
+                link_speed_bps: i.link_speed_bps,
+                mac: i.mac.clone(),
+            });
+        }
+        self.ifaces = choices;
+        if self.ifaces.is_empty() {
+            self.iface_idx = 0;
+        } else if self.iface_idx >= self.ifaces.len() {
+            self.iface_idx = self.ifaces.len() - 1;
         }
     }
 
     pub fn update(&mut self) {
         while let Ok(event) = self.rx.try_recv() {
             match event {
-                LinkEvent::Sample { latency_ms } => {
-                    self.samples.push(latency_ms);
-                    if let Some(l) = latency_ms {
-                        if self.history.len() >= 100 {
-                            self.history.pop_front();
-                        }
-                        self.history.push_back(l);
+                LinkEvent::Sample(s) => {
+                    if let Some(l) = s.latency_ms {
+                        push_cap(&mut self.lat_history, l, 100);
                     }
+                    if let Some(r) = s.rssi_dbm {
+                        push_cap(&mut self.rssi_history, (r + 100).max(0) as u64, 100);
+                    }
+                    self.samples.push(s);
                 }
                 LinkEvent::Done => self.running = false,
                 LinkEvent::Error(key) => {
@@ -157,23 +226,47 @@ impl LinkQualityTool {
     }
 
     fn handle_config_key(&mut self, key: KeyEvent, action: Option<Action>) {
-        // 带光标编辑：目标接受主机名字符，次数/超时仅数字。
-        if !self.running {
-            if let Some(idx) = self.config_state.selected() {
-                let too_long =
-                    matches!(key.code, KeyCode::Char(_)) && self.field_mut(idx).len() >= 64;
-                if !too_long {
-                    let consumed = if idx == 0 {
-                        self.field_mut(idx).handle_key(key.code, filter_host)
-                    } else {
-                        self.field_mut(idx).handle_key(key.code, |c| c.is_ascii_digit())
-                    };
-                    if consumed {
-                        return;
+        let idx = self.config_state.selected().unwrap_or(0);
+
+        // 网卡选择器：Left/Right 循环切换
+        if idx == 0 && !self.running {
+            match action {
+                Some(Action::Left) => {
+                    self.refresh_ifaces();
+                    if !self.ifaces.is_empty() {
+                        self.iface_idx =
+                            (self.iface_idx + self.ifaces.len() - 1) % self.ifaces.len();
                     }
+                    return;
+                }
+                Some(Action::Right) => {
+                    self.refresh_ifaces();
+                    if !self.ifaces.is_empty() {
+                        self.iface_idx = (self.iface_idx + 1) % self.ifaces.len();
+                    }
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        // 文本字段（idx 1..=5）：带光标编辑
+        if idx >= 1 && !self.running {
+            let too_long =
+                matches!(key.code, KeyCode::Char(_)) && self.field_mut(idx).value().len() >= 64;
+            if !too_long {
+                let consumed = if idx == 1 {
+                    self.field_mut(idx).handle_key(key.code, filter_host)
+                } else {
+                    self.field_mut(idx)
+                        .handle_key(key.code, |c| c.is_ascii_digit())
+                };
+                if consumed {
+                    return;
                 }
             }
         }
+
         match action {
             Some(Action::Down) => self.next_config(),
             Some(Action::Up) => self.prev_config(),
@@ -183,14 +276,20 @@ impl LinkQualityTool {
 
     fn field_mut(&mut self, idx: usize) -> &mut TextInput {
         match idx {
-            0 => &mut self.config.target,
-            1 => &mut self.config.count,
-            _ => &mut self.config.timeout_ms,
+            1 => &mut self.config.target,
+            2 => &mut self.config.count,
+            3 => &mut self.config.interval_ms,
+            4 => &mut self.config.timeout_ms,
+            _ => &mut self.config.packet_size,
         }
     }
 
     fn next_config(&mut self) {
-        let i = self.config_state.selected().map(|i| (i + 1) % 3).unwrap_or(0);
+        let i = self
+            .config_state
+            .selected()
+            .map(|i| (i + 1) % N_FIELDS)
+            .unwrap_or(0);
         self.config_state.select(Some(i));
     }
 
@@ -198,59 +297,126 @@ impl LinkQualityTool {
         let i = self
             .config_state
             .selected()
-            .map(|i| if i == 0 { 2 } else { i - 1 })
+            .map(|i| if i == 0 { N_FIELDS - 1 } else { i - 1 })
             .unwrap_or(0);
         self.config_state.select(Some(i));
     }
 
-    /// 统计 (已发, 已收, 丢包率%, 平均, 抖动)。
-    fn stats(&self) -> (u64, u64, f64, u64, u64) {
+    /// 连通性统计 (已发, 已收, 丢包率%, min, avg, max, 抖动)。
+    fn stats(&self) -> (u64, u64, f64, u64, u64, u64, u64) {
         let sent = self.samples.len() as u64;
-        let latencies: Vec<u64> = self.samples.iter().filter_map(|s| *s).collect();
-        let recv = latencies.len() as u64;
+        let lat: Vec<u64> = self.samples.iter().filter_map(|s| s.latency_ms).collect();
+        let recv = lat.len() as u64;
         let loss = if sent > 0 {
             ((sent - recv) as f64 / sent as f64) * 100.0
         } else {
             0.0
         };
         let avg = if recv > 0 {
-            latencies.iter().sum::<u64>() / recv
+            lat.iter().sum::<u64>() / recv
         } else {
             0
         };
-        let jitter = if latencies.len() > 1 {
-            let mut sum = 0u64;
-            for w in latencies.windows(2) {
-                sum += w[1].abs_diff(w[0]);
-            }
-            sum / (latencies.len() as u64 - 1)
+        let min = lat.iter().copied().min().unwrap_or(0);
+        let max = lat.iter().copied().max().unwrap_or(0);
+        let jitter = if lat.len() > 1 {
+            let s: u64 = lat.windows(2).map(|w| w[1].abs_diff(w[0])).sum();
+            s / (lat.len() as u64 - 1)
         } else {
             0
         };
-        (sent, recv, loss, avg, jitter)
+        (sent, recv, loss, min, avg, max, jitter)
     }
 
-    fn grade(&self) -> Option<Grade> {
-        let (sent, recv, loss, avg, jitter) = self.stats();
+    /// 无线 RSSI 统计 (min, avg, max)；无样本时返回 None。
+    fn rssi_stats(&self) -> Option<(i32, i32, i32)> {
+        let v: Vec<i32> = self.samples.iter().filter_map(|s| s.rssi_dbm).collect();
+        if v.is_empty() {
+            return None;
+        }
+        let min = *v.iter().min().unwrap();
+        let max = *v.iter().max().unwrap();
+        let avg = (v.iter().sum::<i32>()) / (v.len() as i32);
+        Some((min, avg, max))
+    }
+
+    /// 计算各维度 (标签 i18n key, 子评分, 权重) 列表。
+    fn dimensions(&self) -> Vec<(&'static str, f64, f64)> {
+        let (_, _, loss, _, avg, _, jitter) = self.stats();
+        let latency = score::latency_score(avg as f64);
+        let jit = score::jitter_score(jitter as f64);
+        let los = score::loss_score(loss);
+
+        let is_wifi = self.snapshot.as_ref().map(|s| s.is_wifi).unwrap_or(false);
+        if is_wifi {
+            let (sig, rate, phy) = self.wifi_dim_scores();
+            vec![
+                ("diag_link_dim_loss", los, 25.0),
+                ("diag_link_dim_latency", latency, 20.0),
+                ("diag_link_dim_jitter", jit, 15.0),
+                ("diag_link_dim_signal", sig, 25.0),
+                ("diag_link_dim_rate", rate, 10.0),
+                ("diag_link_dim_phy", phy, 5.0),
+            ]
+        } else {
+            vec![
+                ("diag_link_dim_loss", los, 40.0),
+                ("diag_link_dim_latency", latency, 35.0),
+                ("diag_link_dim_jitter", jit, 25.0),
+            ]
+        }
+    }
+
+    /// 无线三个维度子评分：信号(用采样 RSSI 均值)、速率(协商 Tx)、制式(代际)。
+    fn wifi_dim_scores(&self) -> (f64, f64, f64) {
+        let w = self.snapshot.as_ref().and_then(|s| s.wireless.as_ref());
+        let rssi_avg = self
+            .rssi_stats()
+            .map(|(_, a, _)| a as f64)
+            .or_else(|| w.map(|w| w.rssi_dbm as f64))
+            .unwrap_or(-100.0);
+        let sig = score::signal_score(rssi_avg);
+        let rate = score::rate_score(w.map(|w| w.tx_rate_mbps as f64).unwrap_or(0.0));
+        let phy = score::phy_score(w.map(|w| w.wifi_gen).unwrap_or(0));
+        (sig, rate, phy)
+    }
+
+    fn overall_grade(&self) -> Option<(f64, Grade, usize)> {
+        let (sent, recv, _, _, _, _, _) = self.stats();
         if sent == 0 || recv == 0 {
             return None;
         }
-        // 无线略放宽延迟阈值
-        let lat_relax = if self.medium_wifi { 1.3 } else { 1.0 };
-        let g = if loss > 5.0 || avg as f64 > 200.0 * lat_relax {
-            Grade::Poor
-        } else if avg as f64 > 100.0 * lat_relax || jitter > 50 {
-            Grade::Fair
-        } else if avg as f64 > 50.0 * lat_relax || jitter > 20 {
-            Grade::Good
-        } else {
-            Grade::Excellent
-        };
-        Some(g)
+        let dims = self.dimensions();
+        let pairs: Vec<(f64, f64)> = dims.iter().map(|(_, s, w)| (*s, *w)).collect();
+        let o = score::overall(&pairs);
+        // 最弱维度索引
+        let weakest = dims
+            .iter()
+            .enumerate()
+            .min_by(|a, b| a.1 .1.partial_cmp(&b.1 .1).unwrap())
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        Some((o, score::grade_from_score(o), weakest))
     }
 
     fn start(&mut self) {
+        self.refresh_ifaces();
+        let iface = match self.ifaces.get(self.iface_idx) {
+            Some(c) => c.clone(),
+            None => {
+                self.error_key = Some("diag_link_no_iface".to_string());
+                return;
+            }
+        };
+
         let count: u64 = self.config.count.value().parse().unwrap_or(20).clamp(5, 100);
+        let interval_ms: u64 = self
+            .config
+            .interval_ms
+            .value()
+            .parse()
+            .unwrap_or(200)
+            .clamp(50, 5000);
         let timeout_ms: u32 = self
             .config
             .timeout_ms
@@ -258,68 +424,70 @@ impl LinkQualityTool {
             .parse()
             .unwrap_or(1000)
             .clamp(100, 10000);
+        let packet_size: usize = self
+            .config
+            .packet_size
+            .value()
+            .parse()
+            .unwrap_or(32)
+            .clamp(0, 1472);
         let target = self.config.target.value().trim().to_string();
         if target.is_empty() {
             self.error_key = Some("diag_link_err".to_string());
             return;
         }
 
-        // 识别连接介质（无线/有线）
-        let (wifi, ssid) = detect_medium();
-        self.medium_wifi = wifi;
-        self.ssid = ssid;
+        // 静态快照：无线则查一次完整无线信息
+        let wireless = if iface.is_wifi {
+            wlan::query(&iface.guid)
+        } else {
+            None
+        };
+        self.snapshot = Some(LinkSnapshot {
+            iface_name: iface.name.clone(),
+            is_wifi: iface.is_wifi,
+            link_speed_bps: iface.link_speed_bps,
+            mac: iface.mac.clone(),
+            ipv4: iface.ipv4,
+            wireless,
+        });
 
         self.running = true;
         self.error_key = None;
         self.samples.clear();
-        self.history.clear();
+        self.lat_history.clear();
+        self.rssi_history.clear();
         self.total = count;
         *self.abort_flag.lock().unwrap() = false;
 
         let tx = self.tx.clone();
         let abort = self.abort_flag.clone();
+        let src = iface.ipv4;
+        let guid = iface.guid.clone();
+        let is_wifi = iface.is_wifi;
 
         tokio::spawn(async move {
-            let dest: Ipv4Addr = match target.parse::<IpAddr>() {
-                Ok(IpAddr::V4(v4)) => v4,
-                Ok(IpAddr::V6(_)) => {
+            let dest: Ipv4Addr = match resolve_v4(&target).await {
+                Some(v) => v,
+                None => {
                     let _ = tx.send(LinkEvent::Error("diag_link_err".into())).await;
                     return;
                 }
-                Err(_) => match tokio::net::lookup_host((target.as_str(), 0u16)).await {
-                    Ok(mut it) => loop {
-                        match it.next() {
-                            Some(sa) => {
-                                if let IpAddr::V4(v4) = sa.ip() {
-                                    break v4;
-                                }
-                            }
-                            None => {
-                                let _ = tx.send(LinkEvent::Error("diag_link_err".into())).await;
-                                return;
-                            }
-                        }
-                    },
-                    Err(_) => {
-                        let _ = tx.send(LinkEvent::Error("diag_link_err".into())).await;
-                        return;
-                    }
-                },
             };
 
             for i in 0..count {
                 if *abort.lock().unwrap() {
                     return;
                 }
-                let res =
-                    match tokio::task::spawn_blocking(move || super::icmp::echo_once(dest, 128, timeout_ms))
-                        .await
-                    {
-                        Ok(r) => r,
-                        Err(_) => return,
-                    };
+                let res = match tokio::task::spawn_blocking(move || {
+                    super::icmp::echo_once_from(src, dest, 128, timeout_ms, packet_size)
+                })
+                .await
+                {
+                    Ok(r) => r,
+                    Err(_) => return,
+                };
 
-                // 平台不支持（本地调用失败）：首个探测即报错退出
                 if res.status == u32::MAX {
                     let _ = tx
                         .send(LinkEvent::Error("diag_link_unsupported".into()))
@@ -328,10 +496,28 @@ impl LinkQualityTool {
                 }
 
                 let latency = if res.reached() { res.rtt_ms } else { None };
-                let _ = tx.send(LinkEvent::Sample { latency_ms: latency }).await;
+
+                // 无线动态采样
+                let (rssi, quality) = if is_wifi {
+                    let g = guid.clone();
+                    match tokio::task::spawn_blocking(move || wlan::query(&g)).await {
+                        Ok(Some(w)) => (Some(w.rssi_dbm), Some(w.signal_quality)),
+                        _ => (None, None),
+                    }
+                } else {
+                    (None, None)
+                };
+
+                let _ = tx
+                    .send(LinkEvent::Sample(Sample {
+                        latency_ms: latency,
+                        rssi_dbm: rssi,
+                        quality,
+                    }))
+                    .await;
 
                 if i + 1 < count {
-                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    tokio::time::sleep(Duration::from_millis(interval_ms)).await;
                 }
             }
             let _ = tx.send(LinkEvent::Done).await;
@@ -388,35 +574,94 @@ impl LinkQualityTool {
             return;
         }
 
+        let is_wifi = self.snapshot.as_ref().map(|s| s.is_wifi).unwrap_or(false);
+        let n_dims = if is_wifi { 6 } else { 3 };
+        let rssi_rows = if is_wifi { 3 } else { 0 };
+
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1), // medium
-                Constraint::Length(2), // grade gauge
-                Constraint::Length(2), // metrics row 1
-                Constraint::Length(1), // metrics row 2
-                Constraint::Min(3),    // sparkline
-                Constraint::Length(1), // status
+                Constraint::Length(1),                 // header
+                Constraint::Length(1),                 // overall gauge
+                Constraint::Length(n_dims as u16),     // dim bars
+                Constraint::Length(4),                 // metrics grid
+                Constraint::Min(3),                    // latency sparkline
+                Constraint::Length(rssi_rows as u16),  // rssi sparkline (wifi)
+                Constraint::Length(1),                 // status
             ])
             .split(inner);
 
-        // 连接介质
-        let medium_text = if self.medium_wifi {
-            let ssid = self.ssid.clone().unwrap_or_else(|| "-".to_string());
-            format!("{}: {} ({})", i18n.t("diag_link_medium"), i18n.t("diag_link_wireless"), ssid)
-        } else {
-            format!("{}: {}", i18n.t("diag_link_medium"), i18n.t("diag_link_wired"))
-        };
-        f.render_widget(
-            Paragraph::new(medium_text).style(Style::default().fg(theme::COLOR_SECONDARY)),
-            chunks[0],
-        );
+        self.draw_header(f, chunks[0], i18n);
+        self.draw_overall(f, chunks[1], i18n);
+        self.draw_dim_bars(f, chunks[2], i18n);
+        self.draw_metrics(f, chunks[3], i18n, is_wifi);
 
-        // 综合评级 gauge
-        let (label, ratio, gcolor) = match self.grade() {
-            Some(g) => (
-                format!("{}: {}", i18n.t("diag_link_grade"), i18n.t(g.i18n_key())),
-                g.ratio(),
+        let data: Vec<u64> = self.lat_history.iter().cloned().collect();
+        let spark = Sparkline::default()
+            .block(Block::default().borders(Borders::TOP).title(i18n.t("diag_link_history")))
+            .data(&data)
+            .style(Style::default().fg(theme::COLOR_PRIMARY));
+        f.render_widget(spark, chunks[4]);
+
+        if is_wifi {
+            let rdata: Vec<u64> = self.rssi_history.iter().cloned().collect();
+            let rspark = Sparkline::default()
+                .block(Block::default().borders(Borders::TOP).title(i18n.t("diag_link_rssi_history")))
+                .data(&rdata)
+                .style(Style::default().fg(Color::Magenta));
+            f.render_widget(rspark, chunks[5]);
+        }
+
+        self.draw_status(f, chunks[6], i18n);
+    }
+
+    fn draw_header(&self, f: &mut Frame, area: Rect, i18n: &I18n) {
+        let mut spans = vec![Span::styled(
+            format!("{}: ", i18n.t("diag_link_interface")),
+            Style::default().fg(Color::Gray),
+        )];
+        match &self.snapshot {
+            Some(s) => {
+                let badge = if s.is_wifi {
+                    i18n.t("diag_link_wireless")
+                } else {
+                    i18n.t("diag_link_wired")
+                };
+                spans.push(Span::styled(
+                    format!("{} [{}]", s.iface_name, badge),
+                    Style::default().fg(theme::COLOR_SECONDARY),
+                ));
+                if s.is_wifi {
+                    if let Some(w) = &s.wireless {
+                        spans.push(Span::styled(
+                            format!("  {}", w.ssid),
+                            Style::default().fg(Color::White),
+                        ));
+                    }
+                } else if let Some(sp) = s.link_speed_bps {
+                    spans.push(Span::styled(
+                        format!("  {}", format::format_speed(sp / 8)),
+                        Style::default().fg(Color::White),
+                    ));
+                }
+            }
+            None => {
+                let name = self
+                    .ifaces
+                    .get(self.iface_idx)
+                    .map(|c| c.name.clone())
+                    .unwrap_or_else(|| i18n.t("diag_link_no_iface"));
+                spans.push(Span::styled(name, Style::default().fg(theme::COLOR_SECONDARY)));
+            }
+        }
+        f.render_widget(Paragraph::new(Line::from(spans)), area);
+    }
+
+    fn draw_overall(&self, f: &mut Frame, area: Rect, i18n: &I18n) {
+        let (label, ratio, gcolor) = match self.overall_grade() {
+            Some((sc, g, _)) => (
+                format!("{}: {} ({:.0})", i18n.t("diag_link_grade"), i18n.t(g.i18n_key()), sc),
+                (sc / 100.0).clamp(0.0, 1.0),
                 g.color(),
             ),
             None => (format!("{}: -", i18n.t("diag_link_grade")), 0.0, Color::DarkGray),
@@ -425,35 +670,114 @@ impl LinkQualityTool {
             .gauge_style(Style::default().fg(gcolor).bg(Color::DarkGray))
             .ratio(ratio)
             .label(label);
-        f.render_widget(gauge, chunks[1]);
+        f.render_widget(gauge, area);
+    }
 
-        // 指标
-        let (sent, _recv, loss, avg, jitter) = self.stats();
-        let row1 = Line::from(vec![
-            Span::styled(format!("{}: ", i18n.t("diag_link_avg")), Style::default().fg(Color::Gray)),
-            Span::styled(format!("{:<8}", format!("{} ms", avg)), Style::default().fg(Color::White)),
-            Span::styled(format!("{}: ", i18n.t("diag_link_jitter")), Style::default().fg(Color::Gray)),
-            Span::styled(format!("{:<8}", format!("{} ms", jitter)), Style::default().fg(Color::White)),
-            Span::styled(format!("{}: ", i18n.t("diag_link_loss")), Style::default().fg(Color::Gray)),
-            Span::styled(format!("{:.1}%", loss), Style::default().fg(if loss > 5.0 { Color::Red } else { Color::Green })),
-        ]);
-        f.render_widget(Paragraph::new(row1), chunks[2]);
+    fn draw_dim_bars(&self, f: &mut Frame, area: Rect, i18n: &I18n) {
+        let weakest = self.overall_grade().map(|(_, _, w)| w);
+        let dims = self.dimensions();
+        let lines: Vec<Line> = dims
+            .iter()
+            .enumerate()
+            .map(|(i, (key, sc, _))| {
+                let bar = score_bar(*sc, 12);
+                let c = bar_color(*sc);
+                let mark = if Some(i) == weakest { " ◀" } else { "" };
+                Line::from(vec![
+                    Span::styled(format!("{:<8}", i18n.t(key)), Style::default().fg(Color::Gray)),
+                    Span::styled(bar, Style::default().fg(c)),
+                    Span::styled(format!(" {:>3.0}{}", sc, mark), Style::default().fg(c)),
+                ])
+            })
+            .collect();
+        f.render_widget(Paragraph::new(lines), area);
+    }
 
-        let row2 = Line::from(vec![
-            Span::styled(format!("{}: ", i18n.t("diag_link_sent")), Style::default().fg(Color::Gray)),
-            Span::styled(format!("{} / {}", sent, self.total), Style::default().fg(theme::COLOR_SECONDARY)),
-        ]);
-        f.render_widget(Paragraph::new(row2), chunks[3]);
+    fn draw_metrics(&self, f: &mut Frame, area: Rect, i18n: &I18n, is_wifi: bool) {
+        let (sent, _recv, loss, min, avg, max, jitter) = self.stats();
+        let g = |k: &str| -> String { i18n.t(k) };
+        let mut lines = vec![
+            Line::from(vec![
+                Span::styled(format!("{}: ", g("diag_link_avg")), Style::default().fg(Color::Gray)),
+                Span::styled(
+                    format!("{}/{}/{} ms  ", min, avg, max),
+                    Style::default().fg(Color::White),
+                ),
+                Span::styled(format!("{}: ", g("diag_link_jitter")), Style::default().fg(Color::Gray)),
+                Span::styled(format!("{} ms", jitter), Style::default().fg(Color::White)),
+            ]),
+            Line::from(vec![
+                Span::styled(format!("{}: ", g("diag_link_loss")), Style::default().fg(Color::Gray)),
+                Span::styled(
+                    format!("{:.1}%  ", loss),
+                    Style::default().fg(if loss > 5.0 { Color::Red } else { Color::Green }),
+                ),
+                Span::styled(format!("{}: ", g("diag_link_sent")), Style::default().fg(Color::Gray)),
+                Span::styled(
+                    format!("{}/{}", sent, self.total),
+                    Style::default().fg(theme::COLOR_SECONDARY),
+                ),
+            ]),
+        ];
 
-        // 延迟曲线
-        let data: Vec<u64> = self.history.iter().cloned().collect();
-        let sparkline = Sparkline::default()
-            .block(Block::default().borders(Borders::TOP).title(i18n.t("diag_link_history")))
-            .data(&data)
-            .style(Style::default().fg(theme::COLOR_PRIMARY));
-        f.render_widget(sparkline, chunks[4]);
+        if is_wifi {
+            let w = self.snapshot.as_ref().and_then(|s| s.wireless.as_ref());
+            let rssi_txt = match self.rssi_stats() {
+                Some((mn, av, mx)) => format!("{}/{}/{} dBm", mn, av, mx),
+                None => w.map(|w| format!("{} dBm", w.rssi_dbm)).unwrap_or_else(|| "-".into()),
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("{}: ", g("diag_link_rssi")), Style::default().fg(Color::Gray)),
+                Span::styled(format!("{}  ", rssi_txt), Style::default().fg(Color::White)),
+                Span::styled(format!("{}: ", g("diag_link_channel")), Style::default().fg(Color::Gray)),
+                Span::styled(
+                    w.map(|w| format!("{} ({})", w.channel, w.band)).unwrap_or_else(|| "-".into()),
+                    Style::default().fg(Color::White),
+                ),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled(format!("{}: ", g("diag_link_phy")), Style::default().fg(Color::Gray)),
+                Span::styled(
+                    w.map(|w| w.phy_type.clone()).unwrap_or_else(|| "-".into()),
+                    Style::default().fg(Color::White),
+                ),
+                Span::styled(format!("  {}/{}: ", g("diag_link_rate_tx"), g("diag_link_rate_rx")), Style::default().fg(Color::Gray)),
+                Span::styled(
+                    w.map(|w| format!("{}/{} Mbps", w.tx_rate_mbps, w.rx_rate_mbps)).unwrap_or_else(|| "-".into()),
+                    Style::default().fg(Color::White),
+                ),
+            ]));
+        } else {
+            let s = self.snapshot.as_ref();
+            lines.push(Line::from(vec![
+                Span::styled(format!("{}: ", g("diag_link_speed")), Style::default().fg(Color::Gray)),
+                Span::styled(
+                    s.and_then(|s| s.link_speed_bps)
+                        .map(|sp| format::format_speed(sp / 8))
+                        .unwrap_or_else(|| "-".into()),
+                    Style::default().fg(Color::White),
+                ),
+                Span::styled(format!("  {}: ", g("diag_link_media")), Style::default().fg(Color::Gray)),
+                Span::styled(g("diag_link_media_up"), Style::default().fg(Color::Green)),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("MAC: ", Style::default().fg(Color::Gray)),
+                Span::styled(
+                    s.map(|s| s.mac.clone()).unwrap_or_else(|| "-".into()),
+                    Style::default().fg(Color::White),
+                ),
+                Span::styled("  IPv4: ", Style::default().fg(Color::Gray)),
+                Span::styled(
+                    s.map(|s| s.ipv4.to_string()).unwrap_or_else(|| "-".into()),
+                    Style::default().fg(Color::White),
+                ),
+            ]));
+        }
 
-        // 状态
+        f.render_widget(Paragraph::new(lines), area);
+    }
+
+    fn draw_status(&self, f: &mut Frame, area: Rect, i18n: &I18n) {
         let (text, style) = if let Some(key) = &self.error_key {
             (i18n.t(key), Style::default().fg(theme::COLOR_ERROR))
         } else if self.running {
@@ -467,7 +791,7 @@ impl LinkQualityTool {
                 Style::default().fg(Color::Red),
             )
         };
-        f.render_widget(Paragraph::new(text).style(style), chunks[5]);
+        f.render_widget(Paragraph::new(text).style(style), area);
     }
 
     fn draw_config(
@@ -491,24 +815,46 @@ impl LinkQualityTool {
         f.render_widget(block, area);
 
         let is_active = is_focused && active_focus == FocusArea::Config;
-        let labels = [
-            i18n.t("diag_link_target"),
-            i18n.t("diag_link_count"),
-            i18n.t("diag_link_timeout"),
-        ];
-        let inputs = [
-            &self.config.target,
-            &self.config.count,
-            &self.config.timeout_ms,
-        ];
         let selected = self.config_state.selected();
 
-        let list_items: Vec<ListItem> = (0..3)
-            .map(|i| {
-                let is_sel = selected == Some(i);
-                let active = is_sel && is_active && !self.running;
+        // 网卡选择器显示值（只读文本形式复用 config_field_item）
+        let iface_display = match self.ifaces.get(self.iface_idx) {
+            Some(c) => format!("{} ({})", c.name, c.ipv4),
+            None => i18n.t("diag_link_no_iface"),
+        };
+        let iface_input = TextInput::with_text(&iface_display);
+
+        let labels = [
+            i18n.t("diag_link_interface"),
+            i18n.t("diag_link_target"),
+            i18n.t("diag_link_count"),
+            i18n.t("diag_link_interval"),
+            i18n.t("diag_link_timeout"),
+            i18n.t("diag_link_packet"),
+        ];
+
+        let mut items: Vec<ListItem> = Vec::with_capacity(N_FIELDS);
+        for i in 0..N_FIELDS {
+            let is_sel = selected == Some(i);
+            let active = is_sel && is_active && !self.running;
+            if i == 0 {
+                // 选择器：不显示光标，提示 ←→ 切换
                 let hint = if active {
-                    Some(if i == 0 {
+                    Some(i18n.t("diag_hint_switch"))
+                } else {
+                    None
+                };
+                items.push(config_field_item(&labels[0], is_sel, is_active, &iface_input, false, hint));
+            } else {
+                let input = match i {
+                    1 => &self.config.target,
+                    2 => &self.config.count,
+                    3 => &self.config.interval_ms,
+                    4 => &self.config.timeout_ms,
+                    _ => &self.config.packet_size,
+                };
+                let hint = if active {
+                    Some(if i == 1 {
                         i18n.t("diag_hint_input")
                     } else {
                         i18n.t("diag_hint_digits")
@@ -516,33 +862,54 @@ impl LinkQualityTool {
                 } else {
                     None
                 };
-                config_field_item(&labels[i], is_sel, is_active, inputs[i], active, hint)
-            })
-            .collect();
+                items.push(config_field_item(&labels[i], is_sel, is_active, input, active, hint));
+            }
+        }
 
-        f.render_widget(List::new(list_items), inner);
+        f.render_widget(List::new(items), inner);
     }
 }
 
-/// 识别当前活跃连接是否为无线，以及 SSID。
-fn detect_medium() -> (bool, Option<String>) {
-    let interfaces = net::get_interfaces();
-    // 优先取有 SSID 的活跃接口（无线）
-    if let Some(wifi) = interfaces
-        .iter()
-        .find(|i| i.is_up && i.ssid.is_some() && !i.ipv4.is_empty())
-    {
-        return (true, wifi.ssid.clone());
+/// 把值推入定长 ring buffer。
+fn push_cap(buf: &mut VecDeque<u64>, v: u64, cap: usize) {
+    if buf.len() >= cap {
+        buf.pop_front();
     }
-    // 其次看活跃物理接口类型是否为 802.11
-    if let Some(iface) = interfaces
-        .iter()
-        .find(|i| i.is_up && i.is_physical && !i.ipv4.is_empty())
-    {
-        let is_wifi = iface.interface_type.contains("Ieee80211");
-        return (is_wifi, iface.ssid.clone());
+    buf.push_back(v);
+}
+
+/// 0-100 分数 → 定宽方块条字符串。
+fn score_bar(score: f64, width: usize) -> String {
+    let filled = ((score / 100.0) * width as f64).round() as usize;
+    let filled = filled.min(width);
+    format!("{}{}", "█".repeat(filled), "░".repeat(width - filled))
+}
+
+fn bar_color(score: f64) -> Color {
+    if score >= 85.0 {
+        Color::Green
+    } else if score >= 70.0 {
+        Color::Cyan
+    } else if score >= 50.0 {
+        Color::Yellow
+    } else {
+        Color::Red
     }
-    (false, None)
+}
+
+/// 解析目标为 IPv4（直接 IP 或 DNS 解析取首个 v4）。
+async fn resolve_v4(target: &str) -> Option<Ipv4Addr> {
+    if let Ok(IpAddr::V4(v4)) = target.parse::<IpAddr>() {
+        return Some(v4);
+    }
+    if let Ok(it) = tokio::net::lookup_host((target, 0u16)).await {
+        for sa in it {
+            if let IpAddr::V4(v4) = sa.ip() {
+                return Some(v4);
+            }
+        }
+    }
+    None
 }
 
 /// 多维评分纯函数：各维度映射为 0-100，加权汇总，划定评级。与 UI 解耦，便于单测。
