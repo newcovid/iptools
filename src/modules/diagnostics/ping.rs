@@ -46,7 +46,7 @@ struct PingStats {
     last_latency: Option<u64>,
     prev_latency: Option<u64>,
     history: VecDeque<u64>,
-    logs: VecDeque<String>,
+    logs: VecDeque<PingLog>,
 }
 
 impl Default for PingStats {
@@ -67,7 +67,6 @@ impl Default for PingStats {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)] // 暂时允许死代码，直到 update 被 App 调用
 pub enum PingEvent {
     Result {
         seq: u64,
@@ -78,7 +77,30 @@ pub enum PingEvent {
     Timeout {
         seq: u64,
     },
-    Error(String),
+    /// `key` 为 i18n 键（错误大类），`detail` 为不可本地化的系统原文（可空）。
+    Error {
+        key: String,
+        detail: String,
+    },
+}
+
+/// 日志条目以结构化形式存储，渲染时再按当前语言格式化，
+/// 保证中英文切换后历史日志也随之本地化（不留预格式化硬编码）。
+#[derive(Debug, Clone)]
+enum PingLog {
+    Reply {
+        seq: u64,
+        size: usize,
+        ttl: u8,
+        latency: u64,
+    },
+    Timeout {
+        seq: u64,
+    },
+    Error {
+        key: String,
+        detail: String,
+    },
 }
 
 // -----------------------------------------------------------------------------
@@ -160,8 +182,12 @@ impl PingTool {
                     }
                     self.stats.history.push_back(latency);
 
-                    let log = format!("Seq={} bytes={} ttl={} time={}ms", seq, size, ttl, latency);
-                    self.add_log(log);
+                    self.add_log(PingLog::Reply {
+                        seq,
+                        size,
+                        ttl,
+                        latency,
+                    });
                 }
                 PingEvent::Timeout { seq } => {
                     self.stats.sent = seq + 1;
@@ -169,21 +195,21 @@ impl PingTool {
                         self.stats.history.pop_front();
                     }
                     self.stats.history.push_back(0);
-                    self.add_log(format!("Seq={} Request timed out", seq));
+                    self.add_log(PingLog::Timeout { seq });
                 }
-                PingEvent::Error(msg) => {
-                    self.add_log(format!("Error: {}", msg));
+                PingEvent::Error { key, detail } => {
+                    self.add_log(PingLog::Error { key, detail });
                     self.stop();
                 }
             }
         }
     }
 
-    fn add_log(&mut self, msg: String) {
+    fn add_log(&mut self, entry: PingLog) {
         if self.stats.logs.len() >= 20 {
             self.stats.logs.pop_front();
         }
-        self.stats.logs.push_back(msg);
+        self.stats.logs.push_back(entry);
     }
 
     // -------------------------------------------------------------------------
@@ -317,12 +343,22 @@ impl PingTool {
                         if let Some(first) = ips.first() {
                             *first
                         } else {
-                            let _ = tx.send(PingEvent::Error("DNS No result".into())).await;
+                            let _ = tx
+                                .send(PingEvent::Error {
+                                    key: "diag_ping_err_dns_empty".into(),
+                                    detail: String::new(),
+                                })
+                                .await;
                             return;
                         }
                     }
                     Err(e) => {
-                        let _ = tx.send(PingEvent::Error(format!("DNS Error: {}", e))).await;
+                        let _ = tx
+                            .send(PingEvent::Error {
+                                key: "diag_ping_err_dns".into(),
+                                detail: e.to_string(),
+                            })
+                            .await;
                         return;
                     }
                 },
@@ -334,7 +370,10 @@ impl PingTool {
                     run_ping_windows(ipv4, config, tx, abort).await;
                 } else {
                     let _ = tx
-                        .send(PingEvent::Error("Windows IPv6 ping not supported".into()))
+                        .send(PingEvent::Error {
+                            key: "diag_ping_err_ipv6".into(),
+                            detail: String::new(),
+                        })
                         .await;
                 }
             }
@@ -496,24 +535,24 @@ impl PingTool {
         let sparkline = Sparkline::default()
             .block(
                 Block::default()
-                    .title("Latency History")
+                    .title(i18n.t("diag_ping_chart_title"))
                     .borders(Borders::NONE),
             )
             .data(&data)
             .style(Style::default().fg(theme::COLOR_PRIMARY));
         f.render_widget(sparkline, chunks[1]);
 
-        // 3. Log
+        // 3. Log（结构化日志在此按当前语言渲染）
         let logs: Vec<ListItem> = stats
             .logs
             .iter()
             .rev()
-            .map(|s| ListItem::new(Line::from(s.as_str())))
+            .map(|entry| ListItem::new(Line::from(format_ping_log(entry, i18n))))
             .collect();
         let log_list = List::new(logs).block(
             Block::default()
                 .borders(Borders::TOP)
-                .title("Log Stream")
+                .title(i18n.t("diag_ping_log_title"))
                 .style(Style::default().fg(Color::Gray)),
         );
         f.render_widget(log_list, chunks[2]);
@@ -570,6 +609,42 @@ impl PingTool {
             .highlight_symbol(">> ");
 
         f.render_stateful_widget(list, area, &mut self.config_state);
+    }
+}
+
+/// 将结构化 Ping 日志按当前语言渲染为单行文本。
+/// 技术性 k=v 记号（seq/bytes/ttl/time）为网络工具通用写法，保持原样；
+/// 仅人类语言部分（回复/超时/错误及错误大类）走 i18n。
+fn format_ping_log(entry: &PingLog, i18n: &I18n) -> String {
+    match entry {
+        PingLog::Reply {
+            seq,
+            size,
+            ttl,
+            latency,
+        } => format!(
+            "{} seq={} bytes={} ttl={} time={}ms",
+            i18n.t("diag_ping_log_reply"),
+            seq,
+            size,
+            ttl,
+            latency
+        ),
+        PingLog::Timeout { seq } => {
+            format!("seq={} {}", seq, i18n.t("diag_ping_log_timeout"))
+        }
+        PingLog::Error { key, detail } => {
+            if detail.is_empty() {
+                format!("{}: {}", i18n.t("diag_ping_log_error"), i18n.t(key))
+            } else {
+                format!(
+                    "{}: {} ({})",
+                    i18n.t("diag_ping_log_error"),
+                    i18n.t(key),
+                    detail
+                )
+            }
+        }
     }
 }
 
@@ -670,7 +745,10 @@ async fn run_ping_windows(
             }
             Ok(Err(e)) => {
                 let _ = tx
-                    .send(PingEvent::Error(format!("Ping error: {}", e)))
+                    .send(PingEvent::Error {
+                        key: "diag_ping_err_generic".into(),
+                        detail: e,
+                    })
                     .await;
                 break;
             }
@@ -695,12 +773,18 @@ async fn run_ping_unix(
     let mut pinger = match surge_ping::Pinger::new(target_ip).await {
         Ok(p) => p,
         Err(e) => {
-            let msg = if e.to_string().contains("Permission") {
-                "Permission denied (Root required on Unix)".to_string()
+            let evt = if e.to_string().contains("Permission") {
+                PingEvent::Error {
+                    key: "diag_ping_err_perm".into(),
+                    detail: String::new(),
+                }
             } else {
-                e.to_string()
+                PingEvent::Error {
+                    key: "diag_ping_err_generic".into(),
+                    detail: e.to_string(),
+                }
             };
-            let _ = tx.send(PingEvent::Error(msg)).await;
+            let _ = tx.send(evt).await;
             return;
         }
     };

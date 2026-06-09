@@ -203,7 +203,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App, is_focused: bool) {
                 .border_style(Style::default().fg(Color::DarkGray));
 
             f.render_widget(
-                Paragraph::new("Coming Soon...").block(main_block),
+                Paragraph::new(i18n.t("diag_coming_soon")).block(main_block),
                 chunks[1],
             );
 

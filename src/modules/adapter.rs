@@ -180,11 +180,14 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
             let table = render_detail_table(i18n, iface, stats);
             f.render_widget(table.block(block), chunks[1]);
         } else {
-            f.render_widget(Paragraph::new("Select an adapter").block(block), chunks[1]);
+            f.render_widget(
+                Paragraph::new(i18n.t("adapter_select_hint")).block(block),
+                chunks[1],
+            );
         }
     } else {
         f.render_widget(
-            Paragraph::new("No adapter selected").block(block),
+            Paragraph::new(i18n.t("adapter_none_selected")).block(block),
             chunks[1],
         );
     }
@@ -354,9 +357,9 @@ fn render_detail_table<'a>(
         ]));
     } else {
         rows.push(Row::new(vec![
-            Cell::from(Span::styled("Traffic", key_style)),
+            Cell::from(Span::styled(i18n.t("common_traffic"), key_style)),
             Cell::from(Span::styled(
-                "Calculating...",
+                i18n.t("adapter_traffic_calc"),
                 Style::default().fg(Color::DarkGray),
             )),
         ]));
