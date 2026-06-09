@@ -544,3 +544,102 @@ fn detect_medium() -> (bool, Option<String>) {
     }
     (false, None)
 }
+
+/// 多维评分纯函数：各维度映射为 0-100，加权汇总，划定评级。与 UI 解耦，便于单测。
+pub(super) mod score {
+    use super::Grade;
+
+    /// 线性映射并夹紧到 0..100：value=best→100，value=worst→0（best/worst 大小关系任意）。
+    pub fn lerp_score(value: f64, best: f64, worst: f64) -> f64 {
+        if (best - worst).abs() < f64::EPSILON {
+            return 0.0;
+        }
+        let t = (value - worst) / (best - worst);
+        t.clamp(0.0, 1.0) * 100.0
+    }
+
+    pub fn latency_score(avg_ms: f64) -> f64 {
+        lerp_score(avg_ms, 20.0, 300.0)
+    }
+    pub fn jitter_score(jitter_ms: f64) -> f64 {
+        lerp_score(jitter_ms, 2.0, 80.0)
+    }
+    pub fn loss_score(loss_pct: f64) -> f64 {
+        lerp_score(loss_pct, 0.0, 10.0)
+    }
+    pub fn signal_score(rssi_dbm: f64) -> f64 {
+        lerp_score(rssi_dbm, -50.0, -85.0)
+    }
+    pub fn rate_score(mbps: f64) -> f64 {
+        lerp_score(mbps, 433.0, 6.0)
+    }
+    pub fn phy_score(wifi_gen: u8) -> f64 {
+        match wifi_gen {
+            7 | 6 => 100.0,
+            5 => 80.0,
+            4 => 60.0,
+            _ => 30.0,
+        }
+    }
+
+    /// 加权汇总：dims 为 (子评分, 权重)。返回 0-100。
+    pub fn overall(dims: &[(f64, f64)]) -> f64 {
+        let wsum: f64 = dims.iter().map(|(_, w)| w).sum();
+        if wsum <= 0.0 {
+            return 0.0;
+        }
+        dims.iter().map(|(s, w)| s * w).sum::<f64>() / wsum
+    }
+
+    pub fn grade_from_score(s: f64) -> Grade {
+        if s >= 85.0 {
+            Grade::Excellent
+        } else if s >= 70.0 {
+            Grade::Good
+        } else if s >= 50.0 {
+            Grade::Fair
+        } else {
+            Grade::Poor
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn linear_endpoints_and_mid() {
+            assert!((latency_score(20.0) - 100.0).abs() < 1e-6);
+            assert!((latency_score(300.0) - 0.0).abs() < 1e-6);
+            assert!((latency_score(160.0) - 50.0).abs() < 1.0);
+            assert!((loss_score(0.0) - 100.0).abs() < 1e-6);
+            assert!((loss_score(10.0) - 0.0).abs() < 1e-6);
+            assert!((signal_score(-50.0) - 100.0).abs() < 1e-6);
+            assert!((signal_score(-85.0) - 0.0).abs() < 1e-6);
+            assert!((rate_score(433.0) - 100.0).abs() < 1e-6);
+            assert!((rate_score(6.0) - 0.0).abs() < 1e-6);
+        }
+
+        #[test]
+        fn phy_tiers() {
+            assert_eq!(phy_score(6), 100.0);
+            assert_eq!(phy_score(5), 80.0);
+            assert_eq!(phy_score(4), 60.0);
+            assert_eq!(phy_score(0), 30.0);
+        }
+
+        #[test]
+        fn weighted_and_grade() {
+            // 全满 → Excellent
+            let dims = [(100.0, 40.0), (100.0, 35.0), (100.0, 25.0)];
+            let o = overall(&dims);
+            assert!((o - 100.0).abs() < 1e-6);
+            assert_eq!(grade_from_score(o), Grade::Excellent);
+            // 分级边界
+            assert_eq!(grade_from_score(86.0), Grade::Excellent);
+            assert_eq!(grade_from_score(72.0), Grade::Good);
+            assert_eq!(grade_from_score(55.0), Grade::Fair);
+            assert_eq!(grade_from_score(40.0), Grade::Poor);
+        }
+    }
+}
