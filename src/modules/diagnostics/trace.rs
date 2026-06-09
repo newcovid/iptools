@@ -434,20 +434,21 @@ async fn run_trace(
         },
     };
 
-    let dest_u32 = u32::from_le_bytes(dest_v4.octets());
-
     for ttl in 1..=max_hops as u8 {
         if *abort.lock().unwrap() {
             return;
         }
 
-        let probe = tokio::task::spawn_blocking(move || probe_hop(dest_u32, ttl, timeout_ms)).await;
-        let (status, addr_octets, rtt) = match probe {
+        let probe = tokio::task::spawn_blocking(move || {
+            super::icmp::echo_once(dest_v4, ttl, timeout_ms)
+        })
+        .await;
+        let result = match probe {
             Ok(v) => v,
             Err(_) => return,
         };
 
-        let addr = addr_octets.map(|o| Ipv4Addr::new(o[0], o[1], o[2], o[3]));
+        let addr = result.addr;
 
         // 反向 DNS（best-effort，不阻塞 UI）
         let host = if let Some(a) = addr {
@@ -461,13 +462,13 @@ async fn run_trace(
             None
         };
 
-        let reached = addr == Some(dest_v4) || status == IP_SUCCESS;
+        let reached = addr == Some(dest_v4) || result.reached();
 
         let _ = tx
             .send(TraceEvent::Hop(Hop {
                 ttl,
                 addr,
-                rtt_ms: if addr.is_some() { Some(rtt as u64) } else { None },
+                rtt_ms: result.rtt_ms,
                 host,
             }))
             .await;
@@ -480,74 +481,6 @@ async fn run_trace(
 
     let _ = tx.send(TraceEvent::Done).await;
 }
-
-#[cfg(target_os = "windows")]
-const IP_SUCCESS: u32 = 0;
-#[cfg(target_os = "windows")]
-const IP_TTL_EXPIRED_TRANSIT: u32 = 11013;
-
-/// 对指定 TTL 发一个 ICMP Echo，返回 (status, 响应方地址八位组, RTT 毫秒)。
-/// 地址为 None 表示该跳超时。
-#[cfg(target_os = "windows")]
-fn probe_hop(dest_u32: u32, ttl: u8, timeout_ms: u32) -> (u32, Option<[u8; 4]>, u32) {
-    use std::ffi::c_void;
-    use windows::Win32::NetworkManagement::IpHelper::{
-        IcmpCloseHandle, IcmpCreateFile, IcmpSendEcho, ICMP_ECHO_REPLY, IP_OPTION_INFORMATION,
-    };
-
-    let payload = [0u8; 32];
-    const REPLY_SIZE: usize = 2048 + 65535;
-
-    let handle = match unsafe { IcmpCreateFile() } {
-        Ok(h) => h,
-        Err(_) => return (u32::MAX, None, 0),
-    };
-
-    let opts = IP_OPTION_INFORMATION {
-        Ttl: ttl,
-        Tos: 0,
-        Flags: 0,
-        OptionsSize: 0,
-        OptionsData: std::ptr::null_mut(),
-    };
-
-    let mut reply_buffer = vec![0u8; REPLY_SIZE];
-
-    let count = unsafe {
-        IcmpSendEcho(
-            handle,
-            dest_u32,
-            payload.as_ptr() as *const c_void,
-            payload.len() as u16,
-            Some(&opts as *const IP_OPTION_INFORMATION),
-            reply_buffer.as_mut_ptr() as *mut c_void,
-            REPLY_SIZE as u32,
-            timeout_ms,
-        )
-    };
-
-    unsafe {
-        let _ = IcmpCloseHandle(handle);
-    }
-
-    if count == 0 {
-        return (IP_REQ_TIMED_OUT, None, 0);
-    }
-
-    let reply = unsafe { &*(reply_buffer.as_ptr() as *const ICMP_ECHO_REPLY) };
-    let status = reply.Status;
-
-    // TTL 过期(中间路由) 或 成功(到达目标) 都带有效响应地址
-    if status == IP_SUCCESS || status == IP_TTL_EXPIRED_TRANSIT {
-        let octets = reply.Address.to_le_bytes();
-        (status, Some(octets), reply.RoundTripTime)
-    } else {
-        (status, None, 0)
-    }
-}
-
-#[cfg(target_os = "windows")]
-const IP_REQ_TIMED_OUT: u32 = 11010;
 
 #[cfg(not(target_os = "windows"))]
 async fn run_trace(
