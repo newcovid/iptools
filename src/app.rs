@@ -178,7 +178,7 @@ impl App {
         // 4. 分发给当前模块。需要原始按键做文本输入的模块（scanner）同时收到 key。
         match self.current_tab {
             CurrentTab::Dashboard => self.dashboard.on_key(action, self.i18n.get_lang().as_str()),
-            CurrentTab::Adapter => self.adapter.on_key(action),
+            CurrentTab::Adapter => self.adapter.on_key(key, action),
             CurrentTab::Scanner => {
                 self.scanner
                     .on_key(key, action, self.config.scan_concurrency);

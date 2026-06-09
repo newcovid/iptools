@@ -1,9 +1,11 @@
 use crate::app::App;
 use crate::keymap::Action;
+use crate::modules::adapter_edit::{EditForm, EditOutcome};
 use crate::ui::theme; // 引入主题
 use crate::utils::format::{format_bytes, format_speed};
 use crate::utils::i18n::I18n;
 use crate::utils::net::{self, InterfaceInfo};
+use crossterm::event::KeyEvent;
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Cell, List, ListItem, ListState, Paragraph, Row, Table},
@@ -25,6 +27,8 @@ pub struct AdapterModule {
     pub interfaces: Vec<InterfaceInfo>,
     networks: Networks,
     traffic_history: HashMap<String, TrafficStats>,
+    /// 进入编辑态时为 Some；只读视图时为 None。
+    pub edit: Option<EditForm>,
 }
 
 impl AdapterModule {
@@ -40,10 +44,15 @@ impl AdapterModule {
             interfaces,
             networks: Networks::new_with_refreshed_list(),
             traffic_history: HashMap::new(),
+            edit: None,
         }
     }
 
     pub fn update(&mut self) {
+        if let Some(form) = &mut self.edit {
+            form.update();
+        }
+
         self.networks.refresh(true);
         let now = Instant::now();
 
@@ -88,12 +97,35 @@ impl AdapterModule {
         }
     }
 
-    pub fn on_key(&mut self, action: Option<Action>) {
+    pub fn on_key(&mut self, key: KeyEvent, action: Option<Action>) {
+        // 编辑态：所有按键交给表单处理
+        if let Some(form) = &mut self.edit {
+            match form.on_key(key, action) {
+                EditOutcome::Stay => {}
+                EditOutcome::Cancel => self.edit = None,
+                EditOutcome::Done => {
+                    self.edit = None;
+                    self.reload();
+                }
+            }
+            return;
+        }
+
+        // 只读态
         match action {
             Some(Action::Down) => self.next(),
             Some(Action::Up) => self.previous(),
             Some(Action::Refresh) => self.reload(),
+            Some(Action::Edit) => self.enter_edit(),
             _ => {}
+        }
+    }
+
+    fn enter_edit(&mut self) {
+        if let Some(idx) = self.state.selected() {
+            if let Some(iface) = self.interfaces.get(idx) {
+                self.edit = Some(EditForm::from_interface(iface));
+            }
         }
     }
 
@@ -133,13 +165,19 @@ impl AdapterModule {
 }
 
 pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
+    let i18n = &app.i18n;
+    let adapter_module = &mut app.adapter;
+
+    // 编辑态：整块区域交给编辑表单
+    if let Some(form) = &adapter_module.edit {
+        form.draw(f, area, i18n);
+        return;
+    }
+
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
         .split(area);
-
-    let i18n = &app.i18n;
-    let adapter_module = &mut app.adapter;
 
     let items: Vec<ListItem> = adapter_module
         .interfaces
@@ -172,7 +210,14 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(i18n.t("adapter_detail_title"));
+        .title(i18n.t("adapter_detail_title"))
+        .title(
+            Line::from(Span::styled(
+                format!(" {} ", i18n.t("adapter_edit_enter")),
+                Style::default().fg(theme::COLOR_SECONDARY),
+            ))
+            .alignment(Alignment::Right),
+        );
 
     if let Some(index) = adapter_module.state.selected() {
         if let Some(iface) = adapter_module.interfaces.get(index) {
