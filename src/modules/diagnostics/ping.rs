@@ -479,10 +479,14 @@ impl PingTool {
             is_focused && active_focus == FocusArea::Config,
         );
 
-        // MRU 历史下拉（覆盖在配置区顶部）。
-        if self.mru.open {
-            let entries: Vec<String> = self.history.borrow().targets.entries().to_vec();
-            crate::ui::mru::draw_mru_popup(f, config_area, &entries, self.mru.sel, i18n);
+        // MRU 历史下拉：仅在配置栏聚焦时有效；失焦则关闭，避免下拉悬留（视觉残留 + 回栏首键被吞）。
+        if is_focused && active_focus == FocusArea::Config {
+            if self.mru.open {
+                let entries: Vec<String> = self.history.borrow().targets.entries().to_vec();
+                crate::ui::mru::draw_mru_popup(f, config_area, &entries, self.mru.sel, i18n);
+            }
+        } else {
+            self.mru.open = false;
         }
     }
 
