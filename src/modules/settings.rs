@@ -12,11 +12,16 @@ use unicode_width::UnicodeWidthStr;
 pub struct SettingsModule {
     state: ListState,
     items: Vec<SettingItem>,
+    /// 「清空参数记忆」被触发——由 `App` 在 dispatch 后取走并执行（设置页够不到其他模块）。
+    pending_reset: bool,
+    /// 刚清空过——在值列显示「已清空 ✓」，移动选择即消除。
+    just_reset: bool,
 }
 
 enum SettingItem {
     Language,
     Concurrency,
+    ResetSession,
 }
 
 impl SettingsModule {
@@ -26,8 +31,24 @@ impl SettingsModule {
 
         Self {
             state,
-            items: vec![SettingItem::Language, SettingItem::Concurrency],
+            items: vec![
+                SettingItem::Language,
+                SettingItem::Concurrency,
+                SettingItem::ResetSession,
+            ],
+            pending_reset: false,
+            just_reset: false,
         }
+    }
+
+    /// `App` 调用：取走并清掉「清空参数记忆」请求标志。
+    pub fn take_reset(&mut self) -> bool {
+        std::mem::take(&mut self.pending_reset)
+    }
+
+    /// `App` 在执行清空后回调，用于把值列切到「已清空 ✓」。
+    pub fn mark_reset_done(&mut self) {
+        self.just_reset = true;
     }
 
     pub fn on_key(
@@ -40,9 +61,10 @@ impl SettingsModule {
         match action {
             Some(Action::Down) => self.next(),
             Some(Action::Up) => self.previous(),
-            Some(Action::Left) => self.change_value(config, i18n, dashboard, -1),
-            Some(Action::Right) => self.change_value(config, i18n, dashboard, 1),
-            Some(Action::Confirm) => self.change_value(config, i18n, dashboard, 1),
+            // 箭头仅调数值类项；ResetSession 需 Confirm 触发，避免左右导航误清空。
+            Some(Action::Left) => self.change_value(config, i18n, dashboard, -1, false),
+            Some(Action::Right) => self.change_value(config, i18n, dashboard, 1, false),
+            Some(Action::Confirm) => self.change_value(config, i18n, dashboard, 1, true),
             _ => {}
         }
     }
@@ -55,6 +77,7 @@ impl SettingsModule {
     }
 
     fn next(&mut self) {
+        self.just_reset = false;
         let i = match self.state.selected() {
             Some(i) => {
                 if i >= self.items.len() - 1 {
@@ -69,6 +92,7 @@ impl SettingsModule {
     }
 
     fn previous(&mut self) {
+        self.just_reset = false;
         let i = match self.state.selected() {
             Some(i) => {
                 if i == 0 {
@@ -88,6 +112,7 @@ impl SettingsModule {
         i18n: &mut I18n,
         dashboard: &mut Dashboard,
         dir: i32,
+        activate: bool,
     ) {
         if let Some(i) = self.state.selected() {
             match self.items[i] {
@@ -110,6 +135,12 @@ impl SettingsModule {
 
                     config.scan_concurrency = current as usize;
                     config.save();
+                }
+                SettingItem::ResetSession => {
+                    // 仅 Confirm 触发，实际清空交给 App（它能访问所有模块）。
+                    if activate {
+                        self.pending_reset = true;
+                    }
                 }
             }
         }
@@ -148,6 +179,14 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
                     i18n.t("setting_concurrency"),
                     config.scan_concurrency.to_string(),
                 ),
+                SettingItem::ResetSession => {
+                    let val = if settings.just_reset {
+                        i18n.t("setting_reset_done")
+                    } else {
+                        i18n.t("setting_reset_action")
+                    };
+                    (i18n.t("setting_reset_session"), val)
+                }
             };
 
             // .width() 返回 usize，现在 max_label_width 也是 usize，可以进行减法运算

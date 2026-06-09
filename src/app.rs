@@ -6,7 +6,7 @@ use crate::modules::diagnostics::DiagnosticsModule;
 use crate::modules::scanner::ScannerModule;
 use crate::modules::settings::SettingsModule;
 use crate::modules::traffic::TrafficModule;
-use crate::session::SessionState;
+use crate::session::{SessionState, UiPersist};
 use crate::utils::i18n::I18n;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
@@ -22,6 +22,18 @@ pub enum CurrentTab {
 }
 
 impl CurrentTab {
+    /// 由持久化的索引（判别值 0..5）还原标签页；越界回退概览。
+    pub fn from_index(i: u8) -> Self {
+        match i {
+            1 => Self::Adapter,
+            2 => Self::Scanner,
+            3 => Self::Traffic,
+            4 => Self::Diagnostics,
+            5 => Self::Settings,
+            _ => Self::Dashboard,
+        }
+    }
+
     pub fn next(&self) -> Self {
         match self {
             Self::Dashboard => Self::Adapter,
@@ -134,6 +146,10 @@ impl App {
     fn snapshot_session(&self) -> SessionState {
         let mut s = SessionState {
             scanner: self.scanner.export_persist(),
+            ui: UiPersist {
+                last_tab: self.current_tab as u8,
+                last_diag_tool: self.diagnostics.current_tool_index(),
+            },
             ..SessionState::default()
         };
         self.diagnostics.export_into(&mut s);
@@ -145,6 +161,24 @@ impl App {
         let s = self.config.session.clone();
         self.scanner.apply_persist(&s.scanner);
         self.diagnostics.apply_persist(&s);
+        // 恢复上次所在标签页与诊断子工具。
+        self.current_tab = CurrentTab::from_index(s.ui.last_tab);
+        self.diagnostics.set_tool_by_index(s.ui.last_diag_tool);
+    }
+
+    /// 清空所有「参数记忆」：会话参数恢复默认并落盘、回灌到各模块，
+    /// 但**保留当前界面位置**（不把用户从设置页弹走）。设置页「清空参数记忆」调用。
+    fn reset_session(&mut self) {
+        let keep_ui = self.snapshot_session().ui;
+        self.config.session = SessionState {
+            ui: keep_ui,
+            ..SessionState::default()
+        };
+        self.config.save();
+        self.apply_session();
+        // apply 会按 keep_ui 还原位置；扫描 CIDR 单独重置为按网卡自动推断。
+        self.scanner.reset_to_default();
+        self.last_session = self.snapshot_session();
     }
 
     /// 脏检查持久化：仅当会话参数较上次落盘发生变化时，写回 `config.json`。
@@ -261,6 +295,11 @@ impl App {
             CurrentTab::Settings => {
                 self.settings
                     .on_key(action, &mut self.config, &mut self.i18n, &mut self.dashboard);
+                // 设置页够不到其他模块：清空请求在此由 App 统一执行。
+                if self.settings.take_reset() {
+                    self.reset_session();
+                    self.settings.mark_reset_done();
+                }
             }
             CurrentTab::Diagnostics => {}
         }

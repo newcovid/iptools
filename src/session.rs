@@ -26,6 +26,17 @@ pub struct SessionState {
     pub trace: TracePersist,
     pub lan_speed: LanSpeedPersist,
     pub link_quality: LinkQualityPersist,
+    pub ui: UiPersist,
+}
+
+/// 界面位置记忆：上次所在标签页 + 诊断子工具，重启回到原处。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct UiPersist {
+    /// 标签页索引（0=概览…5=设置，对应 `CurrentTab` 判别值）。
+    pub last_tab: u8,
+    /// 诊断子工具索引（0=Ping…5=内网测速，对应 `DiagnosticTool` 声明序）。
+    pub last_diag_tool: u8,
 }
 
 /// 扫描页：CIDR 网段。空串表示「沿用按本机网卡自动推断的默认值」。
