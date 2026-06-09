@@ -1,5 +1,6 @@
 use crate::app::App;
 use crate::ui::theme; // 引入主题
+use crate::utils::format::{format_bytes, format_speed};
 use crate::utils::i18n::I18n;
 use crate::utils::net::{self, InterfaceInfo};
 use chrono::Local;
@@ -186,8 +187,9 @@ impl Dashboard {
                 if let Some(stats) = &mut self.traffic_stats {
                     let duration = now.duration_since(stats.last_update).as_secs_f64();
                     if duration > 0.5 {
-                        stats.rx_speed = ((rx - stats.total_rx) as f64 / duration) as u64;
-                        stats.tx_speed = ((tx - stats.total_tx) as f64 / duration) as u64;
+                        // saturating_sub：网卡切换 / 计数器回绕时 rx < total_rx 不会 panic
+                        stats.rx_speed = (rx.saturating_sub(stats.total_rx) as f64 / duration) as u64;
+                        stats.tx_speed = (tx.saturating_sub(stats.total_tx) as f64 / duration) as u64;
                         stats.total_rx = rx;
                         stats.total_tx = tx;
                         stats.last_update = now;
@@ -462,24 +464,4 @@ fn draw_public_panel(f: &mut Frame, area: Rect, dash: &Dashboard, i18n: &I18n) {
     let table = Table::new(rows, [Constraint::Length(14), Constraint::Min(0)]).column_spacing(1);
 
     f.render_widget(table, inner_area);
-}
-
-fn format_speed(bps: u64) -> String {
-    let kbps = bps as f64 / 1024.0;
-    if kbps < 1024.0 {
-        format!("{:.1} KB/s", kbps)
-    } else {
-        format!("{:.1} MB/s", kbps / 1024.0)
-    }
-}
-
-fn format_bytes(bytes: u64) -> String {
-    let kb = bytes as f64 / 1024.0;
-    if kb < 1024.0 {
-        format!("{:.1} KB", kb)
-    } else if kb < 1024.0 * 1024.0 {
-        format!("{:.1} MB", kb / 1024.0)
-    } else {
-        format!("{:.1} GB", kb / 1024.0 / 1024.0)
-    }
 }

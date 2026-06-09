@@ -59,8 +59,8 @@ pub struct App {
 }
 
 impl App {
-    pub fn new() -> Self {
-        let config = Config::load();
+    pub fn new(config_path: Option<String>) -> Self {
+        let config = Config::load(config_path.as_deref());
         let i18n = I18n::new(config.language);
 
         let mut app = Self {

@@ -24,6 +24,40 @@ impl Language {
             Language::Zh => Language::En,
         }
     }
+
+    /// 根据操作系统的用户区域设置推断默认语言。
+    /// 仅区分中文 / 英文（其余一律回退英文），用于首次启动尚无配置文件时。
+    pub fn detect_system() -> Self {
+        let tag = system_locale_tag().to_lowercase();
+        if tag.starts_with("zh") {
+            Language::Zh
+        } else {
+            Language::En
+        }
+    }
+}
+
+/// 返回形如 "zh-CN" / "en-US" 的系统区域标签（失败时返回空串）。
+#[cfg(target_os = "windows")]
+fn system_locale_tag() -> String {
+    use windows::Win32::Globalization::GetUserDefaultLocaleName;
+    // LOCALE_NAME_MAX_LENGTH == 85
+    let mut buf = [0u16; 85];
+    let len = unsafe { GetUserDefaultLocaleName(&mut buf) };
+    if len <= 0 {
+        return String::new();
+    }
+    // 返回值含结尾的 NUL，截掉它
+    let end = (len as usize).saturating_sub(1);
+    String::from_utf16_lossy(&buf[..end])
+}
+
+#[cfg(not(target_os = "windows"))]
+fn system_locale_tag() -> String {
+    std::env::var("LC_ALL")
+        .or_else(|_| std::env::var("LC_MESSAGES"))
+        .or_else(|_| std::env::var("LANG"))
+        .unwrap_or_default()
 }
 
 pub struct I18n {
