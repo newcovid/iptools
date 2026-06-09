@@ -9,6 +9,41 @@ use crate::utils::i18n::Language;
 /// 默认配置文件名（相对当前工作目录）。
 const DEFAULT_CONFIG_PATH: &str = "config.json";
 
+/// 公网信息抓取配置（顶层设置，非 session）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PublicIpConfig {
+    /// 按顺序尝试的端点；首个成功即用。
+    pub endpoints: Vec<Endpoint>,
+    /// 是否走系统/环境代理（默认 true）。false = 强制直连（power-user，无 UI）。
+    pub use_system_proxy: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Endpoint {
+    pub url: String,
+    /// "ipsb" | "ipinfo" | "plaintext"
+    pub kind: String,
+}
+
+impl Default for PublicIpConfig {
+    fn default() -> Self {
+        Self {
+            endpoints: vec![
+                Endpoint {
+                    url: "https://api.ip.sb/geoip".to_string(),
+                    kind: "ipsb".to_string(),
+                },
+                Endpoint {
+                    url: "https://ipinfo.io/json".to_string(),
+                    kind: "ipinfo".to_string(),
+                },
+            ],
+            use_system_proxy: true,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
     pub language: Language,
@@ -24,6 +59,10 @@ pub struct Config {
     #[serde(default)]
     pub session: SessionState,
 
+    /// 公网信息抓取端点与代理策略。缺省（旧配置无此段）回退默认（ip.sb→ipinfo，尊重代理）。
+    #[serde(default)]
+    pub public_ip: PublicIpConfig,
+
     /// 配置文件实际路径。不参与序列化，由 `load` 注入，`save` 时写回同一路径。
     #[serde(skip)]
     path: PathBuf,
@@ -36,6 +75,7 @@ impl Default for Config {
             scan_concurrency: 50,
             keybindings: KeyMap::default().to_persisted(),
             session: SessionState::default(),
+            public_ip: PublicIpConfig::default(),
             path: PathBuf::from(DEFAULT_CONFIG_PATH),
         }
     }
@@ -67,6 +107,7 @@ impl Config {
             scan_concurrency: 50,
             keybindings: KeyMap::default().to_persisted(),
             session: SessionState::default(),
+            public_ip: PublicIpConfig::default(),
             path,
         };
         cfg.save();
@@ -82,5 +123,28 @@ impl Config {
         if let Ok(content) = serde_json::to_string_pretty(self) {
             let _ = fs::write(&self.path, content);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn public_ip_defaults() {
+        let c = PublicIpConfig::default();
+        assert_eq!(c.endpoints.len(), 2);
+        assert_eq!(c.endpoints[0].kind, "ipsb");
+        assert!(c.endpoints[0].url.starts_with("https://"));
+        assert!(c.use_system_proxy);
+    }
+
+    #[test]
+    fn old_config_without_public_ip_falls_back() {
+        // 模拟旧 config.json（无 public_ip 段）：public_ip 回退默认。
+        let json = r#"{"language":"En","scan_concurrency":50}"#;
+        let c: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(c.public_ip.endpoints.len(), 2);
+        assert!(c.public_ip.use_system_proxy);
     }
 }
