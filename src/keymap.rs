@@ -36,7 +36,6 @@ pub enum Action {
     Refresh,
     Edit,
     Toggle,
-    Stop,
     Help,
 }
 
@@ -57,7 +56,6 @@ impl Action {
             Action::Refresh => "refresh",
             Action::Edit => "edit",
             Action::Toggle => "toggle",
-            Action::Stop => "stop",
             Action::Help => "help",
         }
     }
@@ -78,7 +76,6 @@ impl Action {
             Action::Refresh => "action_refresh",
             Action::Edit => "action_edit",
             Action::Toggle => "action_toggle",
-            Action::Stop => "action_stop",
             Action::Help => "action_help",
         }
     }
@@ -88,7 +85,7 @@ impl Action {
     }
 
     /// 解析优先级顺序（全局动作在前）。`action_for` 按此顺序匹配。
-    pub const ALL: [Action; 15] = [
+    pub const ALL: [Action; 14] = [
         Action::Quit,
         Action::ToggleLanguage,
         Action::NextTab,
@@ -102,7 +99,6 @@ impl Action {
         Action::Refresh,
         Action::Edit,
         Action::Toggle,
-        Action::Stop,
         Action::Help,
     ];
 
@@ -136,7 +132,6 @@ impl Action {
             Action::Refresh => vec![plain(Char('r'))],
             Action::Edit => vec![plain(Char('e'))],
             Action::Toggle => vec![plain(Char(' '))],
-            Action::Stop => vec![plain(Char('s'))],
             Action::Help => vec![plain(F(1))],
         }
     }

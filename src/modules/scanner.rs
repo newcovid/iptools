@@ -83,7 +83,9 @@ impl ScannerModule {
         // 带光标：左右移动、Home/End、中间插入删除；Enter/Esc 退出编辑。
         if self.input_mode {
             match key.code {
-                KeyCode::Enter | KeyCode::Esc => {
+                // 回车 / 空格 / Esc 均可结束编辑。CIDR 文本本不含空格
+                // （filter_cidr 已过滤），故空格用作「完成编辑」与诊断页一致。
+                KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Esc => {
                     self.input_mode = false;
                 }
                 _ => {
@@ -97,17 +99,14 @@ impl ScannerModule {
             Some(Action::Edit) => {
                 self.input_mode = true;
             }
-            // Confirm(回车) 与 Toggle(空格) 都可开始扫描——扫描页无其它「切换」语义，
-            // 二者混用不引起歧义，符合「无冲突时主操作可多键触发」的交互约定。
+            // Confirm(回车) 与 Toggle(空格) 复用为主操作：未扫描时开始、
+            // 扫描中则停止——与诊断页各工具的开始/停止交互一致，无需独立 S 键。
             Some(Action::Confirm) | Some(Action::Toggle) => {
-                if self.status != ScanStatus::Scanning {
-                    self.start_scan(concurrency);
-                }
-            }
-            Some(Action::Stop) => {
                 if self.status == ScanStatus::Scanning {
                     *self.abort_flag.lock().unwrap() = true;
                     self.status = ScanStatus::Done;
+                } else {
+                    self.start_scan(concurrency);
                 }
             }
             Some(Action::Down) => self.next(),
@@ -317,6 +316,13 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
 
     let count_text = scanner.calculate_ip_count();
 
+    // 主操作提示随状态切换：扫描中显示「停止」，否则显示「开始」（同诊断页）。
+    let action_btn = if scanner.status == ScanStatus::Scanning {
+        i18n.t("scan_btn_stop")
+    } else {
+        i18n.t("scan_btn_start")
+    };
+
     let mut spans: Vec<Span> = vec![Span::styled(
         format!(" {} ", i18n.t("scan_range_label")),
         base,
@@ -324,13 +330,12 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
     spans.extend(scanner.cidr_input.render_spans(scanner.input_mode, base));
     spans.push(Span::styled(
         format!(
-            "   {} {}   [{}]   {} / {} / {}",
+            "   {} {}   [{}]   {} / {}",
             i18n.t("scan_count_label"),
             count_text,
             status_text,
             i18n.t("scan_btn_edit"),
-            i18n.t("scan_btn_start"),
-            i18n.t("scan_btn_stop"),
+            action_btn,
         ),
         base,
     ));
