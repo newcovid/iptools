@@ -1,5 +1,6 @@
 use super::FocusArea;
 use crate::keymap::Action;
+use crate::session::PingPersist;
 use crate::ui::theme;
 use crate::utils::i18n::I18n;
 use crate::utils::textinput::{filter_host, TextInput};
@@ -135,6 +136,24 @@ impl PingTool {
             rx,
             abort_flag: Arc::new(Mutex::new(false)),
         }
+    }
+
+    /// 导出可持久化参数。
+    pub fn export_persist(&self) -> PingPersist {
+        PingPersist {
+            target: self.config.target.value(),
+            interval_ms: self.config.interval_ms,
+            timeout_ms: self.config.timeout_ms,
+            packet_size: self.config.packet_size,
+        }
+    }
+
+    /// 回灌持久化参数（数值按界面允许范围夹紧）。
+    pub fn apply_persist(&mut self, p: &PingPersist) {
+        self.config.target = TextInput::with_text(&p.target);
+        self.config.interval_ms = p.interval_ms.clamp(100, 10000);
+        self.config.timeout_ms = p.timeout_ms.clamp(100, 10000);
+        self.config.packet_size = p.packet_size.clamp(0, 65500);
     }
 
     pub fn update(&mut self) {

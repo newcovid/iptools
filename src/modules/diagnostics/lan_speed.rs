@@ -6,6 +6,7 @@
 
 use super::{config_field_item, FocusArea};
 use crate::keymap::Action;
+use crate::session::LanSpeedPersist;
 use crate::ui::theme;
 use crate::utils::format::{format_bytes, format_speed_dual};
 use crate::utils::i18n::I18n;
@@ -104,6 +105,29 @@ impl LanSpeedTool {
             rx,
             abort_flag: Arc::new(Mutex::new(false)),
         }
+    }
+
+    /// 导出可持久化参数（模式 + 对端 + 端口）。
+    pub fn export_persist(&self) -> LanSpeedPersist {
+        LanSpeedPersist {
+            mode: match self.mode {
+                Mode::Server => "server".to_string(),
+                Mode::Client => "client".to_string(),
+            },
+            peer: self.config.peer.value(),
+            port: self.config.port.value(),
+        }
+    }
+
+    /// 回灌持久化参数。
+    pub fn apply_persist(&mut self, p: &LanSpeedPersist) {
+        self.mode = if p.mode == "client" {
+            Mode::Client
+        } else {
+            Mode::Server
+        };
+        self.config.peer = TextInput::with_text(&p.peer);
+        self.config.port = TextInput::with_text(&p.port);
     }
 
     pub fn update(&mut self) {

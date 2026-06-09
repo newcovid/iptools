@@ -1,5 +1,6 @@
 use crate::app::App;
 use crate::keymap::Action;
+use crate::session::SessionState;
 use crate::utils::textinput::TextInput;
 use crossterm::event::KeyEvent;
 use ratatui::{
@@ -122,6 +123,24 @@ impl DiagnosticsModule {
             link_quality_tool: LinkQualityTool::new(),
             lan_speed_tool: LanSpeedTool::new(),
         }
+    }
+
+    /// 把各子工具的会话参数写进 `SessionState`（供持久化）。
+    pub fn export_into(&self, s: &mut SessionState) {
+        s.ping = self.ping_tool.export_persist();
+        s.port_scan = self.port_scan_tool.export_persist();
+        s.trace = self.trace_tool.export_persist();
+        s.lan_speed = self.lan_speed_tool.export_persist();
+        s.link_quality = self.link_quality_tool.export_persist();
+    }
+
+    /// 从 `SessionState` 回灌各子工具的会话参数。
+    pub fn apply_persist(&mut self, s: &SessionState) {
+        self.ping_tool.apply_persist(&s.ping);
+        self.port_scan_tool.apply_persist(&s.port_scan);
+        self.trace_tool.apply_persist(&s.trace);
+        self.lan_speed_tool.apply_persist(&s.lan_speed);
+        self.link_quality_tool.apply_persist(&s.link_quality);
     }
 
     pub fn update(&mut self) {

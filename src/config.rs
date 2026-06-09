@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::keymap::{KeyMap, PersistedKeymap};
+use crate::session::SessionState;
 use crate::utils::i18n::Language;
 
 /// 默认配置文件名（相对当前工作目录）。
@@ -18,6 +19,11 @@ pub struct Config {
     #[serde(default)]
     pub keybindings: PersistedKeymap,
 
+    /// 各页面/诊断工具上次使用的输入参数（IP/端口/间隔/超时/载荷/CIDR、链路质量按网卡）。
+    /// 重启回灌，避免每次重置。缺省（旧配置无此段）回退到各项默认值。
+    #[serde(default)]
+    pub session: SessionState,
+
     /// 配置文件实际路径。不参与序列化，由 `load` 注入，`save` 时写回同一路径。
     #[serde(skip)]
     path: PathBuf,
@@ -29,6 +35,7 @@ impl Default for Config {
             language: Language::En, // 仅作结构默认；首次创建时 load() 会用系统语言覆盖
             scan_concurrency: 50,
             keybindings: KeyMap::default().to_persisted(),
+            session: SessionState::default(),
             path: PathBuf::from(DEFAULT_CONFIG_PATH),
         }
     }
@@ -59,6 +66,7 @@ impl Config {
             language: Language::detect_system(),
             scan_concurrency: 50,
             keybindings: KeyMap::default().to_persisted(),
+            session: SessionState::default(),
             path,
         };
         cfg.save();

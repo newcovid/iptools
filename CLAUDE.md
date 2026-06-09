@@ -115,7 +115,17 @@ cargo check              # 快速类型检查
 
 ### 配置（`config.rs`）
 
-`config.json` 默认在当前工作目录，可经 `-c/--config` 指定。`Config` 记录来源路径、`save()` 写回同一文件。字段：`language`、`scan_concurrency`、`keybindings`。该文件已**不再纳入 git**（本地运行时状态），参考样例见 `config.example.json`。
+`config.json` 默认在当前工作目录，可经 `-c/--config` 指定。`Config` 记录来源路径、`save()` 写回同一文件。字段：`language`、`scan_concurrency`、`keybindings`、`session`。该文件已**不再纳入 git**（本地运行时状态），参考样例见 `config.example.json`。
+
+### 会话参数持久化（`session.rs` + `app.rs::maybe_persist`）
+
+把各页面/诊断子工具用户输入过的参数（扫描 CIDR、Ping/Trace/端口扫描/链路质量的目标 IP·间隔·超时·载荷·跳数、内网测速模式/对端/端口…）落进 `config.json` 的 `session` 段，重启回灌，避免每次重置。
+
+- **纯数据层**：`src/session.rs` 定义 `SessionState` 聚合 + 各工具的 `*Persist` 子结构（serde）。所有结构体用**容器级 `#[serde(default)]` + 自定义 `Default`**，对缺字段/旧配置逐字段回退默认值——向后/向前兼容（旧 `config.json` 无 `session` 段、或新增字段都不会让解析失败）。
+- **工具契约**：每个相关工具实现一对 `export_persist()`（导出快照）/`apply_persist()`（回灌）。`DiagnosticsModule` 用 `export_into`/`apply_persist` 委派给六个子工具。新增需持久化参数的工具/字段时，在对应 `*Persist` 加字段并在工具的 export/apply 里接线。
+- **何时写盘**：`App::on_key`/`on_mouse` 是**包装器**——先 `handle_key`/`handle_mouse` 处理，再 `maybe_persist()`。`maybe_persist` 做**脏检查**：`snapshot_session()` 汇总当前快照，与 `last_session` 不等才 `config.save()`。因此每次真正改值才落盘一次，导航/滚动/tick 都不写盘（**绝不在 `on_tick` 持久化**，避免测试期间高频写）。启动时 `App::new` 调 `apply_session()` 回灌并记录基准快照。
+- **链路质量「按网卡保存」**：`LinkQualityTool` 持 `saved_adapters: BTreeMap<网卡键, LinkParams>` + `current_key`。网卡键由 `iface_key()` 取 **GUID→MAC→名称**回退（GUID 在 Windows 重启稳定）。←→ 切换网卡时 `stash_current()`（归档旧网卡 live 参数）→ 移动索引 → `load_current()`（载入新网卡参数，无记录则默认）。`export_persist` 把 live 参数合并进 `current_key` 再导出；`apply_persist` 恢复整张表并按 `selected` 键重新定位选中项。于是「无线网卡 / 有线网卡各记各的目标 IP，切换自动跟随，重启不丢」。BTreeMap 保证序列化顺序稳定，避免脏检查误判。
+- 校验在 `start()` 而非持久化层：回灌的是**界面文本原样**（如端口/超时按 `TextInput` 字符串存），启动时各工具仍走原有 `parse().clamp()` 校验，故脏数据不会绕过下限/上限。
 
 ### 共享格式化（`utils/format.rs`）
 

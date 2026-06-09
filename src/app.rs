@@ -6,6 +6,7 @@ use crate::modules::diagnostics::DiagnosticsModule;
 use crate::modules::scanner::ScannerModule;
 use crate::modules::settings::SettingsModule;
 use crate::modules::traffic::TrafficModule;
+use crate::session::SessionState;
 use crate::utils::i18n::I18n;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
@@ -90,6 +91,10 @@ pub struct App {
     pub settings: SettingsModule,
     pub traffic: TrafficModule,
     pub diagnostics: DiagnosticsModule,
+
+    /// 上次落盘的会话参数快照。每次按键/鼠标后与最新快照对比，仅在变化时写盘，
+    /// 既保证「重启不丢」又避免高频磁盘写入（见 `maybe_persist`）。
+    last_session: SessionState,
 }
 
 impl App {
@@ -113,11 +118,43 @@ impl App {
             config,
             i18n,
             keymap,
+            last_session: SessionState::default(),
         };
+
+        // 启动回灌：把上次保存的输入参数写回各模块，并记录基准快照。
+        app.apply_session();
+        app.last_session = app.snapshot_session();
 
         app.dashboard.fetch_public_ip(app.i18n.get_lang().as_str());
 
         app
+    }
+
+    /// 汇总各模块当前会话参数为一份快照。
+    fn snapshot_session(&self) -> SessionState {
+        let mut s = SessionState {
+            scanner: self.scanner.export_persist(),
+            ..SessionState::default()
+        };
+        self.diagnostics.export_into(&mut s);
+        s
+    }
+
+    /// 把 `config.session` 回灌到各模块（启动时调用一次）。
+    fn apply_session(&mut self) {
+        let s = self.config.session.clone();
+        self.scanner.apply_persist(&s.scanner);
+        self.diagnostics.apply_persist(&s);
+    }
+
+    /// 脏检查持久化：仅当会话参数较上次落盘发生变化时，写回 `config.json`。
+    fn maybe_persist(&mut self) {
+        let cur = self.snapshot_session();
+        if cur != self.last_session {
+            self.config.session = cur.clone();
+            self.config.save();
+            self.last_session = cur;
+        }
     }
 
     pub fn t(&self, key: &str) -> String {
@@ -146,6 +183,12 @@ impl App {
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
+        self.handle_key(key);
+        // 处理完按键后做一次脏检查持久化，保证任何参数改动都即时落盘、重启不丢。
+        self.maybe_persist();
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) {
         let action = self.keymap.action_for(key);
 
         // 0. 帮助浮层是模态的：显示时除退出外的任意键都用于关闭它
@@ -224,6 +267,11 @@ impl App {
     }
 
     pub fn on_mouse(&mut self, m: MouseEvent) {
+        self.handle_mouse(m);
+        self.maybe_persist();
+    }
+
+    fn handle_mouse(&mut self, m: MouseEvent) {
         // 帮助浮层打开时，任意点击关闭它。
         if self.show_help {
             if matches!(m.kind, MouseEventKind::Down(_)) {
