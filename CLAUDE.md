@@ -13,7 +13,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | 模块 (Tab) | `功能列表.md` 目标 | 实际状态 |
 |---|---|---|
 | Dashboard 概览 | 本地+公网信息聚合 | ✅ 基本完成 |
-| Adapter 适配器 | 列出网卡 **+ 配置静态IP/DNS/DHCP**（item 4） | ⚠️ **只读**。展示已完成；**IP 配置功能尚未实现**（headline 待办） |
+| Adapter 适配器 | 列出网卡 **+ 配置静态IP/DNS/DHCP**（item 4） | ✅ 展示 + IP 配置均已实现（编辑态 UI + 校验 + 二次确认 + WMI 写入）。⚠️ 写入路径已编译通过但**尚未真机实测**，需在非关键网卡验证 |
 | Scanner 扫描 | 局域网 IP/MAC/主机名扫描 | ⚠️ **仅 Windows**。`resolve_mac_address` 在非 Windows 返回 `None`，Unix 上扫不到结果 |
 | Traffic 流量 | 实时速率 / 会话 / 累计 | ✅ 完成 |
 | Diagnostics 诊断 | Ping/路由跟踪/端口扫描/链路质量/公网测速/内网测速 | ✅ **6/6 全部实现**：Ping、端口扫描、公网测速、路由跟踪、链路质量、内网测速 |
@@ -88,6 +88,10 @@ cargo check              # 快速类型检查
 
 `include_str!` 编译期内嵌 `en-US.json`/`zh-CN.json`。`app.t(key)` 查当前语言，缺失则回退英文，再缺失返回 `MISSING:<key>`。**加任何 UI 文案都必须同时在两个 JSON 里加 key**，否则 `cargo test` 的 `locale_keys_are_in_sync` 会失败。首次启动按系统区域（Windows `GetUserDefaultLocaleName` / Unix `LANG`）推断默认语言。异步任务里无法访问 `i18n`：回传 i18n 键而非成品文案，渲染时再翻译（参见 `ping.rs` 的 `PingLog` / `PingEvent::Error{key,detail}`）。
 
+### Adapter IP 配置写入（`modules/adapter_edit.rs` + `utils/ipconfig.rs`）
+
+只读视图按 `Edit`(默认 `e`) 进入编辑态（`AdapterModule.edit: Option<EditForm>`）。表单：模式(DHCP/静态)/IP/掩码/网关/DNS1/DNS2，`Confirm` 先校验(IPv4/连续掩码)再弹**二次确认浮层**，确认后在 `spawn_blocking` 里调 `utils::ipconfig` 写入，结果经 `mpsc` 回传。`utils::ipconfig` 用 **`wmi` crate**（非手写 windows-rs COM——0.58 的 `VARIANT` 不透明、手建 SAFEARRAY 需 transmute 不可靠）调 `Win32_NetworkAdapterConfiguration` 方法。**修改时务必保留校验+确认这两道安全闸**；写入逻辑改动需在非关键网卡实测。
+
 ### 配置（`config.rs`）
 
 `config.json` 默认在当前工作目录，可经 `-c/--config` 指定。`Config` 记录来源路径、`save()` 写回同一文件。字段：`language`、`scan_concurrency`、`keybindings`。该文件已**不再纳入 git**（本地运行时状态），参考样例见 `config.example.json`。
@@ -104,8 +108,8 @@ cargo check              # 快速类型检查
 2. **公网 IP 用明文 HTTP**：`http://ip-api.com`（非 HTTPS，免费档 45 req/min 限流），并强制 `no_proxy()`。代理环境下仍直连。
 3. **Mouse/Resize 事件被吞**：`app.on_mouse`/`on_resize` 为空实现（`EnableMouseCapture` 已开但无逻辑）。
 
-## 添加新功能的提示
+## 待办 / 提示
 
-- **实现 Adapter 的 IP 配置（item 4，最大 headline 待办）**：需 Windows 侧改写网卡配置（`netsh` 被禁用，可用 WMI `Win32_NetworkAdapterConfiguration` 或 `windows-rs` 的 `CreateUnicastIpAddressEntry`/`SetInterfaceDnsSettings`）。**高风险**：误配可使用户掉线，须做编辑态 UI + 校验 + 应用前确认。
-- **Scanner 厂商列（OUI）**：当前 vendor 列未实现，可内嵌常见 OUI 前缀→厂商映射补齐。
-- **跨平台**：任何新增网络能力都要在 `cfg(target_os = "windows")` 与 `cfg(not(...))` 两侧都给实现或明确 stub，参照 `utils/net.rs`。当前阶段聚焦 Windows；多个诊断工具（端口扫描/公网测速/内网测速）已天然跨平台，traceroute/链路质量仅 Windows、非 Windows 已本地化"不支持"提示。
+- **实测 Adapter IP 配置写入**：`utils::ipconfig` 已编译通过但未真机验证；需管理员权限运行，先在非关键网卡测 静态↔DHCP 往返。DHCP 模式下 DNS 清空为尽力而为（空 BSTR 数组在 WMI 中表达繁琐，暂略）。
+- **Scanner OUI 表**：`utils::oui` 仅收录少量高置信度前缀，可扩充（或接入完整 OUI 数据库）。
+- **跨平台迁移**：当前聚焦 Windows。端口扫描/公网测速/内网测速已天然跨平台；网卡枚举/ARP/ICMP(traceroute,链路质量)/IP 配置仅 Windows，非 Windows 多为 stub 或本地化"不支持"。迁移时在 `cfg(not(windows))` 侧补实现，参照 `utils/net.rs`、`diagnostics/icmp.rs`。
