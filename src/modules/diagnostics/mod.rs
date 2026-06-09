@@ -9,10 +9,12 @@ use ratatui::{
 pub mod ping;
 pub mod port_scan;
 pub mod public_speed;
+pub mod trace;
 
 use ping::PingTool;
 use port_scan::PortScanTool;
 use public_speed::PublicSpeedTool;
+use trace::TraceTool;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticTool {
@@ -51,6 +53,7 @@ pub struct DiagnosticsModule {
     pub ping_tool: PingTool,
     pub port_scan_tool: PortScanTool,
     pub public_speed_tool: PublicSpeedTool,
+    pub trace_tool: TraceTool,
 }
 
 impl DiagnosticsModule {
@@ -73,6 +76,7 @@ impl DiagnosticsModule {
             ping_tool: PingTool::new(),
             port_scan_tool: PortScanTool::new(),
             public_speed_tool: PublicSpeedTool::new(),
+            trace_tool: TraceTool::new(),
         }
     }
 
@@ -81,6 +85,7 @@ impl DiagnosticsModule {
             DiagnosticTool::Ping => self.ping_tool.update(),
             DiagnosticTool::PortScan => self.port_scan_tool.update(),
             DiagnosticTool::NetSpeed => self.public_speed_tool.update(),
+            DiagnosticTool::Trace => self.trace_tool.update(),
             _ => {}
         }
     }
@@ -104,6 +109,9 @@ impl DiagnosticsModule {
                             .on_key(key, action, self.active_focus, concurrency)
                     }
                     DiagnosticTool::NetSpeed => self.public_speed_tool.on_key(action),
+                    DiagnosticTool::Trace => {
+                        self.trace_tool.on_key(key, action, self.active_focus)
+                    }
                     _ => {}
                 }
             }
@@ -213,6 +221,10 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App, is_focused: bool) {
         }
         DiagnosticTool::NetSpeed => {
             diag.public_speed_tool
+                .draw(f, chunks[1], chunks[2], i18n, is_focused, diag.active_focus);
+        }
+        DiagnosticTool::Trace => {
+            diag.trace_tool
                 .draw(f, chunks[1], chunks[2], i18n, is_focused, diag.active_focus);
         }
         _ => {

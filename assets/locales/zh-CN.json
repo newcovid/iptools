@@ -143,5 +143,16 @@
     "diag_speed_elapsed": "用时",
     "diag_speed_history": "速率曲线",
     "diag_speed_note": "数据来源：Cloudflare（最长 15 秒）",
-    "diag_speed_err": "测速失败，请检查网络"
+    "diag_speed_err": "测速失败，请检查网络",
+    "diag_trace_target": "目标 IP/域名",
+    "diag_trace_maxhops": "最大跳数",
+    "diag_trace_timeout": "超时 (ms)",
+    "diag_trace_col_hop": "跳",
+    "diag_trace_col_addr": "地址",
+    "diag_trace_col_rtt": "延迟",
+    "diag_trace_col_host": "主机名",
+    "diag_trace_done": "跟踪完成",
+    "diag_trace_err": "跟踪失败：无效目标",
+    "diag_trace_unsupported": "当前平台暂不支持路由跟踪",
+    "diag_trace_timeout_star": "*"
 }
