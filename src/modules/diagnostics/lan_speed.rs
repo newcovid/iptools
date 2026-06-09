@@ -5,8 +5,10 @@
 //! 纯 tokio TCP，跨平台。（对端自动发现留作后续增强，当前手动填 IP。）
 
 use super::{config_field_item, FocusArea};
+use crate::history::HistoryStore;
 use crate::keymap::Action;
 use crate::session::LanSpeedPersist;
+use crate::ui::mru::MruState;
 use crate::ui::theme;
 use crate::utils::format::{format_bytes, format_speed_dual};
 use crate::utils::i18n::I18n;
@@ -17,7 +19,9 @@ use ratatui::{
     prelude::*,
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Sparkline},
 };
+use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -74,17 +78,20 @@ pub struct LanSpeedTool {
     elapsed_ms: u64,
     current_bps: u64,
     peak_bps: u64,
-    history: VecDeque<u64>,
+    speed_history: VecDeque<u64>,
 
     local_ip: String,
 
     tx: mpsc::Sender<LanEvent>,
     rx: mpsc::Receiver<LanEvent>,
     abort_flag: Arc<Mutex<bool>>,
+
+    history: Rc<RefCell<HistoryStore>>,
+    mru: MruState,
 }
 
 impl LanSpeedTool {
-    pub fn new() -> Self {
+    pub fn new(history: Rc<RefCell<HistoryStore>>) -> Self {
         let mut config_state = ListState::default();
         config_state.select(Some(0));
         let (tx, rx) = mpsc::channel(64);
@@ -99,11 +106,13 @@ impl LanSpeedTool {
             elapsed_ms: 0,
             current_bps: 0,
             peak_bps: 0,
-            history: VecDeque::with_capacity(100),
+            speed_history: VecDeque::with_capacity(100),
             local_ip: local_ipv4().unwrap_or_else(|| "-".to_string()),
             tx,
             rx,
             abort_flag: Arc::new(Mutex::new(false)),
+            history,
+            mru: MruState::default(),
         }
     }
 
@@ -143,10 +152,10 @@ impl LanSpeedTool {
                     self.elapsed_ms = elapsed_ms;
                     self.current_bps = inst_bps;
                     self.peak_bps = self.peak_bps.max(inst_bps);
-                    if self.history.len() >= 100 {
-                        self.history.pop_front();
+                    if self.speed_history.len() >= 100 {
+                        self.speed_history.pop_front();
                     }
-                    self.history.push_back(inst_bps);
+                    self.speed_history.push_back(inst_bps);
                 }
                 LanEvent::Done => {
                     self.running = false;
@@ -241,7 +250,7 @@ impl LanSpeedTool {
         self.elapsed_ms = 0;
         self.current_bps = 0;
         self.peak_bps = 0;
-        self.history.clear();
+        self.speed_history.clear();
     }
 
     fn start(&mut self) {
@@ -388,7 +397,7 @@ impl LanSpeedTool {
         f.render_widget(Paragraph::new(line), chunks[2]);
 
         // 吞吐曲线
-        let data: Vec<u64> = self.history.iter().cloned().collect();
+        let data: Vec<u64> = self.speed_history.iter().cloned().collect();
         let sparkline = Sparkline::default()
             .block(
                 Block::default()

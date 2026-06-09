@@ -4,8 +4,10 @@
 //! 延迟与无线射频状态（RSSI/信号质量/速率），按多维加权模型给出评级。
 
 use super::{config_field_item, FocusArea};
+use crate::history::HistoryStore;
 use crate::keymap::Action;
 use crate::session::{LinkParams, LinkQualityPersist};
+use crate::ui::mru::MruState;
 use crate::ui::theme;
 use crate::utils::i18n::I18n;
 use crate::utils::textinput::{filter_host, TextInput};
@@ -16,8 +18,10 @@ use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Gauge, List, ListItem, ListState, Paragraph, Sparkline},
 };
+use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr};
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -138,10 +142,13 @@ pub struct LinkQualityTool {
     tx: mpsc::Sender<LinkEvent>,
     rx: mpsc::Receiver<LinkEvent>,
     abort_flag: Arc<Mutex<bool>>,
+
+    history: Rc<RefCell<HistoryStore>>,
+    mru: MruState,
 }
 
 impl LinkQualityTool {
-    pub fn new() -> Self {
+    pub fn new(history: Rc<RefCell<HistoryStore>>) -> Self {
         let mut config_state = ListState::default();
         config_state.select(Some(0));
         let (tx, rx) = mpsc::channel(128);
@@ -163,6 +170,8 @@ impl LinkQualityTool {
             tx,
             rx,
             abort_flag: Arc::new(Mutex::new(false)),
+            history,
+            mru: MruState::default(),
         };
         s.refresh_ifaces();
         s.current_key = s.ifaces.get(s.iface_idx).map(iface_key);

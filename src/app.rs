@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::history::HistoryStore;
 use crate::keymap::{Action, KeyMap};
 use crate::modules::adapter::AdapterModule;
 use crate::modules::dashboard::Dashboard;
@@ -10,6 +11,8 @@ use crate::session::{SessionState, UiPersist};
 use crate::utils::i18n::I18n;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
+use std::cell::RefCell;
+use std::rc::Rc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CurrentTab {
@@ -104,6 +107,8 @@ pub struct App {
     pub traffic: TrafficModule,
     pub diagnostics: DiagnosticsModule,
 
+    history: Rc<RefCell<HistoryStore>>,
+
     /// 上次落盘的会话参数快照。每次按键/鼠标后与最新快照对比，仅在变化时写盘，
     /// 既保证「重启不丢」又避免高频磁盘写入（见 `maybe_persist`）。
     last_session: SessionState,
@@ -115,6 +120,8 @@ impl App {
         let i18n = I18n::new(config.language);
         let keymap = config.keymap();
 
+        let history = Rc::new(RefCell::new(HistoryStore::default()));
+
         let mut app = Self {
             running: true,
             current_tab: CurrentTab::Dashboard,
@@ -123,13 +130,14 @@ impl App {
             mouse: MouseRegions::default(),
             dashboard: Dashboard::new(),
             adapter: AdapterModule::new(),
-            scanner: ScannerModule::new(),
+            scanner: ScannerModule::new(history.clone()),
             settings: SettingsModule::new(),
             traffic: TrafficModule::new(),
-            diagnostics: DiagnosticsModule::new(),
+            diagnostics: DiagnosticsModule::new(history.clone()),
             config,
             i18n,
             keymap,
+            history,
             last_session: SessionState::default(),
         };
 
@@ -150,6 +158,7 @@ impl App {
                 last_tab: self.current_tab as u8,
                 last_diag_tool: self.diagnostics.current_tool_index(),
             },
+            history: self.history.borrow().to_persist(),
             ..SessionState::default()
         };
         self.diagnostics.export_into(&mut s);
@@ -159,6 +168,7 @@ impl App {
     /// 把 `config.session` 回灌到各模块（启动时调用一次）。
     fn apply_session(&mut self) {
         let s = self.config.session.clone();
+        *self.history.borrow_mut() = HistoryStore::from_persist(&s.history);
         self.scanner.apply_persist(&s.scanner);
         self.diagnostics.apply_persist(&s);
         // 恢复上次所在标签页与诊断子工具。

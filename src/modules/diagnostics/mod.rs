@@ -1,8 +1,11 @@
 use crate::app::App;
+use crate::history::HistoryStore;
 use crate::keymap::Action;
 use crate::session::SessionState;
 use crate::utils::textinput::TextInput;
 use crossterm::event::KeyEvent;
+use std::cell::RefCell;
+use std::rc::Rc;
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, List, ListItem, ListState},
@@ -100,7 +103,7 @@ pub struct DiagnosticsModule {
 }
 
 impl DiagnosticsModule {
-    pub fn new() -> Self {
+    pub fn new(history: Rc<RefCell<HistoryStore>>) -> Self {
         let mut menu_state = ListState::default();
         menu_state.select(Some(0));
 
@@ -116,12 +119,12 @@ impl DiagnosticsModule {
                 DiagnosticTool::NetSpeed,
                 DiagnosticTool::LanSpeed,
             ],
-            ping_tool: PingTool::new(),
-            port_scan_tool: PortScanTool::new(),
+            ping_tool: PingTool::new(history.clone()),
+            port_scan_tool: PortScanTool::new(history.clone()),
             public_speed_tool: PublicSpeedTool::new(),
-            trace_tool: TraceTool::new(),
-            link_quality_tool: LinkQualityTool::new(),
-            lan_speed_tool: LanSpeedTool::new(),
+            trace_tool: TraceTool::new(history.clone()),
+            link_quality_tool: LinkQualityTool::new(history.clone()),
+            lan_speed_tool: LanSpeedTool::new(history.clone()),
         }
     }
 
