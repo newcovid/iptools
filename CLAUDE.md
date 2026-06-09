@@ -13,7 +13,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | 模块 (Tab) | `功能列表.md` 目标 | 实际状态 |
 |---|---|---|
 | Dashboard 概览 | 本地+公网信息聚合 | ✅ 基本完成 |
-| Adapter 适配器 | 列出网卡 **+ 配置静态IP/DNS/DHCP**（item 4） | ✅ 展示 + IP 配置均已实现（编辑态 UI + 校验 + 二次确认 + WMI 写入）。⚠️ 写入路径已编译通过但**尚未真机实测**，需在非关键网卡验证 |
+| Adapter 适配器 | 列出网卡 **+ 配置静态IP/DNS/DHCP**（item 4） | ✅ 展示 + IP 配置均已实现（编辑态 UI + 校验 + 二次确认 + WMI 写入）。状态变化（USB 插拔/启停）后台节流自动刷新。⚠️ 真机实测已暴露并修复两个写入 BUG（静态 IP 掩码预填错成 /32 致错误码 66、DHCP 误判「方法不存在」），写入路径仍建议再次真机复测 |
 | Scanner 扫描 | 局域网 IP/MAC/主机名扫描 | ⚠️ **仅 Windows**。`resolve_mac_address` 在非 Windows 返回 `None`，Unix 上扫不到结果 |
 | Traffic 流量 | 实时速率 / 会话 / 累计 | ✅ 完成 |
 | Diagnostics 诊断 | Ping/路由跟踪/端口扫描/链路质量/公网测速/内网测速 | ✅ **6/6 全部实现**：Ping、端口扫描、公网测速、路由跟踪、链路质量、内网测速 |
@@ -92,6 +92,10 @@ cargo check              # 快速类型检查
 
 只读视图按 `Edit`(默认 `e`) 进入编辑态（`AdapterModule.edit: Option<EditForm>`）。表单：模式(DHCP/静态)/IP/掩码/网关/DNS1/DNS2，`Confirm` 先校验(IPv4/连续掩码)再弹**二次确认浮层**，确认后在 `spawn_blocking` 里调 `utils::ipconfig` 写入，结果经 `mpsc` 回传。`utils::ipconfig` 用 **`wmi` crate**（非手写 windows-rs COM——0.58 的 `VARIANT` 不透明、手建 SAFEARRAY 需 transmute 不可靠）调 `Win32_NetworkAdapterConfiguration` 方法。**修改时务必保留校验+确认这两道安全闸**；写入逻辑改动需在非关键网卡实测。
 
+真机实测踩过的两个坑（已修，改动相关代码时注意）：
+- **掩码预填**：表单掩码取自 `InterfaceInfo.cidr`，而 `net.rs` 计算 cidr 时若用 `prefix_ip == ip` 匹配会命中 `/32` 主机路由（Windows 的 prefixes 同时含子网/主机/广播项），算出 `255.255.255.255`，使 `EnableStatic` 返回错误码 **66**。正确做法：在 prefixes 中按「网络地址匹配且 `0<len<32` 取最长前缀」选真实子网。
+- **`wmi::get_method` 对无入参方法返回 `Ok(None)`**（如 `EnableDHCP`），不是错误。`ipconfig::invoke` 据此：`None` 时以 `None` 入参直接 `exec_method`，勿当「方法不存在」报错。WMI 返回码经 `wmi_return_desc` 翻成中文。
+
 ### 配置（`config.rs`）
 
 `config.json` 默认在当前工作目录，可经 `-c/--config` 指定。`Config` 记录来源路径、`save()` 写回同一文件。字段：`language`、`scan_concurrency`、`keybindings`。该文件已**不再纳入 git**（本地运行时状态），参考样例见 `config.example.json`。
@@ -110,6 +114,6 @@ cargo check              # 快速类型检查
 
 ## 待办 / 提示
 
-- **实测 Adapter IP 配置写入**：`utils::ipconfig` 已编译通过但未真机验证；需管理员权限运行，先在非关键网卡测 静态↔DHCP 往返。DHCP 模式下 DNS 清空为尽力而为（空 BSTR 数组在 WMI 中表达繁琐，暂略）。
+- **再次实测 Adapter IP 配置写入**：两个写入 BUG 已修（见上节「真机实测踩过的两个坑」），但修复后的写入路径需管理员权限再做一次真机验证：静态↔DHCP 往返、确认掩码预填为正常值（如 255.255.255.0）。DHCP 模式下 DNS 已尽力重置为自动（`SetDNSServerSearchOrder` 传空数组 = VT_NULL）。
 - **Scanner OUI 表**：`utils::oui` 仅收录少量高置信度前缀，可扩充（或接入完整 OUI 数据库）。
 - **跨平台迁移**：当前聚焦 Windows。端口扫描/公网测速/内网测速已天然跨平台；网卡枚举/ARP/ICMP(traceroute,链路质量)/IP 配置仅 Windows，非 Windows 多为 stub 或本地化"不支持"。迁移时在 `cfg(not(windows))` 侧补实现，参照 `utils/net.rs`、`diagnostics/icmp.rs`。
