@@ -87,7 +87,7 @@
     "scan_col_ip": "IP 地址",
     "scan_col_mac": "MAC 地址",
     "scan_col_host": "主机名",
-    "scan_col_vendor": "厂商 (暂未实现)",
+    "scan_col_vendor": "厂商",
     "scan_progress": "扫描进度",
     "scan_devices_found": "发现设备",
     "setting_title": " 全局设置 ",

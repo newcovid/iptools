@@ -1,6 +1,7 @@
 use crate::app::App;
 use crate::keymap::Action;
-use crate::utils::net;
+use crate::ui::theme;
+use crate::utils::{net, oui};
 use crossterm::event::{KeyCode, KeyEvent};
 use futures::{stream, StreamExt};
 use ipnetwork::Ipv4Network;
@@ -345,6 +346,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
     let header_cells = vec![
         Cell::from(col_ip_header).style(Style::default().fg(Color::Gray)),
         Cell::from(i18n.t("scan_col_mac")).style(Style::default().fg(Color::Gray)),
+        Cell::from(i18n.t("scan_col_vendor")).style(Style::default().fg(Color::Gray)),
         Cell::from(i18n.t("scan_col_host")).style(Style::default().fg(Color::Gray)),
     ];
 
@@ -369,9 +371,16 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
             Color::White
         };
 
+        let vendor = oui::lookup(&item.mac).unwrap_or("-");
+
         let cells = vec![
             Cell::from(ip_text).style(Style::default().fg(text_color)),
             Cell::from(item.mac.clone()).style(Style::default().fg(text_color)),
+            Cell::from(vendor).style(Style::default().fg(if is_selected {
+                Color::Cyan
+            } else {
+                theme::COLOR_SECONDARY
+            })),
             Cell::from(item.hostname.clone()).style(Style::default().fg(text_color)),
         ];
 
@@ -381,9 +390,10 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
     let t = Table::new(
         rows,
         [
-            Constraint::Percentage(25),
-            Constraint::Percentage(35),
-            Constraint::Percentage(40),
+            Constraint::Percentage(22),
+            Constraint::Percentage(28),
+            Constraint::Percentage(22),
+            Constraint::Percentage(28),
         ],
     )
     .header(header)
