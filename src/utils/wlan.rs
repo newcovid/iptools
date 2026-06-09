@@ -97,6 +97,142 @@ pub fn rssi_from_quality(q: u32) -> i32 {
     -100 + (q.min(100) as i32) / 2
 }
 
+/// 查询指定 GUID 网卡当前关联的无线信息。`guid` 形如 `{XXXX-...}`（同 InterfaceInfo.guid）。
+#[cfg(target_os = "windows")]
+pub fn query(guid: &str) -> Option<WirelessInfo> {
+    use std::ptr;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::NetworkManagement::WiFi::{
+        dot11_BSS_type_infrastructure, wlan_intf_opcode_current_connection, WlanCloseHandle,
+        WlanEnumInterfaces, WlanFreeMemory, WlanGetNetworkBssList, WlanOpenHandle,
+        WlanQueryInterface, WLAN_BSS_LIST, WLAN_CONNECTION_ATTRIBUTES, WLAN_INTERFACE_INFO_LIST,
+    };
+
+    let want = guid.to_uppercase();
+
+    unsafe {
+        let mut negotiated_version = 0u32;
+        let mut client_handle = HANDLE::default();
+        if WlanOpenHandle(2, None, &mut negotiated_version, &mut client_handle) != 0 {
+            return None;
+        }
+
+        let mut info = None;
+        let mut interface_list: *mut WLAN_INTERFACE_INFO_LIST = ptr::null_mut();
+        if WlanEnumInterfaces(client_handle, None, &mut interface_list) == 0
+            && !interface_list.is_null()
+        {
+            let list = &*interface_list;
+            for i in 0..list.dwNumberOfItems {
+                let iface = &*list.InterfaceInfo.as_ptr().offset(i as isize);
+                let iface_guid = iface.InterfaceGuid;
+                let guid_str = format!("{{{:?}}}", iface_guid).to_uppercase();
+                if guid_str != want {
+                    continue;
+                }
+
+                // 1) 当前关联属性
+                let mut data_ptr: *mut std::ffi::c_void = ptr::null_mut();
+                let mut data_size = 0u32;
+                if WlanQueryInterface(
+                    client_handle,
+                    &iface_guid,
+                    wlan_intf_opcode_current_connection,
+                    None,
+                    &mut data_size,
+                    &mut data_ptr,
+                    None,
+                ) != 0
+                    || data_ptr.is_null()
+                {
+                    break;
+                }
+                let conn = &*(data_ptr as *const WLAN_CONNECTION_ATTRIBUTES);
+                let assoc = conn.wlanAssociationAttributes;
+                let sec = conn.wlanSecurityAttributes;
+
+                let ssid_len = assoc.dot11Ssid.uSSIDLength as usize;
+                let ssid = if ssid_len > 0 && ssid_len <= 32 {
+                    String::from_utf8_lossy(&assoc.dot11Ssid.ucSSID[..ssid_len]).to_string()
+                } else {
+                    String::new()
+                };
+                let bssid = assoc
+                    .dot11Bssid
+                    .iter()
+                    .map(|b| format!("{:02x}", b))
+                    .collect::<Vec<_>>()
+                    .join(":");
+                let signal_quality = assoc.wlanSignalQuality;
+                let rx_rate_mbps = assoc.ulRxRate / 1000;
+                let tx_rate_mbps = assoc.ulTxRate / 1000;
+                let phy_raw = assoc.dot11PhyType.0;
+                let auth = auth_label(sec.dot11AuthAlgorithm.0);
+                let cipher = cipher_label(sec.dot11CipherAlgorithm.0);
+
+                // 2) BSS list 取真实 RSSI 与频率（按 BSSID 匹配当前 AP）
+                let mut rssi_dbm = rssi_from_quality(signal_quality);
+                let mut freq_khz = 0u32;
+                let mut bss_list: *mut WLAN_BSS_LIST = ptr::null_mut();
+                if WlanGetNetworkBssList(
+                    client_handle,
+                    &iface_guid,
+                    None,
+                    dot11_BSS_type_infrastructure,
+                    sec.bSecurityEnabled,
+                    None,
+                    &mut bss_list,
+                ) == 0
+                    && !bss_list.is_null()
+                {
+                    let bl = &*bss_list;
+                    for j in 0..bl.dwNumberOfItems {
+                        let entry = &*bl.wlanBssEntries.as_ptr().offset(j as isize);
+                        if entry.dot11Bssid == assoc.dot11Bssid {
+                            rssi_dbm = entry.lRssi;
+                            freq_khz = entry.ulChCenterFrequency;
+                            break;
+                        }
+                    }
+                    WlanFreeMemory(bss_list as *mut std::ffi::c_void);
+                }
+
+                let (band, channel) = band_and_channel(freq_khz);
+                let band6 = band == "6 GHz";
+                let (phy_type, wifi_gen) = phy_label(phy_raw, band6);
+
+                info = Some(WirelessInfo {
+                    ssid,
+                    bssid,
+                    signal_quality,
+                    rssi_dbm,
+                    phy_type,
+                    wifi_gen,
+                    band,
+                    channel,
+                    freq_mhz: freq_khz / 1000,
+                    rx_rate_mbps,
+                    tx_rate_mbps,
+                    auth,
+                    cipher,
+                });
+
+                WlanFreeMemory(data_ptr);
+                break;
+            }
+            WlanFreeMemory(interface_list as *mut std::ffi::c_void);
+        }
+
+        WlanCloseHandle(client_handle, None);
+        info
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn query(_guid: &str) -> Option<WirelessInfo> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
