@@ -96,10 +96,10 @@ cargo check              # 快速类型检查
 - `port_scan.rs`（`PortScanTool`）— 批量型：`stream::buffer_unordered` 并发 + 进度条 + abort，复用全局并发数。
 - `public_speed.rs`（`PublicSpeedTool`）— 流式型：reqwest 分块下载，任务内计时算瞬时速率，Sparkline 曲线。
 - `trace.rs`（`TraceTool`）— 逐跳 ICMP（TTL 递增），Windows 原生，复用 `icmp::echo_once`。
-- `link_quality.rs`（`LinkQualityTool`）— ICMP 突发采样 → 延迟/抖动/丢包 → 综合评级；识别有线/无线。
+- `link_quality.rs`（`LinkQualityTool`）— **可选网卡**（多网卡并存时 ←→ 切换）：探测经 `icmp::echo_once_from` 绑定该网卡源 IP（`IcmpSendEcho2Ex`）。测试期间**持续采样**延迟与无线射频状态（RSSI/信号质量），有线/无线分别采集专业参数（无线：RSSI dBm、信号质量%、PHY/Wi-Fi 代际、频段+信道+频率、Tx/Rx 协商速率、BSSID、认证/加密；有线：协商链路速率、媒体、MAC）。**多维加权评分**（`mod score` 纯函数；有线 丢包40/延迟35/抖动25，无线 丢包25/延迟20/抖动15/信号25/速率10/制式5）→ 总评级 + 分项条 + 最弱维度高亮；延迟与 RSSI 双 Sparkline。无线信息经 `utils/wlan.rs` 查询（`WlanQueryInterface`+`WlanGetNetworkBssList`）。
 - `lan_speed.rs`（`LanSpeedTool`）— 服务端/客户端 TCP 吞吐对测（iperf 风格），跨平台。
 
-`icmp.rs` 收敛单次 ICMP Echo 的 unsafe FFI（trace/link_quality 共用）；`ping.rs` 因用途不同保留自己的发包循环。子工具统一持有 config/state + `mpsc` 回传 + `Arc<Mutex<bool>>` abort flag；`draw(f, main_area, config_area, i18n, is_focused, active_focus)` 签名一致。**诊断 `match current_tool` 已无 `_` 兜底分支——新增工具须在 update/on_key/draw 三处显式补齐，否则编译报 non-exhaustive。**
+`icmp.rs` 收敛单次 ICMP Echo 的 unsafe FFI：`echo_once`（默认路由，trace 用）与 `echo_once_from`（源地址绑定 + 可变载荷，链路质量按网卡用，`IcmpSendEcho2Ex`，需 `Win32_System_IO` feature）；`ping.rs` 因用途不同保留自己的发包循环。`utils/wlan.rs` 收敛无线丰富信息查询（纯换算/标签函数 + Windows `query(guid)`）。子工具统一持有 config/state + `mpsc` 回传 + `Arc<Mutex<bool>>` abort flag；`draw(f, main_area, config_area, i18n, is_focused, active_focus)` 签名一致。**诊断 `match current_tool` 已无 `_` 兜底分支——新增工具须在 update/on_key/draw 三处显式补齐，否则编译报 non-exhaustive。**
 
 ### i18n（`utils/i18n.rs` + `assets/locales/*.json`）
 
@@ -133,4 +133,5 @@ cargo check              # 快速类型检查
 
 - **再次实测 Adapter IP 配置写入**：两个写入 BUG 已修（见上节「真机实测踩过的两个坑」），但修复后的写入路径需管理员权限再做一次真机验证：静态↔DHCP 往返、确认掩码预填为正常值（如 255.255.255.0）。DHCP 模式下 DNS 已尽力重置为自动（`SetDNSServerSearchOrder` 传空数组 = VT_NULL）。
 - **Scanner OUI 表**：`utils::oui` 仅收录少量高置信度前缀，可扩充（或接入完整 OUI 数据库）。
-- **跨平台迁移**：当前聚焦 Windows。端口扫描/公网测速/内网测速已天然跨平台；网卡枚举/ARP/ICMP(traceroute,链路质量)/IP 配置仅 Windows，非 Windows 多为 stub 或本地化"不支持"。迁移时在 `cfg(not(windows))` 侧补实现，参照 `utils/net.rs`、`diagnostics/icmp.rs`。
+- **跨平台迁移**：当前聚焦 Windows。端口扫描/公网测速/内网测速已天然跨平台；网卡枚举/ARP/ICMP(traceroute,链路质量,含源绑定 echo_once_from)/无线信息(`utils/wlan.rs`)/IP 配置仅 Windows，非 Windows 多为 stub 或本地化"不支持"（`wlan::query` 非 Windows 返回 `None`，评分回退为仅连通性权重）。迁移时在 `cfg(not(windows))` 侧补实现，参照 `utils/net.rs`、`diagnostics/icmp.rs`。
+- **再次实测链路质量增强**：网卡选择/源绑定探测/无线参数采集/多维评分已实现并通过 `cargo build --release` + 32 项单测；**FFI(WLAN 查询、IcmpSendEcho2Ex)与 TUI 布局需在多网卡(含一块 Wi-Fi)真机、管理员权限下手动复测**（见 `docs/superpowers/plans/2026-06-09-link-quality-enhancement.md` Task 8 清单）。
