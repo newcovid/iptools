@@ -3,3 +3,6 @@ target/
 
 # 本地运行时配置（首次运行自动生成；参见 config.example.json）
 config.json
+
+# Superpowers 工作流文档（设计/计划草稿），不纳入版本库
+docs/superpowers/
