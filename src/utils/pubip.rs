@@ -131,6 +131,8 @@ mod tests {
         assert_eq!(parse("plaintext", "  9.9.9.9\n").unwrap().ip, "9.9.9.9");
         assert!(parse("plaintext", "<html>err</html>").is_none());
         assert!(parse("plaintext", "").is_none());
+        assert!(parse("plaintext", &"a".repeat(65)).is_none()); // >64 拒绝
+        assert!(parse("plaintext", "1.2.3.4 extra").is_none()); // 内嵌空白拒绝
     }
 
     #[test]
