@@ -6,11 +6,14 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph}, // 修复：添加 Paragraph
 };
 
+pub mod icmp;
+pub mod link_quality;
 pub mod ping;
 pub mod port_scan;
 pub mod public_speed;
 pub mod trace;
 
+use link_quality::LinkQualityTool;
 use ping::PingTool;
 use port_scan::PortScanTool;
 use public_speed::PublicSpeedTool;
@@ -54,6 +57,7 @@ pub struct DiagnosticsModule {
     pub port_scan_tool: PortScanTool,
     pub public_speed_tool: PublicSpeedTool,
     pub trace_tool: TraceTool,
+    pub link_quality_tool: LinkQualityTool,
 }
 
 impl DiagnosticsModule {
@@ -77,6 +81,7 @@ impl DiagnosticsModule {
             port_scan_tool: PortScanTool::new(),
             public_speed_tool: PublicSpeedTool::new(),
             trace_tool: TraceTool::new(),
+            link_quality_tool: LinkQualityTool::new(),
         }
     }
 
@@ -86,6 +91,7 @@ impl DiagnosticsModule {
             DiagnosticTool::PortScan => self.port_scan_tool.update(),
             DiagnosticTool::NetSpeed => self.public_speed_tool.update(),
             DiagnosticTool::Trace => self.trace_tool.update(),
+            DiagnosticTool::LinkQuality => self.link_quality_tool.update(),
             _ => {}
         }
     }
@@ -111,6 +117,9 @@ impl DiagnosticsModule {
                     DiagnosticTool::NetSpeed => self.public_speed_tool.on_key(action),
                     DiagnosticTool::Trace => {
                         self.trace_tool.on_key(key, action, self.active_focus)
+                    }
+                    DiagnosticTool::LinkQuality => {
+                        self.link_quality_tool.on_key(key, action, self.active_focus)
                     }
                     _ => {}
                 }
@@ -225,6 +234,10 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App, is_focused: bool) {
         }
         DiagnosticTool::Trace => {
             diag.trace_tool
+                .draw(f, chunks[1], chunks[2], i18n, is_focused, diag.active_focus);
+        }
+        DiagnosticTool::LinkQuality => {
+            diag.link_quality_tool
                 .draw(f, chunks[1], chunks[2], i18n, is_focused, diag.active_focus);
         }
         _ => {
