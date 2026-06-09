@@ -34,6 +34,7 @@ pub enum Action {
     Confirm,
     Back,
     Refresh,
+    History,
     Edit,
     Toggle,
     Help,
@@ -54,6 +55,7 @@ impl Action {
             Action::Confirm => "confirm",
             Action::Back => "back",
             Action::Refresh => "refresh",
+            Action::History => "history",
             Action::Edit => "edit",
             Action::Toggle => "toggle",
             Action::Help => "help",
@@ -74,6 +76,7 @@ impl Action {
             Action::Confirm => "action_confirm",
             Action::Back => "action_back",
             Action::Refresh => "action_refresh",
+            Action::History => "action_history",
             Action::Edit => "action_edit",
             Action::Toggle => "action_toggle",
             Action::Help => "action_help",
@@ -85,7 +88,7 @@ impl Action {
     }
 
     /// 解析优先级顺序（全局动作在前）。`action_for` 按此顺序匹配。
-    pub const ALL: [Action; 14] = [
+    pub const ALL: [Action; 15] = [
         Action::Quit,
         Action::ToggleLanguage,
         Action::NextTab,
@@ -97,6 +100,7 @@ impl Action {
         Action::Confirm,
         Action::Back,
         Action::Refresh,
+        Action::History,
         Action::Edit,
         Action::Toggle,
         Action::Help,
@@ -130,6 +134,7 @@ impl Action {
             Action::Confirm => vec![plain(Enter)],
             Action::Back => vec![plain(Esc)],
             Action::Refresh => vec![plain(Char('r'))],
+            Action::History => vec![c(Char('r'), KeyModifiers::CONTROL)],
             Action::Edit => vec![plain(Char('e'))],
             Action::Toggle => vec![plain(Char(' '))],
             Action::Help => vec![plain(F(1))],
@@ -480,5 +485,19 @@ mod tests {
         let p = KeyMap::default().to_persisted();
         assert_eq!(p.len(), Action::ALL.len());
         assert!(p.contains_key("toggle_language"));
+    }
+
+    #[test]
+    fn ctrl_r_resolves_history() {
+        let km = KeyMap::default();
+        assert_eq!(
+            km.action_for(ev(KeyCode::Char('r'), KeyModifiers::CONTROL)),
+            Some(Action::History)
+        );
+        // 裸 r 仍是 Refresh，不被 Ctrl+r 波及。
+        assert_eq!(
+            km.action_for(ev(KeyCode::Char('r'), KeyModifiers::NONE)),
+            Some(Action::Refresh)
+        );
     }
 }
