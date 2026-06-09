@@ -124,5 +124,15 @@
     "diag_ping_err_dns": "DNS 解析失败",
     "diag_ping_err_ipv6": "Windows 暂不支持 IPv6 Ping",
     "diag_ping_err_perm": "权限不足（Unix 下需要 root 权限）",
-    "diag_ping_err_generic": "Ping 出错"
+    "diag_ping_err_generic": "Ping 出错",
+    "diag_port_target": "目标 IP/域名",
+    "diag_port_start": "起始端口",
+    "diag_port_end": "结束端口",
+    "diag_port_timeout": "超时 (ms)",
+    "diag_port_open_title": "开放端口",
+    "diag_port_col_port": "端口",
+    "diag_port_col_service": "服务",
+    "diag_port_stat_open": "开放",
+    "diag_port_stat_scanned": "已扫",
+    "diag_port_err_target": "无效目标或端口范围"
 }
