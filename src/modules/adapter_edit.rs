@@ -175,7 +175,7 @@ impl EditForm {
         // 确认浮层态
         if self.confirming {
             match action {
-                Some(Action::Confirm) => self.apply(),
+                Some(Action::Confirm) | Some(Action::Toggle) => self.apply(),
                 Some(Action::Back) => self.confirming = false,
                 _ => {}
             }
