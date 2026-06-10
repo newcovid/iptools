@@ -60,7 +60,7 @@ pub fn handle_mru_key_data(
                     mru.sel = (mru.sel + 1).min(len - 1);
                 }
             }
-            Some(Action::Confirm) => {
+            Some(Action::Confirm) | Some(Action::Toggle) => {
                 if let Some(v) = entries.get(mru.sel) {
                     *input = TextInput::with_text(v);
                 }
