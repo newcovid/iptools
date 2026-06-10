@@ -53,7 +53,8 @@ pub struct HistoryPersist {
     pub adapter: Vec<String>,
 }
 
-/// 扫描页：CIDR 网段。空串表示「沿用按本机网卡自动推断的默认值」。
+/// 扫描页：CIDR 网段。**始终为空串**——每次启动重新按活动网卡推断默认值，
+/// 用户历史由 MRU 池（`HistoryPersist.cidrs`）独立管理。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct ScannerPersist {
