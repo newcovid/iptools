@@ -92,11 +92,10 @@ impl ScannerModule {
         }
     }
 
-    /// 导出可持久化参数（当前 CIDR）。
+    /// 导出可持久化参数。CIDR 不再持久化——每次启动重新按活动网卡推断默认值；
+    /// 用户历史由 MRU 池（`history.cidrs`）独立管理，灰字补全与 Ctrl+R 不受影响。
     pub fn export_persist(&self) -> ScannerPersist {
-        ScannerPersist {
-            cidr: self.cidr_input.value(),
-        }
+        ScannerPersist { cidr: String::new() }
     }
 
     /// 回灌持久化参数。空串保留按本机网卡推断的默认 CIDR。
