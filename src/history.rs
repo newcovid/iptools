@@ -58,11 +58,13 @@ impl History {
     }
 }
 
-/// 两池聚合，由 App 持有（`Rc<RefCell<HistoryStore>>`）并 clone 进各工具。
+/// 三池聚合，由 App 持有（`Rc<RefCell<HistoryStore>>`）并 clone 进各工具。
 #[derive(Debug, Clone, PartialEq)]
 pub struct HistoryStore {
     pub targets: History,
     pub cidrs: History,
+    /// 适配器编辑专用（IP/掩码/网关/DNS 共享）
+    pub adapter: History,
 }
 
 const HISTORY_CAP: usize = 15;
@@ -72,6 +74,7 @@ impl Default for HistoryStore {
         Self {
             targets: History::new(HISTORY_CAP),
             cidrs: History::new(HISTORY_CAP),
+            adapter: History::new(HISTORY_CAP),
         }
     }
 }
@@ -81,6 +84,7 @@ impl HistoryStore {
         Self {
             targets: History::from_vec(p.targets.clone(), HISTORY_CAP),
             cidrs: History::from_vec(p.cidrs.clone(), HISTORY_CAP),
+            adapter: History::from_vec(p.adapter.clone(), HISTORY_CAP),
         }
     }
 
@@ -88,6 +92,7 @@ impl HistoryStore {
         crate::session::HistoryPersist {
             targets: self.targets.to_vec(),
             cidrs: self.cidrs.to_vec(),
+            adapter: self.adapter.to_vec(),
         }
     }
 }
@@ -148,6 +153,7 @@ mod tests {
         let mut s = HistoryStore::default();
         s.targets.record("8.8.8.8");
         s.cidrs.record("192.168.1.0/24");
+        s.adapter.record("192.168.1.1");
         let p = s.to_persist();
         let back = HistoryStore::from_persist(&p);
         assert_eq!(s, back);

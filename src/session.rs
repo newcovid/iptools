@@ -26,6 +26,7 @@ pub struct SessionState {
     pub trace: TracePersist,
     pub lan_speed: LanSpeedPersist,
     pub link_quality: LinkQualityPersist,
+    pub adapter_edit: AdapterEditPersist,
     pub ui: UiPersist,
     pub history: HistoryPersist,
 }
@@ -40,7 +41,7 @@ pub struct UiPersist {
     pub last_diag_tool: u8,
 }
 
-/// 目标历史（MRU）：两个池——IP/主机 与 CIDR。最近在前。
+/// 目标历史（MRU）：三个池——IP/主机、CIDR、适配器编辑。最近在前。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct HistoryPersist {
@@ -48,6 +49,8 @@ pub struct HistoryPersist {
     pub targets: Vec<String>,
     /// CIDR 历史（扫描页独立）。
     pub cidrs: Vec<String>,
+    /// 适配器编辑历史（IP/掩码/网关/DNS 共享）。
+    pub adapter: Vec<String>,
 }
 
 /// 扫描页：CIDR 网段。空串表示「沿用按本机网卡自动推断的默认值」。
@@ -170,6 +173,45 @@ pub struct LinkQualityPersist {
     pub adapters: BTreeMap<String, LinkParams>,
     /// 上次选中的网卡键；重启后按此键重新定位选中项。
     pub selected: Option<String>,
+}
+
+/// 适配器编辑：按网卡保存静态 IP 配置参数。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AdapterEditParams {
+    /// 是否使用 DHCP（false = 静态 IP）。
+    pub use_dhcp: bool,
+    /// 静态 IP 地址。
+    pub ip: String,
+    /// 子网掩码。
+    pub mask: String,
+    /// 默认网关。
+    pub gateway: String,
+    /// 首选 DNS。
+    pub dns1: String,
+    /// 备选 DNS。
+    pub dns2: String,
+}
+
+impl Default for AdapterEditParams {
+    fn default() -> Self {
+        Self {
+            use_dhcp: true,
+            ip: String::new(),
+            mask: String::new(),
+            gateway: String::new(),
+            dns1: String::new(),
+            dns2: String::new(),
+        }
+    }
+}
+
+/// 适配器编辑持久化：按网卡键存参数。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct AdapterEditPersist {
+    /// 网卡稳定标识（GUID）→ 该网卡的编辑参数。
+    pub adapters: BTreeMap<String, AdapterEditParams>,
 }
 
 #[cfg(test)]

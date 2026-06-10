@@ -156,6 +156,7 @@ mod win {
         let con = connect()?;
         let path = instance_path(&con, guid)?;
 
+        // 设置静态 IP 和子网掩码
         invoke(
             &con,
             &path,
@@ -165,6 +166,11 @@ mod win {
                 ("SubnetMask", str_array(&[mask.to_string()])),
             ],
         )?;
+
+        // 显式释放 DHCP 租约，确保 DHCPEnabled=false
+        // EnableStatic 只设置 IP，不会自动禁用 DHCP 标志
+        // 这样 Windows 设置界面才能正确显示"手动"状态
+        let _ = invoke(&con, &path, "ReleaseDHCPLease", &[]);
 
         if let Some(gw) = gateway {
             invoke(

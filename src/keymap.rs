@@ -127,10 +127,10 @@ impl Action {
                 c(BackTab, KeyModifiers::SHIFT),
                 c(Tab, KeyModifiers::SHIFT),
             ],
-            Action::Up => vec![plain(Up), plain(Char('k'))],
-            Action::Down => vec![plain(Down), plain(Char('j'))],
-            Action::Left => vec![plain(Left), plain(Char('h'))],
-            Action::Right => vec![plain(Right), plain(Char('l'))],
+            Action::Up => vec![plain(Up), plain(Char('w'))],
+            Action::Down => vec![plain(Down), plain(Char('s'))],
+            Action::Left => vec![plain(Left), plain(Char('a'))],
+            Action::Right => vec![plain(Right), plain(Char('d'))],
             Action::Confirm => vec![plain(Enter)],
             Action::Back => vec![plain(Esc)],
             Action::Refresh => vec![plain(Char('r'))],
@@ -201,6 +201,11 @@ impl KeyCombo {
     }
 
     pub fn to_label(&self) -> String {
+        self.to_label_i18n("en-US")
+    }
+
+    /// 返回本地化的组合键标签。zh-CN 下 Enter→回车。
+    pub fn to_label_i18n(&self, locale: &str) -> String {
         let mut out = String::new();
         if self.mods.contains(KeyModifiers::CONTROL) {
             out.push_str("Ctrl+");
@@ -211,7 +216,7 @@ impl KeyCombo {
         if self.mods.contains(KeyModifiers::SHIFT) {
             out.push_str("Shift+");
         }
-        out.push_str(&keycode_label(self.code));
+        out.push_str(&keycode_label_i18n(self.code, locale));
         out
     }
 }
@@ -258,10 +263,17 @@ fn parse_keycode(s: &str) -> Option<KeyCode> {
     Some(code)
 }
 
-fn keycode_label(code: KeyCode) -> String {
+/// 返回键名的本地化标签。zh-CN 下 Enter→回车，其余键名保持英文。
+fn keycode_label_i18n(code: KeyCode, locale: &str) -> String {
     use KeyCode::*;
     match code {
-        Enter => "Enter".into(),
+        Enter => {
+            if locale == "zh-CN" {
+                "回车".into()
+            } else {
+                "Enter".into()
+            }
+        }
         Esc => "Esc".into(),
         Tab => "Tab".into(),
         BackTab => "Shift+Tab".into(),
@@ -351,6 +363,15 @@ impl KeyMap {
             .unwrap_or_else(|| "?".to_string())
     }
 
+    /// 返回某动作的首个组合键本地化标签；无绑定时返回 "?"。
+    pub fn primary_label_i18n(&self, action: Action, locale: &str) -> String {
+        self.map
+            .get(&action)
+            .and_then(|v| v.first())
+            .map(|c| c.to_label_i18n(locale))
+            .unwrap_or_else(|| "?".to_string())
+    }
+
     /// 某动作的全部组合键标签，以 " / " 连接（用于帮助浮层）；无绑定返回 "-"。
     pub fn all_labels(&self, action: Action) -> String {
         match self.map.get(&action) {
@@ -389,7 +410,7 @@ mod tests {
             Some(Action::Quit)
         );
         assert_eq!(
-            km.action_for(ev(KeyCode::Char('j'), KeyModifiers::NONE)),
+            km.action_for(ev(KeyCode::Char('s'), KeyModifiers::NONE)),
             Some(Action::Down)
         );
         assert_eq!(
@@ -402,7 +423,7 @@ mod tests {
             Some(Action::ToggleLanguage)
         );
         assert_eq!(
-            km.action_for(ev(KeyCode::Char('l'), KeyModifiers::NONE)),
+            km.action_for(ev(KeyCode::Char('d'), KeyModifiers::NONE)),
             Some(Action::Right)
         );
     }
