@@ -1,6 +1,8 @@
 use crate::app::App;
+use crate::history::HistoryStore;
 use crate::keymap::Action;
 use crate::modules::adapter_edit::{EditForm, EditOutcome};
+use crate::session::AdapterEditPersist;
 use crate::ui::theme; // 引入主题
 use crate::utils::format::{format_bytes, format_speed};
 use crate::utils::i18n::I18n;
@@ -10,7 +12,9 @@ use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Cell, List, ListItem, ListState, Paragraph, Row, Table},
 };
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -36,6 +40,10 @@ pub struct AdapterModule {
     traffic_history: HashMap<String, TrafficStats>,
     /// 进入编辑态时为 Some；只读视图时为 None。
     pub edit: Option<EditForm>,
+    /// 持久化的适配器编辑参数（按网卡 GUID 保存）。
+    persist: AdapterEditPersist,
+    /// 适配器编辑 MRU 历史
+    pub history: Rc<RefCell<HistoryStore>>,
     /// 后台网卡枚举结果回传通道（遵循模块异步契约：spawn → mpsc → update 消费）。
     iface_tx: mpsc::UnboundedSender<Vec<InterfaceInfo>>,
     iface_rx: mpsc::UnboundedReceiver<Vec<InterfaceInfo>>,
@@ -46,7 +54,7 @@ pub struct AdapterModule {
 }
 
 impl AdapterModule {
-    pub fn new() -> Self {
+    pub fn new(history: Rc<RefCell<HistoryStore>>) -> Self {
         let mut state = ListState::default();
         let interfaces = net::get_interfaces();
         if !interfaces.is_empty() {
@@ -61,10 +69,31 @@ impl AdapterModule {
             networks: Networks::new_with_refreshed_list(),
             traffic_history: HashMap::new(),
             edit: None,
+            persist: AdapterEditPersist::default(),
+            history,
             iface_tx,
             iface_rx,
             scan_in_flight: Arc::new(AtomicBool::new(false)),
             last_scan: Instant::now(),
+        }
+    }
+
+    /// 初始化持久化数据（从配置加载）。
+    pub fn apply_persist(&mut self, persist: &AdapterEditPersist) {
+        self.persist = persist.clone();
+    }
+
+    /// 导出当前持久化快照（用于保存到配置）。
+    pub fn export_persist(&self) -> AdapterEditPersist {
+        // 如果当前有编辑态，更新对应网卡的参数
+        if let Some(form) = &self.edit {
+            let guid = form.guid().to_string();
+            let params = form.export_persist();
+            let mut persist = self.persist.clone();
+            persist.adapters.insert(guid, params);
+            persist
+        } else {
+            self.persist.clone()
         }
     }
 
@@ -189,7 +218,13 @@ impl AdapterModule {
     fn enter_edit(&mut self) {
         if let Some(idx) = self.state.selected() {
             if let Some(iface) = self.interfaces.get(idx) {
-                self.edit = Some(EditForm::from_interface(iface));
+                // 优先使用持久化数据，否则使用系统当前状态
+                let form = if let Some(params) = self.persist.adapters.get(&iface.guid) {
+                    EditForm::from_persist(iface, params, self.history.clone())
+                } else {
+                    EditForm::from_interface(iface, self.history.clone())
+                };
+                self.edit = Some(form);
             }
         }
     }
@@ -259,11 +294,12 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
     }
 
     let i18n = &app.i18n;
+    let keymap = &app.keymap;
     let adapter_module = &mut app.adapter;
 
     // 编辑态：整块区域交给编辑表单
     if let Some(form) = &adapter_module.edit {
-        form.draw(f, area, i18n);
+        form.draw(f, area, i18n, keymap);
         return;
     }
 

@@ -4,7 +4,10 @@
 //! 再经一次显式确认浮层方可写入；实际写入在后台线程进行并把结果回传，
 //! 不阻塞 UI。真正改写系统的逻辑收敛在 [`crate::utils::ipconfig`]。
 
-use crate::keymap::Action;
+use crate::history::HistoryStore;
+use crate::keymap::{Action, KeyMap};
+use crate::session::AdapterEditParams;
+use crate::ui::mru::{self, MruState};
 use crate::ui::theme;
 use crate::utils::i18n::I18n;
 use crate::utils::ipconfig;
@@ -15,7 +18,9 @@ use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
+use std::cell::RefCell;
 use std::net::Ipv4Addr;
+use std::rc::Rc;
 use std::str::FromStr;
 use tokio::sync::mpsc;
 
@@ -50,10 +55,16 @@ pub struct EditForm {
 
     tx: mpsc::Sender<Result<(), String>>,
     rx: mpsc::Receiver<Result<(), String>>,
+
+    /// 适配器编辑专用 MRU 历史（IP/掩码/网关/DNS 共享）
+    history: Rc<RefCell<HistoryStore>>,
+    mru: MruState,
 }
 
 impl EditForm {
-    pub fn from_interface(iface: &InterfaceInfo) -> Self {
+    /// 从系统当前网卡状态构建表单（无持久化数据时使用）。
+    /// 首次运行时，网关默认为 IP 前三段.1，DNS 默认为 8.8.8.8 / 8.8.4.4。
+    pub fn from_interface(iface: &InterfaceInfo, history: Rc<RefCell<HistoryStore>>) -> Self {
         let (tx, rx) = mpsc::channel(4);
         let ip = iface.ipv4.first().cloned().unwrap_or_default();
         let mask = iface
@@ -61,15 +72,29 @@ impl EditForm {
             .as_ref()
             .and_then(|c| cidr_to_mask(c))
             .unwrap_or_default();
+
+        // 智能默认值：网关 = IP前三段.1，DNS = 8.8.8.8 / 8.8.4.4
+        let gateway_default = if ip.is_empty() {
+            String::new()
+        } else {
+            // 从 IP 提取前三段，拼接 .1
+            let parts: Vec<&str> = ip.split('.').collect();
+            if parts.len() >= 3 {
+                format!("{}.{}.{}.1", parts[0], parts[1], parts[2])
+            } else {
+                String::new()
+            }
+        };
+
         Self {
             guid: iface.guid.clone(),
             adapter_name: iface.name.clone(),
             use_dhcp: iface.dhcp_enabled,
             ip: TextInput::with_text(&ip),
             mask: TextInput::with_text(&mask),
-            gateway: TextInput::new(),
-            dns1: TextInput::new(),
-            dns2: TextInput::new(),
+            gateway: TextInput::with_text(&gateway_default),
+            dns1: TextInput::with_text("8.8.8.8"),
+            dns2: TextInput::with_text("8.8.4.4"),
             field: 0,
             confirming: false,
             applying: false,
@@ -77,7 +102,54 @@ impl EditForm {
             result: None,
             tx,
             rx,
+            history,
+            mru: MruState::default(),
         }
+    }
+
+    /// 从持久化数据构建表单（有历史保存值时使用）。
+    pub fn from_persist(
+        iface: &InterfaceInfo,
+        params: &AdapterEditParams,
+        history: Rc<RefCell<HistoryStore>>,
+    ) -> Self {
+        let (tx, rx) = mpsc::channel(4);
+        Self {
+            guid: iface.guid.clone(),
+            adapter_name: iface.name.clone(),
+            use_dhcp: params.use_dhcp,
+            ip: TextInput::with_text(&params.ip),
+            mask: TextInput::with_text(&params.mask),
+            gateway: TextInput::with_text(&params.gateway),
+            dns1: TextInput::with_text(&params.dns1),
+            dns2: TextInput::with_text(&params.dns2),
+            field: 0,
+            confirming: false,
+            applying: false,
+            error_key: None,
+            result: None,
+            tx,
+            rx,
+            history,
+            mru: MruState::default(),
+        }
+    }
+
+    /// 导出当前表单状态为持久化参数。
+    pub fn export_persist(&self) -> AdapterEditParams {
+        AdapterEditParams {
+            use_dhcp: self.use_dhcp,
+            ip: self.ip.value(),
+            mask: self.mask.value(),
+            gateway: self.gateway.value(),
+            dns1: self.dns1.value(),
+            dns2: self.dns2.value(),
+        }
+    }
+
+    /// 获取当前编辑的网卡 GUID。
+    pub fn guid(&self) -> &str {
+        &self.guid
     }
 
     pub fn update(&mut self) {
@@ -111,9 +183,42 @@ impl EditForm {
         }
 
         // 表单编辑态
+        // 辅助闭包：对当前文本字段执行 MRU 按键处理（拆分借用避免冲突）。
+        let do_mru = |input: &mut TextInput,
+                      mru: &mut MruState,
+                      history: &Rc<RefCell<HistoryStore>>,
+                      key: KeyEvent,
+                      action: Option<Action>| {
+            let entries: Vec<String> = history.borrow().adapter.entries().to_vec();
+            let suggest = history.borrow().adapter.suggest(&input.value());
+            mru::handle_mru_key_data(input, mru, &entries, suggest, key, action, false)
+        };
+
         match action {
             Some(Action::Back) => return EditOutcome::Cancel,
             Some(Action::Up) => {
+                // MRU 下拉打开时，Up 由 handle_mru_key 处理
+                if self.mru.open {
+                    let entries: Vec<String> =
+                        self.history.borrow().adapter.entries().to_vec();
+                    let input = match self.field {
+                        1 => &mut self.ip,
+                        2 => &mut self.mask,
+                        3 => &mut self.gateway,
+                        4 => &mut self.dns1,
+                        _ => &mut self.dns2,
+                    };
+                    mru::handle_mru_key_data(
+                        input,
+                        &mut self.mru,
+                        &entries,
+                        None,
+                        key,
+                        action,
+                        false,
+                    );
+                    return EditOutcome::Stay;
+                }
                 self.field = if self.field == 0 {
                     FIELD_COUNT - 1
                 } else {
@@ -122,10 +227,46 @@ impl EditForm {
                 return EditOutcome::Stay;
             }
             Some(Action::Down) => {
+                // MRU 下拉打开时，Down 由 handle_mru_key 处理
+                if self.mru.open {
+                    let entries: Vec<String> =
+                        self.history.borrow().adapter.entries().to_vec();
+                    let input = match self.field {
+                        1 => &mut self.ip,
+                        2 => &mut self.mask,
+                        3 => &mut self.gateway,
+                        4 => &mut self.dns1,
+                        _ => &mut self.dns2,
+                    };
+                    mru::handle_mru_key_data(
+                        input,
+                        &mut self.mru,
+                        &entries,
+                        None,
+                        key,
+                        action,
+                        false,
+                    );
+                    return EditOutcome::Stay;
+                }
                 self.field = (self.field + 1) % FIELD_COUNT;
                 return EditOutcome::Stay;
             }
             _ => {}
+        }
+
+        // 文本字段（静态模式）：MRU 历史交互优先
+        if self.field >= 1 && !self.use_dhcp {
+            let input = match self.field {
+                1 => &mut self.ip,
+                2 => &mut self.mask,
+                3 => &mut self.gateway,
+                4 => &mut self.dns1,
+                _ => &mut self.dns2,
+            };
+            if do_mru(input, &mut self.mru, &self.history, key, action) {
+                return EditOutcome::Stay;
+            }
         }
 
         if self.field == 0 {
@@ -143,8 +284,8 @@ impl EditForm {
             }
         }
 
-        // 确认键：先校验，通过则进入确认浮层
-        if action == Some(Action::Confirm) {
+        // 确认键 / 空格键：先校验，通过则进入确认浮层
+        if action == Some(Action::Confirm) || action == Some(Action::Toggle) {
             match self.validate() {
                 Ok(()) => {
                     self.error_key = None;
@@ -208,6 +349,22 @@ impl EditForm {
         self.confirming = false;
         self.applying = true;
         self.result = None;
+
+        // 记录到 MRU 历史（仅静态模式下的非空字段）
+        if !self.use_dhcp {
+            let mut hist = self.history.borrow_mut();
+            for val in [
+                self.ip.value(),
+                self.mask.value(),
+                self.gateway.value(),
+                self.dns1.value(),
+                self.dns2.value(),
+            ] {
+                if !val.trim().is_empty() {
+                    hist.adapter.record(&val);
+                }
+            }
+        }
 
         let tx = self.tx.clone();
         let guid = self.guid.clone();
@@ -286,7 +443,7 @@ impl EditForm {
     // 绘图
     // -------------------------------------------------------------------------
 
-    pub fn draw(&self, f: &mut Frame, area: Rect, i18n: &I18n) {
+    pub fn draw(&self, f: &mut Frame, area: Rect, i18n: &I18n, keymap: &KeyMap) {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(theme::COLOR_SECONDARY))
@@ -324,6 +481,10 @@ impl EditForm {
             i18n.t("adapter_field_dns2"),
         ];
 
+        // 检测当前文本字段是否有灰字补全（用于动态提示文本）
+        let mut has_ghost = false;
+        let hist = self.history.borrow();
+
         let mut items: Vec<ListItem> = Vec::with_capacity(FIELD_COUNT);
         for i in 0..FIELD_COUNT {
             let selected = i == self.field;
@@ -352,17 +513,26 @@ impl EditForm {
             if i == 0 {
                 spans.push(Span::styled(mode_val.clone(), val_base));
             } else {
-                // 选中且可编辑时显示光标块，便于在中间插入/删除。
+                // 选中且可编辑时使用 MRU 灰字补全渲染
                 let active = selected && enabled;
                 let input = self.input(i);
                 if input.is_empty() && !active {
                     spans.push(Span::styled("-".to_string(), dimmed));
+                } else if active && !self.use_dhcp {
+                    let ghost_spans =
+                        mru::mru_ghost_spans(input, &hist.adapter, active, val_base);
+                    // 检测是否有灰字补全
+                    if ghost_spans.len() > 1 {
+                        has_ghost = true;
+                    }
+                    spans.extend(ghost_spans);
                 } else {
                     spans.extend(input.render_spans(active, val_base));
                 }
             }
             items.push(ListItem::new(Line::from(spans)));
         }
+        drop(hist);
         f.render_widget(List::new(items), chunks[0]);
 
         // 错误 / 应用状态行
@@ -398,11 +568,30 @@ impl EditForm {
             chunks[1],
         );
 
-        // 操作提示
-        let hint = Paragraph::new(i18n.t("adapter_edit_hint"))
+        // 操作提示（动态：有灰字补全时显示"→ 采纳补全"，否则显示原提示）
+        let lang = i18n.get_lang();
+        let locale = lang.as_str();
+        let hint_key = if has_ghost {
+            "adapter_edit_hint_ghost"
+        } else {
+            "adapter_edit_hint"
+        };
+        let mut hint_text = i18n.t(hint_key).to_string();
+        // 文本字段（静态模式）追加 MRU 历史提示
+        if self.field >= 1 && !self.use_dhcp {
+            let history_label = keymap.primary_label_i18n(Action::History, locale);
+            hint_text.push_str(&i18n.t("adapter_edit_mru_hint").replace("{}", &history_label));
+        }
+        let hint = Paragraph::new(hint_text)
             .style(Style::default().fg(Color::DarkGray))
             .wrap(Wrap { trim: true });
         f.render_widget(hint, chunks[2]);
+
+        // MRU 历史弹窗
+        if self.mru.open && self.field >= 1 && !self.use_dhcp {
+            let entries: Vec<String> = self.history.borrow().adapter.entries().to_vec();
+            mru::draw_mru_popup(f, chunks[0], &entries, self.mru.sel, i18n);
+        }
 
         // 确认浮层
         if self.confirming {

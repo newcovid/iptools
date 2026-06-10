@@ -32,8 +32,25 @@ pub fn handle_mru_key(
     action: Option<Action>,
     running: bool,
 ) -> bool {
+    let suggest = hist.suggest(&input.value());
+    let entries: Vec<String> = hist.entries().to_vec();
+    handle_mru_key_data(input, mru, &entries, suggest, key, action, running)
+}
+
+/// 处理一次按键的 MRU 部分（接受预取的数据，避免同时借用多个字段）。
+///
+/// `entries` 为历史条目列表，`suggest` 为当前输入的补全建议。
+pub fn handle_mru_key_data(
+    input: &mut TextInput,
+    mru: &mut MruState,
+    entries: &[String],
+    suggest: Option<String>,
+    key: KeyEvent,
+    action: Option<Action>,
+    running: bool,
+) -> bool {
     if mru.open {
-        let len = hist.entries().len();
+        let len = entries.len();
         match action {
             Some(Action::Up) => {
                 mru.sel = mru.sel.saturating_sub(1);
@@ -44,7 +61,7 @@ pub fn handle_mru_key(
                 }
             }
             Some(Action::Confirm) => {
-                if let Some(v) = hist.entries().get(mru.sel) {
+                if let Some(v) = entries.get(mru.sel) {
                     *input = TextInput::with_text(v);
                 }
                 mru.open = false;
@@ -70,7 +87,7 @@ pub fn handle_mru_key(
 
     // 行尾 `→` 采纳灰字补全。
     if key.code == KeyCode::Right && input.cursor() == input.len() {
-        if let Some(s) = hist.suggest(&input.value()) {
+        if let Some(s) = suggest {
             *input = TextInput::with_text(&s);
             return true;
         }

@@ -129,7 +129,7 @@ impl App {
             show_help: false,
             mouse: MouseRegions::default(),
             dashboard: Dashboard::new(),
-            adapter: AdapterModule::new(),
+            adapter: AdapterModule::new(history.clone()),
             scanner: ScannerModule::new(history.clone()),
             settings: SettingsModule::new(),
             traffic: TrafficModule::new(),
@@ -156,6 +156,7 @@ impl App {
     fn snapshot_session(&self) -> SessionState {
         let mut s = SessionState {
             scanner: self.scanner.export_persist(),
+            adapter_edit: self.adapter.export_persist(),
             ui: UiPersist {
                 last_tab: self.current_tab as u8,
                 last_diag_tool: self.diagnostics.current_tool_index(),
@@ -172,6 +173,7 @@ impl App {
         let s = self.config.session.clone();
         *self.history.borrow_mut() = HistoryStore::from_persist(&s.history);
         self.scanner.apply_persist(&s.scanner);
+        self.adapter.apply_persist(&s.adapter_edit);
         self.diagnostics.apply_persist(&s);
         // 恢复上次所在标签页与诊断子工具。
         self.current_tab = CurrentTab::from_index(s.ui.last_tab);
