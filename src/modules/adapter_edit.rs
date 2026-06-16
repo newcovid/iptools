@@ -548,6 +548,13 @@ impl EditForm {
                     i18n.t("adapter_apply_ok"),
                     Style::default().fg(theme::COLOR_UP),
                 )),
+                // 哨兵：ip 兜底路径已应用但非持久（无 NetworkManager/netplan），按警告而非错误展示。
+                Err(msg) if msg.as_str() == "__IP_RUNTIME_ONLY__" => status_lines.push(
+                    Line::styled(
+                        i18n.t("adapter_apply_runtime_only"),
+                        Style::default().fg(Color::Yellow),
+                    ),
+                ),
                 Err(msg) => status_lines.push(Line::styled(
                     format!("{}: {}", i18n.t("adapter_apply_fail"), msg),
                     Style::default().fg(theme::COLOR_ERROR),

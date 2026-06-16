@@ -72,6 +72,7 @@
     "adapter_applying": "Applying config… (requires administrator)",
     "adapter_apply_ok": "✓ Config applied",
     "adapter_apply_fail": "✗ Apply failed",
+    "adapter_apply_runtime_only": "⚠ Applied (runtime only — won't persist after reboot; NetworkManager/netplan not detected)",
     "adapter_result_hint": "Press any key to continue",
     "adapter_err_ip": "Invalid IPv4 address",
     "adapter_err_mask": "Invalid subnet mask (must be contiguous, e.g. 255.255.255.0)",

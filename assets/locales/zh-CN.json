@@ -72,6 +72,7 @@
     "adapter_applying": "正在应用配置…（需要管理员权限）",
     "adapter_apply_ok": "✓ 配置已应用",
     "adapter_apply_fail": "✗ 应用失败",
+    "adapter_apply_runtime_only": "⚠ 已应用（仅本次生效，重启失效——未检测到 NetworkManager/netplan）",
     "adapter_result_hint": "按任意键继续",
     "adapter_err_ip": "IPv4 地址无效",
     "adapter_err_mask": "子网掩码无效（须为连续掩码，如 255.255.255.0）",
