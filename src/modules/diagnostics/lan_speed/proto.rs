@@ -7,6 +7,9 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_PORT: u16 = 50505;
+pub const UDP_HEADER_LEN: usize = 18; // u16 stream_id + u64 seq + u64 send_ts_nanos
+/// 注册报文哨兵 seq（不计入统计，仅用于让服务端学习客户端地址）。
+pub const REG_SEQ: u64 = u64::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Proto {
@@ -164,6 +167,93 @@ pub fn avg_bytes_per_sec(total_bytes: u64, elapsed_ms: u64) -> u64 {
         return 0;
     }
     total_bytes.saturating_mul(1000) / elapsed_ms
+}
+
+pub fn write_udp_header(buf: &mut [u8], stream_id: u16, seq: u64, send_ts_nanos: u64) {
+    buf[0..2].copy_from_slice(&stream_id.to_le_bytes());
+    buf[2..10].copy_from_slice(&seq.to_le_bytes());
+    buf[10..18].copy_from_slice(&send_ts_nanos.to_le_bytes());
+}
+
+pub fn read_udp_header(buf: &[u8]) -> Option<(u16, u64, u64)> {
+    if buf.len() < UDP_HEADER_LEN {
+        return None;
+    }
+    let sid = u16::from_le_bytes([buf[0], buf[1]]);
+    let seq = u64::from_le_bytes(buf[2..10].try_into().ok()?);
+    let ts = u64::from_le_bytes(buf[10..18].try_into().ok()?);
+    Some((sid, seq, ts))
+}
+
+/// 单条 UDP 流的接收统计（丢包/乱序/抖动）。
+#[derive(Debug, Default, Clone)]
+pub struct StreamTracker {
+    pub received: u64,
+    pub max_seq: u64,
+    pub last_seq: Option<u64>,
+    pub out_of_order: u64,
+    jitter_ns: f64,
+    last_transit_ns: Option<i64>,
+}
+
+impl StreamTracker {
+    pub fn on_packet(&mut self, seq: u64, send_ts_nanos: u64, arrival_nanos: u64) {
+        self.received += 1;
+        if let Some(last) = self.last_seq {
+            if seq < last {
+                self.out_of_order += 1;
+            }
+        }
+        self.last_seq = Some(seq);
+        if seq > self.max_seq {
+            self.max_seq = seq;
+        }
+        // RFC3550 式抖动：相邻包传输时延差的滑动平均。
+        let transit = arrival_nanos as i64 - send_ts_nanos as i64;
+        if let Some(prev) = self.last_transit_ns {
+            let d = (transit - prev).abs() as f64;
+            self.jitter_ns += (d - self.jitter_ns) / 16.0;
+        }
+        self.last_transit_ns = Some(transit);
+    }
+
+    pub fn lost(&self) -> u64 {
+        if self.received == 0 {
+            return 0;
+        }
+        (self.max_seq + 1).saturating_sub(self.received)
+    }
+
+    pub fn jitter_ms(&self) -> f64 {
+        self.jitter_ns / 1_000_000.0
+    }
+}
+
+/// 多条流聚合为一个 UdpSummary。
+pub fn aggregate_udp(trackers: &[StreamTracker]) -> UdpSummary {
+    let mut s = UdpSummary::default();
+    let (mut jsum, mut jn) = (0.0f64, 0u64);
+    for t in trackers {
+        s.received += t.received;
+        s.lost += t.lost();
+        s.out_of_order += t.out_of_order;
+        if t.received > 1 {
+            jsum += t.jitter_ms();
+            jn += 1;
+        }
+    }
+    s.jitter_ms = if jn > 0 { jsum / jn as f64 } else { 0.0 };
+    s
+}
+
+/// 每包发送间隔（纳秒）；rate_mbps=0 或 payload=0 → 0（不限速）。
+pub fn packet_interval_ns(rate_mbps: u32, payload_size: u32) -> u64 {
+    if rate_mbps == 0 || payload_size == 0 {
+        return 0;
+    }
+    let bits = payload_size as u64 * 8;
+    let rate_bps = rate_mbps as u64 * 1_000_000;
+    bits.saturating_mul(1_000_000_000) / rate_bps
 }
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -596,5 +686,44 @@ mod tests {
         assert_eq!(avg_bytes_per_sec(2_000_000, 1000), 2_000_000);
         assert_eq!(avg_bytes_per_sec(0, 0), 0); // 防除零
         assert_eq!(avg_bytes_per_sec(500_000, 500), 1_000_000);
+    }
+
+    #[test]
+    fn udp_header_roundtrip() {
+        let mut buf = [0u8; 64];
+        write_udp_header(&mut buf, 3, 42, 1_234_567_890);
+        let (sid, seq, ts) = read_udp_header(&buf).unwrap();
+        assert_eq!((sid, seq, ts), (3, 42, 1_234_567_890));
+        assert!(read_udp_header(&[0u8; 4]).is_none());
+    }
+
+    #[test]
+    fn tracker_counts_loss_and_reorder() {
+        let mut t = StreamTracker::default();
+        // 收到 seq 0,1,3,2 → max=3,收4 → 期望4 收4 丢0；2 在 3 之后到达=乱序1
+        for (seq, ts, arr) in [(0u64, 0u64, 10u64), (1, 1, 11), (3, 3, 13), (2, 2, 14)] {
+            t.on_packet(seq, ts, arr);
+        }
+        assert_eq!(t.received, 4);
+        assert_eq!(t.out_of_order, 1);
+        assert_eq!(t.lost(), 0);
+    }
+
+    #[test]
+    fn tracker_detects_gap() {
+        let mut t = StreamTracker::default();
+        for seq in [0u64, 1, 2, 5] {
+            t.on_packet(seq, seq, seq + 10);
+        }
+        assert_eq!(t.received, 4);
+        assert_eq!(t.lost(), 2); // 期望 6，收 4
+    }
+
+    #[test]
+    fn packet_interval_math() {
+        // 8 Mbps, 1000 字节=8000 bit → 1ms = 1_000_000 ns
+        assert_eq!(packet_interval_ns(8, 1000), 1_000_000);
+        assert_eq!(packet_interval_ns(0, 1000), 0); // 无限速
+        assert_eq!(packet_interval_ns(100, 0), 0);
     }
 }
