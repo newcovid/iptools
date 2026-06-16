@@ -123,15 +123,29 @@ iptools -c D:\path\my.json   # 使用自定义配置文件
 
 ## 💻 平台支持
 
-主要面向 **Windows**（网卡枚举/ARP/ICMP/无线信息/IP 配置走原生 API）。
-部分功能天然跨平台，其余在非 Windows 为 stub。
+主要面向 **Windows** 与 **Linux**（Windows 走原生 API；Linux 走 sysfs/getifaddrs/socket2 原始套接字/AF_PACKET ARP/iw/nmcli·netplan·ip 分层后端）。
+部分功能天然跨平台，其余在 macOS 等平台为 stub。
 
-| 功能 | Windows | 非 Windows |
-|---|:---:|:---:|
-| 端口扫描 / 公网测速 / 内网测速 | ✅ | ✅ |
-| 网卡枚举 / IP 配置 / ARP 扫描 | ✅ | ⛔ stub |
-| 路由跟踪 / 链路质量 / 无线信息 | ✅ | ⛔ stub |
-| Ping | ✅ | ✅（需 root，`surge-ping`） |
+| 功能 | Windows | Linux | 其它 Unix |
+|---|:---:|:---:|:---:|
+| 端口扫描 / 公网测速 / 内网测速 | ✅ | ✅ | ✅ |
+| 网卡枚举 / ARP 扫描 | ✅ | ✅（需 CAP_NET_RAW） | ⛔ stub |
+| 路由跟踪 / 链路质量 | ✅ | ✅（需 CAP_NET_RAW） | ⛔ stub |
+| 无线信息 | ✅ | ✅（需 `iw`） | ⛔ stub |
+| IP 配置写入 | ✅ | ✅（nmcli/netplan/ip） | ⛔ stub |
+| Ping | ✅ | ✅（需 root，`surge-ping`） | ✅（需 root） |
+
+## Linux 支持
+
+需 Rust 工具链：`cargo build --release`。构建依赖：`pkg-config`、`libssl-dev`（reqwest 在 Linux 走 openssl）。
+
+**权限**：局域网扫描（ARP）、路由跟踪（Trace）、链路质量探测用原始套接字，需 `CAP_NET_RAW`：
+- 推荐一次性授权二进制：`sudo setcap cap_net_raw+ep ./target/release/iptools`
+- 或直接 `sudo ./target/release/iptools` 运行
+
+**无线详情**：需安装 `iw`（`sudo apt install -y iw`）。
+
+**IP 配置写入**：自动适配后端——NetworkManager（桌面，`nmcli`）/ netplan→systemd-networkd（服务器，写 `/etc/netplan/99-iptools.yaml` + `netplan apply`）/ `ip` 命令兜底（仅本次生效，重启失效）。写入需相应授权（PolicyKit 或 sudo）。
 
 ## 🧪 开发
 

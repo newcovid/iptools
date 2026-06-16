@@ -14,7 +14,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 |---|---|---|
 | Dashboard 概览 | 本地+公网信息聚合 | ✅ 基本完成 |
 | Adapter 适配器 | 列出网卡 **+ 配置静态IP/DNS/DHCP**（item 4） | ✅ 展示 + IP 配置均已实现（编辑态 UI + 校验 + 二次确认 + WMI 写入）。状态变化（USB 插拔/启停）后台节流自动刷新。⚠️ 真机实测已暴露并修复两个写入 BUG（静态 IP 掩码预填错成 /32 致错误码 66、DHCP 误判「方法不存在」），写入路径仍建议再次真机复测 |
-| Scanner 扫描 | 局域网 IP/MAC/主机名扫描 | ⚠️ **仅 Windows**。`resolve_mac_address` 在非 Windows 返回 `None`，Unix 上扫不到结果 |
+| Scanner 扫描 | 局域网 IP/MAC/主机名扫描 | ✅ **Windows + Linux**。Windows 用 SendARP；Linux 用 AF_PACKET 原始套接字主动 ARP（需 CAP_NET_RAW）。其它 Unix 仍返回 `None` |
 | Traffic 流量 | 实时速率 / 会话 / 累计 | ✅ 完成 |
 | Diagnostics 诊断 | Ping/路由跟踪/端口扫描/链路质量/公网测速/内网测速 | ✅ **6/6 全部实现**：Ping、端口扫描、公网测速、路由跟踪、链路质量、内网测速 |
 | Settings 设置 | 并发数、语言等 | ✅ 语言 + 扫描并发数（快捷键可经 config.json 自定义） |
@@ -38,7 +38,7 @@ cargo check              # 快速类型检查
 - `keymap::tests::*` — 快捷键解析 / 覆盖 / 容错。
 - `utils::format::tests::*` — 速率/体积格式化。
 
-**主要面向 Windows**：`Cargo.toml` 用 `cfg` 区分平台依赖。Windows 走 `windows` (windows-rs 0.58)、`ipconfig`、`winreg`；非 Windows 走 `surge-ping`（需 root）。许多功能（网卡枚举、ARP、ICMP）只有 Windows 实现，非 Windows 分支大多为 stub。
+**Windows + Linux 双平台**：`Cargo.toml` 用 `cfg` 区分平台依赖。Windows 走 `windows` (windows-rs 0.58)、`ipconfig`、`winreg`；Linux 走 `socket2`/`nix`/`libc`（原始套接字 ICMP、AF_PACKET ARP、sysfs/getifaddrs 网卡枚举）+ `surge-ping`（Ping，需 root）；其它 Unix 分支仍为 stub。Linux 原始套接字（扫描/Trace/链路质量）需 `CAP_NET_RAW`；IP 写入需 PolicyKit(NetworkManager) 或 sudo。
 
 ## 架构
 
@@ -180,5 +180,5 @@ cargo check              # 快速类型检查
 
 - **再次实测 Adapter IP 配置写入**：两个写入 BUG 已修（见上节「真机实测踩过的两个坑」），但修复后的写入路径需管理员权限再做一次真机验证：静态↔DHCP 往返、确认掩码预填为正常值（如 255.255.255.0）。DHCP 模式下 DNS 已尽力重置为自动（`SetDNSServerSearchOrder` 传空数组 = VT_NULL）。
 - **Scanner OUI 表**：`utils::oui` 仅收录少量高置信度前缀，可扩充（或接入完整 OUI 数据库）。
-- **跨平台迁移**：当前聚焦 Windows。端口扫描/公网测速/内网测速已天然跨平台；网卡枚举/ARP/ICMP(traceroute,链路质量,含源绑定 echo_once_from)/无线信息(`utils/wlan.rs`)/IP 配置仅 Windows，非 Windows 多为 stub 或本地化"不支持"（`wlan::query` 非 Windows 返回 `None`，评分回退为仅连通性权重）。迁移时在 `cfg(not(windows))` 侧补实现，参照 `utils/net.rs`、`diagnostics/icmp.rs`。
+- **跨平台现状（Linux 已实现）**：端口扫描/公网测速/内网测速天然跨平台；网卡枚举（sysfs/getifaddrs）、ARP 扫描（AF_PACKET）、ICMP(traceroute/链路质量，含源绑定 echo_once_from)（socket2 原始套接字）、无线信息（`utils/wlan.rs`，解析 `iw dev link`）、IP 配置写入（nmcli→netplan→ip 三层后端）**在 Linux 均已有实现**（需 `CAP_NET_RAW` / sudo / `iw`，详见 README "Linux 支持" 节）。macOS 等其它 Unix 仍为 stub；继续迁移时在 `cfg(not(windows))` 侧参照 `utils/net.rs`、`diagnostics/icmp.rs`、`utils/wlan.rs`。
 - **再次实测链路质量增强**：网卡选择/源绑定探测/无线参数采集/多维评分已实现并通过 `cargo build --release` + 32 项单测；**FFI(WLAN 查询、IcmpSendEcho2Ex)与 TUI 布局需在多网卡(含一块 Wi-Fi)真机、管理员权限下手动复测**（见 `docs/superpowers/plans/2026-06-09-link-quality-enhancement.md` Task 8 清单）。
