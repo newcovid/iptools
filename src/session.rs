@@ -122,7 +122,7 @@ impl Default for TracePersist {
     }
 }
 
-/// 诊断 · 内网测速：模式（server/client）+ 对端 IP + 端口。
+/// 诊断 · 内网测速：模式（server/client）+ 对端 IP + 端口 + 协议/方向/时长/流数/包大小/速率。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LanSpeedPersist {
@@ -130,6 +130,14 @@ pub struct LanSpeedPersist {
     pub mode: String,
     pub peer: String,
     pub port: String,
+    /// "tcp" 或 "udp"。
+    pub proto: String,
+    /// "up" / "down" / "bidir"。
+    pub direction: String,
+    pub duration: String,
+    pub streams: String,
+    pub payload: String,
+    pub rate: String,
 }
 
 impl Default for LanSpeedPersist {
@@ -138,6 +146,12 @@ impl Default for LanSpeedPersist {
             mode: "server".to_string(),
             peer: String::new(),
             port: "50505".to_string(),
+            proto: "tcp".to_string(),
+            direction: "up".to_string(),
+            duration: "10".to_string(),
+            streams: "1".to_string(),
+            payload: "65536".to_string(),
+            rate: "0".to_string(),
         }
     }
 }
@@ -261,6 +275,17 @@ mod tests {
         let s: SessionState = serde_json::from_str(json).unwrap();
         assert_eq!(s.history.targets, vec!["8.8.8.8", "1.1.1.1"]);
         assert!(s.history.cidrs.is_empty());
+    }
+
+    #[test]
+    fn lan_speed_persist_backcompat_defaults() {
+        // 旧配置只有 mode/peer/port，缺新字段应回退默认
+        let json = r#"{"mode":"client","peer":"10.0.0.2","port":"5000"}"#;
+        let p: LanSpeedPersist = serde_json::from_str(json).unwrap();
+        assert_eq!(p.mode, "client");
+        assert_eq!(p.proto, "tcp");
+        assert_eq!(p.direction, "up");
+        assert_eq!(p.duration, "10");
     }
 
     #[test]
