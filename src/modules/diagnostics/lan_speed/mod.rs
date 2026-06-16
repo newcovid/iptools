@@ -44,6 +44,7 @@ struct LanConfig {
     duration: TextInput, // 秒
     streams: TextInput,
     payload: TextInput, // 字节（TCP 发送缓冲）
+    rate: TextInput,    // 目标速率 Mbps（0 = 不限速）
 }
 
 impl Default for LanConfig {
@@ -54,6 +55,7 @@ impl Default for LanConfig {
             duration: TextInput::with_text("10"),
             streams: TextInput::with_text("1"),
             payload: TextInput::with_text("65536"),
+            rate: TextInput::with_text("0"),
         }
     }
 }
@@ -73,6 +75,7 @@ enum Field {
 pub struct LanSpeedTool {
     mode: Mode,
     direction: Direction,
+    proto: Proto,
     config: LanConfig,
     config_state: ListState,
     running: bool,
@@ -109,6 +112,7 @@ impl LanSpeedTool {
         Self {
             mode: Mode::Server,
             direction: Direction::Up,
+            proto: Proto::Tcp,
             config: LanConfig::default(),
             config_state,
             running: false,
@@ -157,7 +161,7 @@ impl LanSpeedTool {
         }
     }
 
-    /// 导出可持久化参数（模式 + 对端 + 端口）。
+    /// 导出可持久化参数。
     pub fn export_persist(&self) -> LanSpeedPersist {
         LanSpeedPersist {
             mode: match self.mode {
@@ -166,14 +170,37 @@ impl LanSpeedTool {
             },
             peer: self.config.peer.value(),
             port: self.config.port.value(),
+            proto: match self.proto {
+                Proto::Tcp => "tcp".to_string(),
+                Proto::Udp => "udp".to_string(),
+            },
+            direction: match self.direction {
+                Direction::Up => "up".to_string(),
+                Direction::Down => "down".to_string(),
+                Direction::Bidir => "bidir".to_string(),
+            },
+            duration: self.config.duration.value(),
+            streams: self.config.streams.value(),
+            payload: self.config.payload.value(),
+            rate: self.config.rate.value(),
         }
     }
 
     /// 回灌持久化参数。
     pub fn apply_persist(&mut self, p: &LanSpeedPersist) {
         self.mode = if p.mode == "client" { Mode::Client } else { Mode::Server };
+        self.proto = if p.proto == "udp" { Proto::Udp } else { Proto::Tcp };
+        self.direction = match p.direction.as_str() {
+            "down" => Direction::Down,
+            "bidir" => Direction::Bidir,
+            _ => Direction::Up,
+        };
         self.config.peer = TextInput::with_text(&p.peer);
         self.config.port = TextInput::with_text(&p.port);
+        self.config.duration = TextInput::with_text(&p.duration);
+        self.config.streams = TextInput::with_text(&p.streams);
+        self.config.payload = TextInput::with_text(&p.payload);
+        self.config.rate = TextInput::with_text(&p.rate);
     }
 
     pub fn update(&mut self) {
