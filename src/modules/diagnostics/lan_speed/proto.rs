@@ -47,6 +47,9 @@ pub fn encode_frame<T: Serialize>(v: &T) -> Vec<u8> {
 }
 
 /// 从完整帧（含长度前缀）解析。长度不符返回 None。
+/// `encode_frame` 的对称对照实现；网络路径走 `read_frame`（流式），此函数主要供
+/// 单测校验帧格式，故标 `allow(dead_code)` 保持构建无警告。
+#[allow(dead_code)]
 pub fn decode_frame<T: DeserializeOwned>(frame: &[u8]) -> Option<T> {
     if frame.len() < 4 {
         return None;
@@ -298,14 +301,19 @@ async fn tcp_send_half(
 ) {
     let buf = vec![0u8; payload];
     loop {
-        if *abort.lock().unwrap() || Instant::now() >= deadline {
+        if *abort.lock().unwrap() {
             break;
         }
+        // 先发一次再判 deadline：保证每条流至少写一个 payload，
+        // 避免 worker 被调度到 deadline 之后就零字节退出（短时长/高负载下会发生）。
         match wr.write_all(&buf).await {
             Ok(_) => {
                 tx_bytes.fetch_add(payload as u64, Ordering::Relaxed);
             }
             Err(_) => break,
+        }
+        if Instant::now() >= deadline {
+            break;
         }
     }
     let _ = wr.shutdown().await;
@@ -319,16 +327,21 @@ async fn tcp_recv_half(
 ) {
     let mut buf = vec![0u8; RECV_BUF];
     loop {
-        if *abort.lock().unwrap() || Instant::now() >= deadline {
+        if *abort.lock().unwrap() {
             break;
         }
+        // 先收一次（带 500ms 超时）再判 deadline：即便本 worker 启动偏晚，
+        // 也能把对端已写入 TCP 缓冲的数据读出来，避免零字节退出。
         match tokio::time::timeout(Duration::from_millis(500), rd.read(&mut buf)).await {
             Ok(Ok(0)) => break,
             Ok(Ok(n)) => {
                 rx_bytes.fetch_add(n as u64, Ordering::Relaxed);
             }
             Ok(Err(_)) => break,
-            Err(_) => continue,
+            Err(_) => {} // 读超时：落到下方判 deadline
+        }
+        if Instant::now() >= deadline {
+            break;
         }
     }
 }
