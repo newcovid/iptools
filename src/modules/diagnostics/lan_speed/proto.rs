@@ -103,6 +103,66 @@ pub(crate) fn role_for(is_server: bool, dir: Direction) -> Role {
     }
 }
 
+/// 速率方向（双向时区分两路曲线）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Flow {
+    Tx,
+    Rx,
+}
+
+/// UDP 接收汇总（接收侧统计丢包）。
+#[derive(Debug, Clone, Default)]
+pub struct UdpSummary {
+    pub received: u64,
+    pub lost: u64,
+    pub out_of_order: u64,
+    pub jitter_ms: f64,
+}
+
+impl UdpSummary {
+    pub fn loss_pct(&self) -> f64 {
+        let total = self.received + self.lost;
+        if total == 0 {
+            0.0
+        } else {
+            self.lost as f64 / total as f64 * 100.0
+        }
+    }
+}
+
+/// 一次测试结束的汇总。
+#[derive(Debug, Clone, Default)]
+pub struct TestSummary {
+    pub tx_bytes: u64,
+    pub rx_bytes: u64,
+    pub elapsed_ms: u64,
+    pub udp: Option<UdpSummary>,
+}
+
+/// worker → UI 的事件。
+#[derive(Debug)]
+pub enum LanEvent {
+    /// i18n 键
+    Status(String),
+    Progress {
+        flow: Flow,
+        total_bytes: u64,
+        elapsed_ms: u64,
+        inst_bps: u64,
+    },
+    Summary(TestSummary),
+    /// i18n 键
+    Error(String),
+}
+
+/// 平均吞吐（字节/秒）；elapsed_ms=0 时返回 0。
+pub fn avg_bytes_per_sec(total_bytes: u64, elapsed_ms: u64) -> u64 {
+    if elapsed_ms == 0 {
+        return 0;
+    }
+    total_bytes.saturating_mul(1000) / elapsed_ms
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,5 +199,13 @@ mod tests {
         assert_eq!(role_for(true, Direction::Down), Role::Send);
         assert_eq!(role_for(true, Direction::Bidir), Role::Both);
         assert_eq!(role_for(false, Direction::Bidir), Role::Both);
+    }
+
+    #[test]
+    fn avg_bytes_per_sec_basic() {
+        assert_eq!(avg_bytes_per_sec(1_000_000, 1000), 1_000_000);
+        assert_eq!(avg_bytes_per_sec(2_000_000, 1000), 2_000_000);
+        assert_eq!(avg_bytes_per_sec(0, 0), 0); // 防除零
+        assert_eq!(avg_bytes_per_sec(500_000, 500), 1_000_000);
     }
 }
