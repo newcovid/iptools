@@ -4,6 +4,8 @@
 //! 另一端设为「客户端(发送)」填入对端 IP 后启动，即可测得链路吞吐。
 //! 纯 tokio TCP，跨平台。（对端自动发现留作后续增强，当前手动填 IP。）
 
+mod proto;
+
 use super::{config_field_item, FocusArea};
 use crate::history::HistoryStore;
 use crate::keymap::Action;
