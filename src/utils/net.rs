@@ -765,6 +765,49 @@ pub(crate) mod linux {
         let bits = if p == 0 { 0 } else { u32::MAX << (32 - p) };
         Ipv4Addr::from(bits)
     }
+
+    /// 构造以太网广播帧 + ARP request（who-has dst_ip，tell src_ip）。42 字节。
+    pub fn build_arp_request(src_mac: [u8; 6], src_ip: Ipv4Addr, dst_ip: Ipv4Addr) -> Vec<u8> {
+        let mut f = Vec::with_capacity(42);
+        f.extend_from_slice(&[0xff; 6]);
+        f.extend_from_slice(&src_mac);
+        f.extend_from_slice(&[0x08, 0x06]);
+        f.extend_from_slice(&[0x00, 0x01]);
+        f.extend_from_slice(&[0x08, 0x00]);
+        f.push(6);
+        f.push(4);
+        f.extend_from_slice(&[0x00, 0x01]);
+        f.extend_from_slice(&src_mac);
+        f.extend_from_slice(&src_ip.octets());
+        f.extend_from_slice(&[0u8; 6]);
+        f.extend_from_slice(&dst_ip.octets());
+        f
+    }
+
+    /// 从收到的帧解析 ARP reply 的 sender MAC（要求 sender IP == want_ip 且 opcode=reply）。
+    pub fn parse_arp_reply(frame: &[u8], want_ip: Ipv4Addr) -> Option<String> {
+        if frame.len() < 42 {
+            return None;
+        }
+        if frame[12..14] != [0x08, 0x06] {
+            return None;
+        }
+        if frame[20..22] != [0x00, 0x02] {
+            return None;
+        }
+        let sender_mac = &frame[22..28];
+        let sender_ip = Ipv4Addr::new(frame[28], frame[29], frame[30], frame[31]);
+        if sender_ip != want_ip {
+            return None;
+        }
+        Some(
+            sender_mac
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<Vec<_>>()
+                .join(":"),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -833,6 +876,44 @@ mod tests {
         assert_eq!(super::linux::mask_to_prefix(Ipv4Addr::new(0,0,0,0)), Some(0));
         assert_eq!(super::linux::mask_to_prefix(Ipv4Addr::new(255,0,255,0)), None);
         assert_eq!(super::linux::prefix_to_mask(24), Ipv4Addr::new(255,255,255,0));
+    }
+
+    #[test]
+    fn arp_request_frame_layout() {
+        use std::net::Ipv4Addr;
+        let src_mac = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
+        let frame = super::linux::build_arp_request(
+            src_mac,
+            Ipv4Addr::new(192, 168, 1, 10),
+            Ipv4Addr::new(192, 168, 1, 1),
+        );
+        assert_eq!(frame.len(), 42);
+        assert_eq!(&frame[0..6], &[0xff; 6]);
+        assert_eq!(&frame[6..12], &src_mac);
+        assert_eq!(&frame[12..14], &[0x08, 0x06]);
+        assert_eq!(&frame[20..22], &[0x00, 0x01]);
+        assert_eq!(&frame[38..42], &[192, 168, 1, 1]);
+    }
+
+    #[test]
+    fn arp_reply_extracts_sender_mac() {
+        use std::net::Ipv4Addr;
+        let mut frame = vec![0u8; 14];
+        frame[12..14].copy_from_slice(&[0x08, 0x06]);
+        frame.extend_from_slice(&[0x00, 0x01, 0x08, 0x00, 0x06, 0x04, 0x00, 0x02]);
+        let sender_mac = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
+        frame.extend_from_slice(&sender_mac);
+        frame.extend_from_slice(&[192, 168, 1, 1]);
+        frame.extend_from_slice(&[0u8; 6]);
+        frame.extend_from_slice(&[192, 168, 1, 10]);
+        assert_eq!(
+            super::linux::parse_arp_reply(&frame, Ipv4Addr::new(192, 168, 1, 1)),
+            Some("aa:bb:cc:dd:ee:ff".to_string())
+        );
+        assert_eq!(
+            super::linux::parse_arp_reply(&frame, Ipv4Addr::new(192, 168, 1, 2)),
+            None
+        );
     }
 
     #[test]
