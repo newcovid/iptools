@@ -163,9 +163,258 @@ pub fn avg_bytes_per_sec(total_bytes: u64, elapsed_ms: u64) -> u64 {
     total_bytes.saturating_mul(1000) / elapsed_ms
 }
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::net::TcpStream;
+use tokio::sync::mpsc;
+
+const RECV_BUF: usize = 64 * 1024;
+
+/// 多流 TCP 会话：按角色起每条连接的 send/recv，250ms 采样上报，结束发 Summary。
+pub(crate) async fn run_tcp_session(
+    conns: Vec<TcpStream>,
+    role: Role,
+    spec: TestSpec,
+    tx: mpsc::Sender<LanEvent>,
+    abort: Arc<Mutex<bool>>,
+) {
+    let tx_bytes = Arc::new(AtomicU64::new(0));
+    let rx_bytes = Arc::new(AtomicU64::new(0));
+    let _ = tx
+        .send(LanEvent::Status("diag_lan_status_connected".into()))
+        .await;
+
+    let start = Instant::now();
+    let deadline = start + Duration::from_millis(spec.duration_ms);
+    let has_tx = matches!(role, Role::Send | Role::Both);
+    let has_rx = matches!(role, Role::Recv | Role::Both);
+
+    // 采样上报任务
+    let reporter = {
+        let rtx = tx.clone();
+        let rtxb = tx_bytes.clone();
+        let rrxb = rx_bytes.clone();
+        let rabort = abort.clone();
+        tokio::spawn(async move {
+            let mut last = Instant::now();
+            let (mut last_tx, mut last_rx) = (0u64, 0u64);
+            loop {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                if *rabort.lock().unwrap() || Instant::now() >= deadline {
+                    break;
+                }
+                let now = Instant::now();
+                let since = now.duration_since(last).as_secs_f64().max(0.001);
+                let cur_tx = rtxb.load(Ordering::Relaxed);
+                let cur_rx = rrxb.load(Ordering::Relaxed);
+                let elapsed = now.duration_since(start).as_millis() as u64;
+                if has_tx {
+                    let inst = ((cur_tx - last_tx) as f64 / since) as u64;
+                    let _ = rtx
+                        .send(LanEvent::Progress {
+                            flow: Flow::Tx,
+                            total_bytes: cur_tx,
+                            elapsed_ms: elapsed,
+                            inst_bps: inst,
+                        })
+                        .await;
+                }
+                if has_rx {
+                    let inst = ((cur_rx - last_rx) as f64 / since) as u64;
+                    let _ = rtx
+                        .send(LanEvent::Progress {
+                            flow: Flow::Rx,
+                            total_bytes: cur_rx,
+                            elapsed_ms: elapsed,
+                            inst_bps: inst,
+                        })
+                        .await;
+                }
+                last = now;
+                last_tx = cur_tx;
+                last_rx = cur_rx;
+            }
+        })
+    };
+
+    let payload = spec.payload_size.max(1) as usize;
+    let mut handles = Vec::new();
+    for stream in conns {
+        let txb = tx_bytes.clone();
+        let rxb = rx_bytes.clone();
+        let ab = abort.clone();
+        handles.push(tokio::spawn(tcp_conn_worker(
+            stream, role, payload, deadline, txb, rxb, ab,
+        )));
+    }
+    for h in handles {
+        let _ = h.await;
+    }
+    let _ = reporter.await;
+
+    let elapsed = start.elapsed().as_millis() as u64;
+    let _ = tx
+        .send(LanEvent::Summary(TestSummary {
+            tx_bytes: tx_bytes.load(Ordering::Relaxed),
+            rx_bytes: rx_bytes.load(Ordering::Relaxed),
+            elapsed_ms: elapsed,
+            udp: None,
+        }))
+        .await;
+    let _ = tx.send(LanEvent::Status("diag_lan_done".into())).await;
+}
+
+async fn tcp_conn_worker(
+    stream: TcpStream,
+    role: Role,
+    payload: usize,
+    deadline: Instant,
+    tx_bytes: Arc<AtomicU64>,
+    rx_bytes: Arc<AtomicU64>,
+    abort: Arc<Mutex<bool>>,
+) {
+    let (rd, wr) = stream.into_split();
+    match role {
+        Role::Send => tcp_send_half(wr, payload, deadline, tx_bytes, abort).await,
+        Role::Recv => tcp_recv_half(rd, deadline, rx_bytes, abort).await,
+        Role::Both => {
+            let ab2 = abort.clone();
+            let h1 = tokio::spawn(tcp_send_half(wr, payload, deadline, tx_bytes, abort));
+            let h2 = tokio::spawn(tcp_recv_half(rd, deadline, rx_bytes, ab2));
+            let _ = h1.await;
+            let _ = h2.await;
+        }
+    }
+}
+
+async fn tcp_send_half(
+    mut wr: OwnedWriteHalf,
+    payload: usize,
+    deadline: Instant,
+    tx_bytes: Arc<AtomicU64>,
+    abort: Arc<Mutex<bool>>,
+) {
+    let buf = vec![0u8; payload];
+    loop {
+        if *abort.lock().unwrap() || Instant::now() >= deadline {
+            break;
+        }
+        match wr.write_all(&buf).await {
+            Ok(_) => {
+                tx_bytes.fetch_add(payload as u64, Ordering::Relaxed);
+            }
+            Err(_) => break,
+        }
+    }
+    let _ = wr.shutdown().await;
+}
+
+async fn tcp_recv_half(
+    mut rd: OwnedReadHalf,
+    deadline: Instant,
+    rx_bytes: Arc<AtomicU64>,
+    abort: Arc<Mutex<bool>>,
+) {
+    let mut buf = vec![0u8; RECV_BUF];
+    loop {
+        if *abort.lock().unwrap() || Instant::now() >= deadline {
+            break;
+        }
+        match tokio::time::timeout(Duration::from_millis(500), rd.read(&mut buf)).await {
+            Ok(Ok(0)) => break,
+            Ok(Ok(n)) => {
+                rx_bytes.fetch_add(n as u64, Ordering::Relaxed);
+            }
+            Ok(Err(_)) => break,
+            Err(_) => continue,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::mpsc;
+
+    async fn drain_summary(rx: &mut mpsc::Receiver<LanEvent>) -> Option<TestSummary> {
+        let mut s = None;
+        while let Ok(ev) = rx.try_recv() {
+            if let LanEvent::Summary(sm) = ev {
+                s = Some(sm);
+            }
+        }
+        s
+    }
+
+    #[tokio::test]
+    async fn tcp_session_up_transfers_bytes() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let spec = TestSpec {
+            proto: Proto::Tcp,
+            direction: Direction::Up,
+            duration_ms: 300,
+            streams: 2,
+            rate_mbps: 0,
+            payload_size: 4096,
+        };
+        let sspec = spec.clone();
+        let server = tokio::spawn(async move {
+            let mut conns = Vec::new();
+            for _ in 0..2 {
+                conns.push(listener.accept().await.unwrap().0);
+            }
+            let (tx, mut rx) = mpsc::channel(256);
+            let abort = Arc::new(Mutex::new(false));
+            run_tcp_session(conns, role_for(true, Direction::Up), sspec, tx, abort).await;
+            drain_summary(&mut rx).await
+        });
+
+        let mut conns = Vec::new();
+        for _ in 0..2 {
+            conns.push(TcpStream::connect(addr).await.unwrap());
+        }
+        let (ctx, _crx) = mpsc::channel(256);
+        let cabort = Arc::new(Mutex::new(false));
+        run_tcp_session(conns, role_for(false, Direction::Up), spec, ctx, cabort).await;
+
+        let summary = server.await.unwrap().unwrap();
+        assert!(summary.rx_bytes > 0, "server should have received bytes");
+    }
+
+    #[tokio::test]
+    async fn tcp_session_bidir_transfers_both_ways() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let spec = TestSpec {
+            proto: Proto::Tcp,
+            direction: Direction::Bidir,
+            duration_ms: 300,
+            streams: 1,
+            rate_mbps: 0,
+            payload_size: 4096,
+        };
+        let sspec = spec.clone();
+        let server = tokio::spawn(async move {
+            let conn = listener.accept().await.unwrap().0;
+            let (tx, mut rx) = mpsc::channel(256);
+            let abort = Arc::new(Mutex::new(false));
+            run_tcp_session(vec![conn], role_for(true, Direction::Bidir), sspec, tx, abort).await;
+            drain_summary(&mut rx).await
+        });
+        let conn = TcpStream::connect(addr).await.unwrap();
+        let (ctx, mut crx) = mpsc::channel(256);
+        let cabort = Arc::new(Mutex::new(false));
+        run_tcp_session(vec![conn], role_for(false, Direction::Bidir), spec, ctx, cabort).await;
+        let client_sum = drain_summary(&mut crx).await.unwrap();
+        let server_sum = server.await.unwrap().unwrap();
+        assert!(client_sum.tx_bytes > 0 && client_sum.rx_bytes > 0);
+        assert!(server_sum.tx_bytes > 0 && server_sum.rx_bytes > 0);
+    }
 
     #[test]
     fn frame_roundtrip_spec() {
