@@ -693,6 +693,22 @@ pub fn resolve_mac_address(_ip: Ipv4Addr) -> Option<String> {
     None
 }
 
+/// 探测当前进程是否具备 `CAP_NET_RAW`（创建原始套接字的能力）。
+/// 缺它则局域网扫描 / Ping / Trace / 链路质量都不可用——退出时据此给用户友好提示。
+/// 直接尝试创建一个原始 ICMP 套接字：成功即有能力。
+#[cfg(target_os = "linux")]
+pub fn has_cap_net_raw() -> bool {
+    unsafe {
+        let fd = libc::socket(libc::AF_INET, libc::SOCK_RAW, libc::IPPROTO_ICMP);
+        if fd < 0 {
+            false
+        } else {
+            libc::close(fd);
+            true
+        }
+    }
+}
+
 /// 解析设备主机名，多路回退以适配「系统 DNS 不可用/被 VPN 接管」的局域网场景：
 ///
 /// 1. **反向 DNS**（`getnameinfo`）：走系统当前 DNS 解析器。最快，但若无 PTR 记录

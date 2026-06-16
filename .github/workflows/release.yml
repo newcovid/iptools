@@ -75,7 +75,8 @@ jobs:
           name="iptools-$tag-linux-x86_64"
           mkdir -p "dist/$name"
           cp target/release/iptools "dist/$name/"
-          cp README.md LICENSE config.example.json "dist/$name/"
+          cp README.md LICENSE config.example.json install.sh "dist/$name/"
+          chmod +x "dist/$name/install.sh"
           tar -czf "dist/$name.tar.gz" -C dist "$name"
 
       - name: Create GitHub Release
