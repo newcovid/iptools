@@ -10,6 +10,8 @@ pub const DEFAULT_PORT: u16 = 50505;
 pub const UDP_HEADER_LEN: usize = 18; // u16 stream_id + u64 seq + u64 send_ts_nanos
 /// 注册报文哨兵 seq（不计入统计，仅用于让服务端学习客户端地址）。
 pub const REG_SEQ: u64 = u64::MAX;
+/// 注册报文重发轮数（降低首包丢失导致某流注册失败的概率）。
+const REG_ROUNDS: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Proto {
@@ -650,12 +652,19 @@ async fn run_udp_session(
     let payload = spec.payload_size.max(UDP_HEADER_LEN as u32) as usize;
     let n_streams = spec.streams.max(1);
 
-    // 客户端：先发注册报文（让服务端学到地址）。
+    // 客户端：发注册报文让服务端学到地址。多发几轮（间隔 5ms）降低首包丢失
+    // 导致某条流注册失败的概率——否则在丢包链路上做 Down/Bidir 时，丢失的注册
+    // 会让该流被误判为 ~100% 丢包（注册丢失伪影，而非真实网络丢包）。
     if let Some(d) = dest {
         let mut hdr = vec![0u8; payload];
-        for sid in 0..n_streams {
-            write_udp_header(&mut hdr, sid, REG_SEQ, 0);
-            let _ = sock.send_to(&hdr, d).await;
+        for round in 0..REG_ROUNDS {
+            for sid in 0..n_streams {
+                write_udp_header(&mut hdr, sid, REG_SEQ, 0);
+                let _ = sock.send_to(&hdr, d).await;
+            }
+            if round + 1 < REG_ROUNDS {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
         }
     }
 
@@ -1013,5 +1022,38 @@ mod tests {
         let s = server.await.unwrap().unwrap();
         let u = s.udp.unwrap();
         assert!(u.received > 0, "server should receive udp packets");
+    }
+
+    #[tokio::test]
+    async fn udp_session_bidir_both_directions() {
+        // 覆盖 Down/Bidir 路径：注册学习 + 服务端回发 + 两端各自收发统计。
+        let srv = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let srv_addr = srv.local_addr().unwrap();
+        let spec = TestSpec {
+            proto: Proto::Udp,
+            direction: Direction::Bidir,
+            duration_ms: 400,
+            streams: 1,
+            rate_mbps: 0,
+            payload_size: 1200,
+        };
+        let sspec = spec.clone();
+        let server = tokio::spawn(async move {
+            let (tx, mut rx) = mpsc::channel(1024);
+            let abort = Arc::new(Mutex::new(false));
+            run_udp_server_socket(srv, sspec, tx, abort).await;
+            drain_summary(&mut rx).await
+        });
+
+        let (ctx, mut crx) = mpsc::channel(1024);
+        let cabort = Arc::new(Mutex::new(false));
+        run_udp_client(srv_addr.ip().to_string(), srv_addr.port(), spec, ctx, cabort).await;
+
+        let client_sum = drain_summary(&mut crx).await.unwrap();
+        let server_sum = server.await.unwrap().unwrap();
+        assert!(server_sum.tx_bytes > 0 && server_sum.rx_bytes > 0, "server should send and receive");
+        assert!(client_sum.tx_bytes > 0 && client_sum.rx_bytes > 0, "client should send and receive");
+        assert!(server_sum.udp.unwrap().received > 0, "server udp stats");
+        assert!(client_sum.udp.unwrap().received > 0, "client udp stats");
     }
 }
