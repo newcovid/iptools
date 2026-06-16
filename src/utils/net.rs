@@ -439,7 +439,18 @@ pub fn link_speed_for_guid(guid: &str) -> Option<u64> {
     None
 }
 
-#[cfg(not(target_os = "windows"))]
+/// Linux：guid 即接口名，读 /sys/class/net/<if>/speed（Mbps→bps）。
+#[cfg(target_os = "linux")]
+pub fn link_speed_for_guid(guid: &str) -> Option<u64> {
+    // 防路径穿越：接口名不含 '/'。
+    if guid.is_empty() || guid.contains('/') {
+        return None;
+    }
+    let s = std::fs::read_to_string(format!("/sys/class/net/{guid}/speed")).ok()?;
+    linux::parse_speed_bps(&s)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
 pub fn link_speed_for_guid(_guid: &str) -> Option<u64> {
     None
 }
