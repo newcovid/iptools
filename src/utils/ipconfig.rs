@@ -337,12 +337,18 @@ pub(crate) mod linux {
                 let con = nm_connection_for(guid)
                     .ok_or_else(|| format!("未找到接口 {guid} 的 NetworkManager 连接"))?;
                 let addr = format!("{ip}/{prefix}");
-                run("nmcli", &["con", "mod", &con, "ipv4.method", "manual",
-                    "ipv4.addresses", &addr])?;
-                run("nmcli", &["con", "mod", &con, "ipv4.gateway",
-                    gateway.unwrap_or("")])?;
                 let dns_joined = dns.join(" ");
-                run("nmcli", &["con", "mod", &con, "ipv4.dns", &dns_joined])?;
+                // 一次 con mod 设全部属性，减少子进程（原先 3 次 mod）。主要耗时仍是 con up（激活）。
+                run(
+                    "nmcli",
+                    &[
+                        "con", "mod", &con,
+                        "ipv4.method", "manual",
+                        "ipv4.addresses", &addr,
+                        "ipv4.gateway", gateway.unwrap_or(""),
+                        "ipv4.dns", &dns_joined,
+                    ],
+                )?;
                 run("nmcli", &["con", "up", &con])?;
                 Ok(())
             }

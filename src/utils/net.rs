@@ -134,6 +134,28 @@ pub fn get_interfaces() -> Vec<InterfaceInfo> {
 
 #[cfg(target_os = "linux")]
 pub fn get_interfaces() -> Vec<InterfaceInfo> {
+    let mut ifs = linux_core_interfaces();
+    // 富化（含子进程，仅 dashboard(手动/初始)、adapter(2s 节流+阻塞池) 等低频路径调用；
+    // 扫描热路径 resolve_mac_address 走 linux_core_interfaces 不富化，避免每个 IP 起子进程）：
+    //   - SSID：无线且 up 时经 `iw` 查询
+    //   - DHCP：经 `nmcli` 查 ipv4.method（auto=DHCP），反映系统改成 DHCP 后的真实状态
+    let dhcp = linux_dhcp_map();
+    for i in ifs.iter_mut() {
+        if let Some(&is_dhcp) = dhcp.get(&i.name) {
+            i.dhcp_enabled = is_dhcp;
+        }
+        if i.interface_type == "Ieee80211" && i.is_up {
+            i.ssid = crate::utils::wlan::ssid_of(&i.name);
+        }
+    }
+    ifs
+}
+
+/// 廉价网卡枚举：仅 `/sys/class/net` + `getifaddrs`，**无任何子进程**。
+/// 供扫描热路径（`resolve_mac_address` 对每个目标 IP 调一次）复用；
+/// SSID(iw)/DHCP(nmcli) 富化由 `get_interfaces` 叠加。
+#[cfg(target_os = "linux")]
+fn linux_core_interfaces() -> Vec<InterfaceInfo> {
     use nix::ifaddrs::getifaddrs;
     use std::collections::BTreeMap;
     use std::fs;
@@ -217,11 +239,8 @@ pub fn get_interfaces() -> Vec<InterfaceInfo> {
             .map(|a| (a.ipv4, a.ipv6, a.cidr))
             .unwrap_or((Vec::new(), Vec::new(), None));
 
-        let ssid = if is_wireless && is_up {
-            crate::utils::wlan::ssid_of(&name)
-        } else {
-            None
-        };
+        // SSID 富化移至 get_interfaces（避免扫描热路径起 iw 子进程）。
+        let ssid: Option<String> = None;
 
         result.push(InterfaceInfo {
             name: name.clone(),
@@ -242,6 +261,43 @@ pub fn get_interfaces() -> Vec<InterfaceInfo> {
 
     result.sort_by(|a, b| b.is_up.cmp(&a.is_up).then_with(|| a.name.cmp(&b.name)));
     result
+}
+
+/// 经 `nmcli` 建立「网卡名 → 是否 DHCP」映射（ipv4.method=auto 视为 DHCP）。
+/// 无 nmcli / 失败时返回空表（各网卡回退为非 DHCP，与改造前一致）。仅 get_interfaces 低频调用。
+#[cfg(target_os = "linux")]
+fn linux_dhcp_map() -> std::collections::HashMap<String, bool> {
+    use std::collections::HashMap;
+    use std::process::Command;
+
+    let mut map = HashMap::new();
+    let out = match Command::new("nmcli")
+        .args(["-t", "-f", "DEVICE,CONNECTION", "device", "status"])
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return map,
+    };
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    for line in text.lines() {
+        let (dev, con) = match line.split_once(':') {
+            Some(p) => p,
+            None => continue,
+        };
+        if dev.is_empty() || con.is_empty() || con == "--" {
+            continue;
+        }
+        let method = Command::new("nmcli")
+            .args(["-t", "-f", "ipv4.method", "connection", "show", con])
+            .output()
+            .ok()
+            .filter(|m| m.status.success())
+            .map(|m| String::from_utf8_lossy(&m.stdout).to_lowercase())
+            .unwrap_or_default();
+        // 输出形如 "auto" 或 "ipv4.method:auto"；auto=DHCP，manual/disabled=静态。
+        map.insert(dev.to_string(), method.contains("auto"));
+    }
+    map
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
@@ -497,8 +553,8 @@ pub fn resolve_mac_address(ip: Ipv4Addr) -> Option<String> {
     use nix::net::if_::if_nametoindex;
     use std::time::{Duration, Instant};
 
-    // 1) 选出口网卡：目标 IP 与某网卡 ipv4 同子网。
-    let ifaces = get_interfaces();
+    // 1) 选出口网卡：目标 IP 与某网卡 ipv4 同子网。用廉价 core（不起 iw/nmcli 子进程）。
+    let ifaces = linux_core_interfaces();
     let (if_name, src_ip, src_mac) = ifaces.iter().find_map(|i| {
         if !i.is_up {
             return None;
