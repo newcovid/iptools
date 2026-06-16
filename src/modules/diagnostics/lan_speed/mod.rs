@@ -17,6 +17,10 @@ use crate::utils::i18n::I18n;
 use crate::utils::net;
 use crate::utils::textinput::{filter_host, TextInput};
 use crossterm::event::{KeyCode, KeyEvent};
+use proto::{
+    avg_bytes_per_sec, run_client, run_server, Direction, Flow, LanEvent, Proto, TestSpec,
+    TestSummary, DEFAULT_PORT,
+};
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Sparkline},
@@ -25,13 +29,7 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
-
-const DEFAULT_PORT: u16 = 50505;
-const CLIENT_DURATION_MS: u64 = 10_000;
-const BUF_SIZE: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -39,24 +37,13 @@ enum Mode {
     Client,
 }
 
-#[derive(Debug)]
-enum LanEvent {
-    /// 状态变化（i18n 键）
-    Status(String),
-    Progress {
-        total_bytes: u64,
-        elapsed_ms: u64,
-        inst_bps: u64,
-    },
-    Done,
-    /// i18n 键
-    Error(String),
-}
-
 #[derive(Debug, Clone)]
 struct LanConfig {
     peer: TextInput,
     port: TextInput,
+    duration: TextInput, // 秒
+    streams: TextInput,
+    payload: TextInput, // 字节（TCP 发送缓冲）
 }
 
 impl Default for LanConfig {
@@ -64,23 +51,45 @@ impl Default for LanConfig {
         Self {
             peer: TextInput::new(),
             port: TextInput::with_text(&DEFAULT_PORT.to_string()),
+            duration: TextInput::with_text("10"),
+            streams: TextInput::with_text("1"),
+            payload: TextInput::with_text("65536"),
         }
     }
 }
 
+/// 配置面板可见字段（顺序即显示顺序）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Field {
+    Mode,
+    Port,
+    Direction,
+    Peer,
+    Duration,
+    Streams,
+    Payload,
+}
+
 pub struct LanSpeedTool {
     mode: Mode,
+    direction: Direction,
     config: LanConfig,
     config_state: ListState,
     running: bool,
     error_key: Option<String>,
     status_key: Option<String>,
 
-    total_bytes: u64,
+    // 双路实时统计（双向时 Tx/Rx 各一份）
+    tx_bps: u64,
+    rx_bps: u64,
+    tx_total: u64,
+    rx_total: u64,
+    peak_tx: u64,
+    peak_rx: u64,
+    tx_history: VecDeque<u64>,
+    rx_history: VecDeque<u64>,
+    summary: Option<TestSummary>,
     elapsed_ms: u64,
-    current_bps: u64,
-    peak_bps: u64,
-    speed_history: VecDeque<u64>,
 
     local_ip: String,
 
@@ -99,22 +108,52 @@ impl LanSpeedTool {
         let (tx, rx) = mpsc::channel(64);
         Self {
             mode: Mode::Server,
+            direction: Direction::Up,
             config: LanConfig::default(),
             config_state,
             running: false,
             error_key: None,
             status_key: None,
-            total_bytes: 0,
+            tx_bps: 0,
+            rx_bps: 0,
+            tx_total: 0,
+            rx_total: 0,
+            peak_tx: 0,
+            peak_rx: 0,
+            tx_history: VecDeque::with_capacity(100),
+            rx_history: VecDeque::with_capacity(100),
+            summary: None,
             elapsed_ms: 0,
-            current_bps: 0,
-            peak_bps: 0,
-            speed_history: VecDeque::with_capacity(100),
             local_ip: local_ipv4().unwrap_or_else(|| "-".to_string()),
             tx,
             rx,
             abort_flag: Arc::new(Mutex::new(false)),
             history,
             mru: MruState::default(),
+        }
+    }
+
+    /// 当前可见字段序列：服务端只需端口；客户端展开全部参数。
+    fn active_fields(&self) -> Vec<Field> {
+        let mut v = vec![Field::Mode, Field::Port];
+        if self.mode == Mode::Client {
+            v.push(Field::Direction);
+            v.push(Field::Peer);
+            v.push(Field::Duration);
+            v.push(Field::Streams);
+            v.push(Field::Payload);
+        }
+        v
+    }
+
+    fn field_input_mut(&mut self, field: Field) -> Option<&mut TextInput> {
+        match field {
+            Field::Peer => Some(&mut self.config.peer),
+            Field::Port => Some(&mut self.config.port),
+            Field::Duration => Some(&mut self.config.duration),
+            Field::Streams => Some(&mut self.config.streams),
+            Field::Payload => Some(&mut self.config.payload),
+            Field::Mode | Field::Direction => None,
         }
     }
 
@@ -132,11 +171,7 @@ impl LanSpeedTool {
 
     /// 回灌持久化参数。
     pub fn apply_persist(&mut self, p: &LanSpeedPersist) {
-        self.mode = if p.mode == "client" {
-            Mode::Client
-        } else {
-            Mode::Server
-        };
+        self.mode = if p.mode == "client" { Mode::Client } else { Mode::Server };
         self.config.peer = TextInput::with_text(&p.peer);
         self.config.port = TextInput::with_text(&p.port);
     }
@@ -146,29 +181,43 @@ impl LanSpeedTool {
             match event {
                 LanEvent::Status(key) => self.status_key = Some(key),
                 LanEvent::Progress {
+                    flow,
                     total_bytes,
                     elapsed_ms,
                     inst_bps,
                 } => {
-                    self.total_bytes = total_bytes;
                     self.elapsed_ms = elapsed_ms;
-                    self.current_bps = inst_bps;
-                    self.peak_bps = self.peak_bps.max(inst_bps);
-                    if self.speed_history.len() >= 100 {
-                        self.speed_history.pop_front();
+                    match flow {
+                        Flow::Tx => {
+                            self.tx_bps = inst_bps;
+                            self.tx_total = total_bytes;
+                            self.peak_tx = self.peak_tx.max(inst_bps);
+                            push_cap(&mut self.tx_history, inst_bps, 100);
+                        }
+                        Flow::Rx => {
+                            self.rx_bps = inst_bps;
+                            self.rx_total = total_bytes;
+                            self.peak_rx = self.peak_rx.max(inst_bps);
+                            push_cap(&mut self.rx_history, inst_bps, 100);
+                        }
                     }
-                    self.speed_history.push_back(inst_bps);
                 }
-                LanEvent::Done => {
-                    self.running = false;
-                    self.current_bps = 0;
+                LanEvent::Summary(s) => {
+                    self.elapsed_ms = s.elapsed_ms;
+                    self.summary = Some(s);
                 }
                 LanEvent::Error(key) => {
                     self.error_key = Some(key);
                     self.running = false;
-                    self.current_bps = 0;
+                    self.tx_bps = 0;
+                    self.rx_bps = 0;
                 }
             }
+        }
+        if self.summary.is_some() && self.status_key.as_deref() == Some("diag_lan_done") {
+            self.running = false;
+            self.tx_bps = 0;
+            self.rx_bps = 0;
         }
     }
 
@@ -192,44 +241,60 @@ impl LanSpeedTool {
         if self.running {
             return;
         }
-        let idx = self.config_state.selected().unwrap_or(0);
+        let fields = self.active_fields();
+        let idx = self.config_state.selected().unwrap_or(0).min(fields.len() - 1);
+        let field = fields[idx];
 
-        // idx 0 = 模式（Left/Right 切换）；idx 1 = 对端 IP（文本）；idx 2 = 端口（数字）
-        if idx == 0 {
-            if matches!(action, Some(Action::Left) | Some(Action::Right)) {
-                self.mode = match self.mode {
-                    Mode::Server => Mode::Client,
-                    Mode::Client => Mode::Server,
-                };
-                return;
+        match field {
+            Field::Mode => {
+                if matches!(action, Some(Action::Left) | Some(Action::Right)) {
+                    self.mode = match self.mode {
+                        Mode::Server => Mode::Client,
+                        Mode::Client => Mode::Server,
+                    };
+                    let n = self.active_fields().len();
+                    if idx >= n {
+                        self.config_state.select(Some(n - 1));
+                    }
+                    return;
+                }
             }
-        } else {
-            // MRU 历史下拉 / 行尾灰字采纳 / Ctrl+R 开下拉，仅对对端字段（idx==1）启用。
-            let on_peer = idx == 1;
-            if self.mru.open || on_peer {
+            Field::Direction => {
+                if matches!(action, Some(Action::Left) | Some(Action::Right)) {
+                    self.direction = match (self.direction, action) {
+                        (Direction::Up, Some(Action::Right)) => Direction::Down,
+                        (Direction::Down, Some(Action::Right)) => Direction::Bidir,
+                        (Direction::Bidir, Some(Action::Right)) => Direction::Up,
+                        (Direction::Up, _) => Direction::Bidir,
+                        (Direction::Down, _) => Direction::Up,
+                        (Direction::Bidir, _) => Direction::Down,
+                    };
+                    return;
+                }
+            }
+            Field::Peer => {
                 if crate::ui::mru::handle_mru_key(
                     &mut self.config.peer,
                     &mut self.mru,
                     &self.history.borrow().targets,
                     key,
                     action,
-                    self.running, // 此分支已在 !running 下（方法开头 early-return）
+                    self.running,
                 ) {
                     return;
                 }
-            }
-
-            // idx 1 对端 IP（主机名字符），idx 2 端口（数字）；均带光标编辑。
-            let too_long =
-                matches!(key.code, KeyCode::Char(_)) && self.field_mut(idx).len() >= 64;
-            if !too_long {
-                let consumed = if idx == 1 {
-                    self.field_mut(idx).handle_key(key.code, filter_host)
-                } else {
-                    self.field_mut(idx).handle_key(key.code, |c| c.is_ascii_digit())
-                };
-                if consumed {
+                let too_long =
+                    matches!(key.code, KeyCode::Char(_)) && self.config.peer.len() >= 64;
+                if !too_long && self.config.peer.handle_key(key.code, filter_host) {
                     return;
+                }
+            }
+            _ => {
+                if let Some(input) = self.field_input_mut(field) {
+                    let too_long = matches!(key.code, KeyCode::Char(_)) && input.len() >= 16;
+                    if !too_long && input.handle_key(key.code, |c| c.is_ascii_digit()) {
+                        return;
+                    }
                 }
             }
         }
@@ -241,33 +306,33 @@ impl LanSpeedTool {
         }
     }
 
-    fn field_mut(&mut self, idx: usize) -> &mut TextInput {
-        match idx {
-            1 => &mut self.config.peer,
-            _ => &mut self.config.port,
-        }
-    }
-
     fn next_config(&mut self) {
-        let i = self.config_state.selected().map(|i| (i + 1) % 3).unwrap_or(0);
+        let n = self.active_fields().len();
+        let i = self.config_state.selected().map(|i| (i + 1) % n).unwrap_or(0);
         self.config_state.select(Some(i));
     }
 
     fn prev_config(&mut self) {
+        let n = self.active_fields().len();
         let i = self
             .config_state
             .selected()
-            .map(|i| if i == 0 { 2 } else { i - 1 })
+            .map(|i| if i == 0 { n - 1 } else { i - 1 })
             .unwrap_or(0);
         self.config_state.select(Some(i));
     }
 
     fn reset_stats(&mut self) {
-        self.total_bytes = 0;
+        self.tx_bps = 0;
+        self.rx_bps = 0;
+        self.tx_total = 0;
+        self.rx_total = 0;
+        self.peak_tx = 0;
+        self.peak_rx = 0;
+        self.tx_history.clear();
+        self.rx_history.clear();
+        self.summary = None;
         self.elapsed_ms = 0;
-        self.current_bps = 0;
-        self.peak_bps = 0;
-        self.speed_history.clear();
     }
 
     fn start(&mut self) {
@@ -275,14 +340,6 @@ impl LanSpeedTool {
         if port == 0 {
             self.error_key = Some("diag_lan_err".to_string());
             return;
-        }
-
-        // 仅客户端模式且对端非空时记录到历史。
-        if matches!(self.mode, Mode::Client) {
-            let peer = self.config.peer.value();
-            if !peer.trim().is_empty() {
-                self.history.borrow_mut().targets.record(&peer);
-            }
         }
 
         self.running = true;
@@ -293,15 +350,54 @@ impl LanSpeedTool {
 
         let tx = self.tx.clone();
         let abort = self.abort_flag.clone();
-        let mode = self.mode;
-        let peer = self.config.peer.value().trim().to_string();
 
-        tokio::spawn(async move {
-            match mode {
-                Mode::Server => run_server(port, tx, abort).await,
-                Mode::Client => run_client(peer, port, tx, abort).await,
+        match self.mode {
+            Mode::Server => {
+                tokio::spawn(async move { run_server(port, tx, abort).await });
             }
-        });
+            Mode::Client => {
+                let peer = self.config.peer.value().trim().to_string();
+                if peer.is_empty() {
+                    self.error_key = Some("diag_lan_err".to_string());
+                    self.running = false;
+                    return;
+                }
+                self.history.borrow_mut().targets.record(&peer);
+
+                let duration_ms = self
+                    .config
+                    .duration
+                    .value()
+                    .parse::<u64>()
+                    .unwrap_or(10)
+                    .clamp(1, 600)
+                    * 1000;
+                let streams = self
+                    .config
+                    .streams
+                    .value()
+                    .parse::<u16>()
+                    .unwrap_or(1)
+                    .clamp(1, 32);
+                let payload_size = self
+                    .config
+                    .payload
+                    .value()
+                    .parse::<u32>()
+                    .unwrap_or(65536)
+                    .clamp(1024, 1_048_576);
+
+                let spec = TestSpec {
+                    proto: Proto::Tcp,
+                    direction: self.direction,
+                    duration_ms,
+                    streams,
+                    rate_mbps: 0,
+                    payload_size,
+                };
+                tokio::spawn(async move { run_client(peer, port, spec, tx, abort).await });
+            }
+        }
     }
 
     fn stop(&mut self) {
@@ -364,26 +460,21 @@ impl LanSpeedTool {
             return;
         }
 
+        let bidir = self.mode == Mode::Client && self.direction == Direction::Bidir;
         let chunks = Layout::default()
-            .direction(Direction::Vertical)
+            .direction(ratatui::layout::Direction::Vertical)
             .constraints([
-                Constraint::Length(1), // local ip (server) / peer (client)
-                Constraint::Length(2), // throughput
-                Constraint::Length(1), // total / elapsed
-                Constraint::Min(3),    // sparkline
-                Constraint::Length(1), // status
+                Constraint::Length(1),
+                Constraint::Length(if bidir { 2 } else { 1 }),
+                Constraint::Min(3),
+                Constraint::Length(5),
+                Constraint::Length(1),
             ])
             .split(inner);
 
-        // 端点信息
         let port_str = self.config.port.value();
         let endpoint = match self.mode {
-            Mode::Server => format!(
-                "{}: {}:{}",
-                i18n.t("diag_lan_localip"),
-                self.local_ip,
-                port_str
-            ),
+            Mode::Server => format!("{}: {}:{}", i18n.t("diag_lan_localip"), self.local_ip, port_str),
             Mode::Client => {
                 let peer = self.config.peer.value();
                 let peer_disp = if peer.is_empty() { "-".to_string() } else { peer };
@@ -395,76 +486,104 @@ impl LanSpeedTool {
             chunks[0],
         );
 
-        // 吞吐量
-        let tput = Line::from(vec![
-            Span::styled(
-                format!("{}  ", i18n.t("diag_lan_throughput")),
-                Style::default().fg(Color::Gray),
-            ),
-            Span::styled(
-                format_speed_dual(self.current_bps),
-                Style::default()
-                    .fg(theme::COLOR_PRIMARY)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]);
-        f.render_widget(Paragraph::new(tput), chunks[1]);
+        let has_tx = self.tx_total > 0 || self.tx_bps > 0;
+        let has_rx = self.rx_total > 0 || self.rx_bps > 0;
+        let mut tput_lines = Vec::new();
+        if bidir || has_tx {
+            tput_lines.push(Line::from(vec![
+                Span::styled(format!("{} ", i18n.t("diag_lan_tx")), Style::default().fg(Color::Gray)),
+                Span::styled(format_speed_dual(self.tx_bps), Style::default().fg(theme::COLOR_PRIMARY).add_modifier(Modifier::BOLD)),
+            ]));
+        }
+        if bidir || (!has_tx && has_rx) || (self.mode == Mode::Server) {
+            tput_lines.push(Line::from(vec![
+                Span::styled(format!("{} ", i18n.t("diag_lan_rx")), Style::default().fg(Color::Gray)),
+                Span::styled(format_speed_dual(self.rx_bps), Style::default().fg(theme::COLOR_PRIMARY).add_modifier(Modifier::BOLD)),
+            ]));
+        }
+        if tput_lines.is_empty() {
+            tput_lines.push(Line::from(Span::styled(
+                format_speed_dual(0),
+                Style::default().fg(theme::COLOR_PRIMARY),
+            )));
+        }
+        f.render_widget(Paragraph::new(tput_lines), chunks[1]);
 
-        // 传输量 / 用时
-        let line = Line::from(vec![
-            Span::styled(
-                format!("{}: ", i18n.t("diag_lan_total")),
-                Style::default().fg(Color::Gray),
-            ),
-            Span::styled(
-                format!("{:<16}", format_bytes(self.total_bytes)),
-                Style::default().fg(Color::White),
-            ),
-            Span::styled(
-                format!("{}: ", i18n.t("diag_lan_elapsed")),
-                Style::default().fg(Color::Gray),
-            ),
-            Span::styled(
-                format!("{:.1}s", self.elapsed_ms as f64 / 1000.0),
-                Style::default().fg(Color::White),
-            ),
-        ]);
-        f.render_widget(Paragraph::new(line), chunks[2]);
-
-        // 吞吐曲线
-        let data: Vec<u64> = self.speed_history.iter().cloned().collect();
+        let data: Vec<u64> = if has_tx {
+            self.tx_history.iter().cloned().collect()
+        } else {
+            self.rx_history.iter().cloned().collect()
+        };
         let sparkline = Sparkline::default()
-            .block(
-                Block::default()
-                    .borders(Borders::TOP)
-                    .title(i18n.t("diag_lan_history")),
-            )
+            .block(Block::default().borders(Borders::TOP).title(i18n.t("diag_lan_history")))
             .data(&data)
             .style(Style::default().fg(theme::COLOR_PRIMARY));
-        f.render_widget(sparkline, chunks[3]);
+        f.render_widget(sparkline, chunks[2]);
 
-        // 状态
+        self.draw_summary(f, chunks[3], i18n);
+
         let (text, style) = if let Some(key) = &self.error_key {
             (i18n.t(key), Style::default().fg(theme::COLOR_ERROR))
         } else if self.running {
-            let st = self
-                .status_key
-                .as_ref()
-                .map(|k| i18n.t(k))
-                .unwrap_or_else(|| i18n.t("diag_status_running"));
-            (
-                format!("{} | {}", st, i18n.t("diag_msg_stop")),
-                Style::default().fg(Color::Green),
-            )
-        } else if self.total_bytes > 0 {
+            let st = self.status_key.as_ref().map(|k| i18n.t(k)).unwrap_or_else(|| i18n.t("diag_status_running"));
+            (format!("{} | {}", st, i18n.t("diag_msg_stop")), Style::default().fg(Color::Green))
+        } else if self.summary.is_some() {
             (i18n.t("diag_lan_done"), Style::default().fg(theme::COLOR_SECONDARY))
         } else {
-            (
-                format!("{} | {}", i18n.t("diag_status_stopped"), i18n.t("diag_msg_start")),
-                Style::default().fg(Color::Red),
-            )
+            (format!("{} | {}", i18n.t("diag_status_stopped"), i18n.t("diag_msg_start")), Style::default().fg(Color::Red))
         };
         f.render_widget(Paragraph::new(text).style(style), chunks[4]);
+    }
+
+    fn draw_summary(&self, f: &mut Frame, area: Rect, i18n: &I18n) {
+        let s = match &self.summary {
+            Some(s) => s,
+            None => {
+                f.render_widget(
+                    Paragraph::new(i18n.t("diag_lan_summary_wait"))
+                        .style(Style::default().fg(Color::DarkGray)),
+                    area,
+                );
+                return;
+            }
+        };
+        let gray = Style::default().fg(Color::Gray);
+        let white = Style::default().fg(Color::White);
+        let mut lines = Vec::new();
+        let mk = |label: String, bytes: u64, peak: u64| -> Line {
+            Line::from(vec![
+                Span::styled(label, gray),
+                Span::styled(format!("{} ", format_speed_dual(avg_bytes_per_sec(bytes, s.elapsed_ms))), white),
+                Span::styled(format!("{}: ", i18n.t("diag_lan_peak")), gray),
+                Span::styled(format!("{} ", format_speed_dual(peak)), white),
+                Span::styled(format!("{}: ", i18n.t("diag_lan_total")), gray),
+                Span::styled(format_bytes(bytes), white),
+            ])
+        };
+        if s.tx_bytes > 0 {
+            lines.push(mk(format!("{} ", i18n.t("diag_lan_tx_avg")), s.tx_bytes, self.peak_tx));
+        }
+        if s.rx_bytes > 0 {
+            lines.push(mk(format!("{} ", i18n.t("diag_lan_rx_avg")), s.rx_bytes, self.peak_rx));
+        }
+        lines.push(Line::from(vec![
+            Span::styled(format!("{}: ", i18n.t("diag_lan_elapsed")), gray),
+            Span::styled(format!("{:.1}s", s.elapsed_ms as f64 / 1000.0), white),
+        ]));
+        if let Some(u) = &s.udp {
+            lines.push(Line::from(vec![
+                Span::styled(format!("{}: ", i18n.t("diag_lan_loss")), gray),
+                Span::styled(
+                    format!("{:.2}%  ", u.loss_pct()),
+                    Style::default().fg(if u.loss_pct() > 1.0 { Color::Red } else { Color::Green }),
+                ),
+                Span::styled(format!("{}: ", i18n.t("diag_lan_ooo")), gray),
+                Span::styled(format!("{}  ", u.out_of_order), white),
+                Span::styled(format!("{}: ", i18n.t("diag_lan_jitter")), gray),
+                Span::styled(format!("{:.2} ms", u.jitter_ms), white),
+            ]));
+        }
+        f.render_widget(Paragraph::new(lines), area);
     }
 
     fn draw_config(
@@ -487,239 +606,123 @@ impl LanSpeedTool {
         let inner = block.inner(area);
         f.render_widget(block, area);
 
-        let mode_str = match self.mode {
-            Mode::Server => i18n.t("diag_lan_server"),
-            Mode::Client => i18n.t("diag_lan_client"),
-        };
         let is_active = is_focused && active_focus == FocusArea::Config;
-        let selected = self.config_state.selected();
+        let fields = self.active_fields();
+        let sel = self.config_state.selected().unwrap_or(0).min(fields.len() - 1);
+
         let layout = Layout::default()
-            .direction(Direction::Vertical)
+            .direction(ratatui::layout::Direction::Vertical)
             .constraints([Constraint::Min(6), Constraint::Length(2)])
             .split(inner);
 
-        // 第 0 行：模式（预设切换，←/→），手工拼装以匹配统一布局；
-        // 第 1/2 行：对端 IP / 端口（直接输入，带光标），复用统一字段渲染。
-        let mut list_items: Vec<ListItem> = Vec::with_capacity(3);
-
-        let mode_sel = selected == Some(0);
-        let mode_base = if mode_sel && is_active {
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::White)
-        };
-        let mode_marker = if mode_sel { ">> " } else { "   " };
-        let mut mode_spans = vec![
-            Span::styled(mode_marker.to_string(), mode_base),
-            Span::styled(mode_str, mode_base),
-        ];
-        if mode_sel && is_active {
-            mode_spans.push(Span::styled(
-                format!("  ({})", i18n.t("diag_hint_switch")),
-                Style::default().fg(Color::DarkGray),
-            ));
-        }
-        list_items.push(ListItem::new(vec![
-            Line::from(Span::styled(
-                format!("{}:", i18n.t("diag_lan_mode")),
-                Style::default().fg(if mode_sel { Color::Yellow } else { Color::Gray }),
-            )),
-            Line::from(mode_spans),
-        ]));
-
-        // idx==1 对端 IP：带 MRU 灰字补全，手动拼装。
-        {
-            let is_sel = selected == Some(1);
+        let mut items: Vec<ListItem> = Vec::with_capacity(fields.len());
+        for (i, field) in fields.iter().enumerate() {
+            let is_sel = i == sel;
             let active = is_sel && is_active && !self.running;
-            let val_base = if is_sel && is_active {
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::White)
-            };
-            let marker = if is_sel { ">> " } else { "   " };
-            let mut spans = vec![Span::styled(marker.to_string(), val_base)];
-            spans.extend(crate::ui::mru::mru_ghost_spans(
-                &self.config.peer,
-                &self.history.borrow().targets,
-                active,
-                val_base,
-            ));
-            if active {
-                spans.push(Span::styled(
-                    format!("  ({})", i18n.t("diag_hint_input")),
-                    Style::default().fg(Color::DarkGray),
-                ));
+            match field {
+                Field::Mode => {
+                    let val = match self.mode {
+                        Mode::Server => i18n.t("diag_lan_server"),
+                        Mode::Client => i18n.t("diag_lan_client"),
+                    };
+                    items.push(self.toggle_item(&i18n.t("diag_lan_mode"), &val, is_sel, is_active, i18n));
+                }
+                Field::Direction => {
+                    let val = match self.direction {
+                        Direction::Up => i18n.t("diag_lan_dir_up"),
+                        Direction::Down => i18n.t("diag_lan_dir_down"),
+                        Direction::Bidir => i18n.t("diag_lan_dir_bidir"),
+                    };
+                    items.push(self.toggle_item(&i18n.t("diag_lan_direction"), &val, is_sel, is_active, i18n));
+                }
+                Field::Peer => {
+                    let val_base = if is_sel && is_active {
+                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::White)
+                    };
+                    let marker = if is_sel { ">> " } else { "   " };
+                    let mut spans = vec![Span::styled(marker.to_string(), val_base)];
+                    spans.extend(crate::ui::mru::mru_ghost_spans(
+                        &self.config.peer,
+                        &self.history.borrow().targets,
+                        active,
+                        val_base,
+                    ));
+                    if active {
+                        spans.push(Span::styled(
+                            format!("  ({})", i18n.t("diag_hint_input")),
+                            Style::default().fg(Color::DarkGray),
+                        ));
+                    }
+                    let label_line = Line::from(Span::styled(
+                        format!("{}:", i18n.t("diag_lan_peer")),
+                        Style::default().fg(if is_sel { Color::Yellow } else { Color::Gray }),
+                    ));
+                    items.push(ListItem::new(vec![label_line, Line::from(spans)]));
+                }
+                _ => {
+                    let (label, input) = match field {
+                        Field::Port => (i18n.t("diag_lan_port"), &self.config.port),
+                        Field::Duration => (i18n.t("diag_lan_duration"), &self.config.duration),
+                        Field::Streams => (i18n.t("diag_lan_streams"), &self.config.streams),
+                        Field::Payload => (i18n.t("diag_lan_payload"), &self.config.payload),
+                        _ => unreachable!(),
+                    };
+                    let hint = if active { Some(i18n.t("diag_hint_digits")) } else { None };
+                    items.push(config_field_item(&label, is_sel, is_active, input, active, hint));
+                }
             }
-            let label_line = Line::from(Span::styled(
-                format!("{}:", i18n.t("diag_lan_peer")),
-                Style::default().fg(if is_sel { Color::Yellow } else { Color::Gray }),
-            ));
-            list_items.push(ListItem::new(vec![label_line, Line::from(spans)]));
         }
-
-        // idx==2 端口：纯数字，走统一字段渲染。
-        {
-            let is_sel = selected == Some(2);
-            let active = is_sel && is_active && !self.running;
-            let hint = if active {
-                Some(i18n.t("diag_hint_digits"))
-            } else {
-                None
-            };
-            list_items.push(config_field_item(
-                &i18n.t("diag_lan_port"),
-                is_sel,
-                is_active,
-                &self.config.port,
-                active,
-                hint,
-            ));
-        }
-
-        f.render_widget(List::new(list_items), layout[0]);
+        f.render_widget(List::new(items), layout[0]);
 
         let hint = Paragraph::new(i18n.t("diag_lan_hint"))
             .style(Style::default().fg(Color::DarkGray))
             .wrap(ratatui::widgets::Wrap { trim: true });
         f.render_widget(hint, layout[1]);
     }
+
+    /// 预设切换字段（Mode/Direction）的两行渲染（标签 + 值 + ←→ 提示）。
+    fn toggle_item(
+        &self,
+        label: &str,
+        value: &str,
+        is_sel: bool,
+        is_active: bool,
+        i18n: &I18n,
+    ) -> ListItem<'static> {
+        let base = if is_sel && is_active {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        let marker = if is_sel { ">> " } else { "   " };
+        let mut spans = vec![
+            Span::styled(marker.to_string(), base),
+            Span::styled(value.to_string(), base),
+        ];
+        if is_sel && is_active {
+            spans.push(Span::styled(
+                format!("  ({})", i18n.t("diag_hint_switch")),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        ListItem::new(vec![
+            Line::from(Span::styled(
+                format!("{}:", label),
+                Style::default().fg(if is_sel { Color::Yellow } else { Color::Gray }),
+            )),
+            Line::from(spans),
+        ])
+    }
 }
 
-/// 服务端：监听端口，接受一个连接并统计接收吞吐。
-async fn run_server(port: u16, tx: mpsc::Sender<LanEvent>, abort: Arc<Mutex<bool>>) {
-    use tokio::net::TcpListener;
-
-    let listener = match TcpListener::bind(("0.0.0.0", port)).await {
-        Ok(l) => l,
-        Err(_) => {
-            let _ = tx.send(LanEvent::Error("diag_lan_err".into())).await;
-            return;
-        }
-    };
-    let _ = tx
-        .send(LanEvent::Status("diag_lan_status_listening".into()))
-        .await;
-
-    // 等待连接（可中断）
-    let mut stream = loop {
-        if *abort.lock().unwrap() {
-            return;
-        }
-        match tokio::time::timeout(Duration::from_millis(500), listener.accept()).await {
-            Ok(Ok((s, _))) => break s,
-            Ok(Err(_)) => {
-                let _ = tx.send(LanEvent::Error("diag_lan_err".into())).await;
-                return;
-            }
-            Err(_) => continue, // 超时，轮询 abort
-        }
-    };
-
-    let _ = tx
-        .send(LanEvent::Status("diag_lan_status_connected".into()))
-        .await;
-
-    let mut buf = vec![0u8; BUF_SIZE];
-    let start = Instant::now();
-    let mut last = start;
-    let mut last_bytes = 0u64;
-    let mut total = 0u64;
-
-    loop {
-        if *abort.lock().unwrap() {
-            break;
-        }
-        match tokio::time::timeout(Duration::from_millis(500), stream.read(&mut buf)).await {
-            Ok(Ok(0)) => break, // 对端关闭
-            Ok(Ok(n)) => {
-                total += n as u64;
-                emit_progress(&tx, start, &mut last, &mut last_bytes, total).await;
-            }
-            Ok(Err(_)) => break,
-            Err(_) => continue,
-        }
+/// 把值推入定长 ring buffer。
+fn push_cap(buf: &mut std::collections::VecDeque<u64>, v: u64, cap: usize) {
+    if buf.len() >= cap {
+        buf.pop_front();
     }
-
-    let _ = tx.send(LanEvent::Done).await;
-}
-
-/// 客户端：连接对端并持续发送，统计发送吞吐，约 10 秒后结束。
-async fn run_client(peer: String, port: u16, tx: mpsc::Sender<LanEvent>, abort: Arc<Mutex<bool>>) {
-    use tokio::net::TcpStream;
-
-    if peer.is_empty() {
-        let _ = tx.send(LanEvent::Error("diag_lan_err".into())).await;
-        return;
-    }
-
-    let _ = tx
-        .send(LanEvent::Status("diag_lan_status_connecting".into()))
-        .await;
-
-    let mut stream = match TcpStream::connect((peer.as_str(), port)).await {
-        Ok(s) => s,
-        Err(_) => {
-            let _ = tx.send(LanEvent::Error("diag_lan_err".into())).await;
-            return;
-        }
-    };
-    let _ = tx
-        .send(LanEvent::Status("diag_lan_status_connected".into()))
-        .await;
-
-    let buf = vec![0u8; BUF_SIZE];
-    let start = Instant::now();
-    let mut last = start;
-    let mut last_bytes = 0u64;
-    let mut total = 0u64;
-
-    loop {
-        if *abort.lock().unwrap() {
-            break;
-        }
-        match stream.write_all(&buf).await {
-            Ok(_) => {
-                total += buf.len() as u64;
-                emit_progress(&tx, start, &mut last, &mut last_bytes, total).await;
-                if start.elapsed().as_millis() as u64 >= CLIENT_DURATION_MS {
-                    break;
-                }
-            }
-            Err(_) => break,
-        }
-    }
-
-    let _ = stream.shutdown().await;
-    let _ = tx.send(LanEvent::Done).await;
-}
-
-/// 每累计 ≥250ms 发一次吞吐采样。
-async fn emit_progress(
-    tx: &mpsc::Sender<LanEvent>,
-    start: Instant,
-    last: &mut Instant,
-    last_bytes: &mut u64,
-    total: u64,
-) {
-    let now = Instant::now();
-    let since = now.duration_since(*last).as_secs_f64();
-    if since >= 0.25 {
-        let inst = ((total - *last_bytes) as f64 / since) as u64;
-        let elapsed = now.duration_since(start).as_millis() as u64;
-        let _ = tx
-            .send(LanEvent::Progress {
-                total_bytes: total,
-                elapsed_ms: elapsed,
-                inst_bps: inst,
-            })
-            .await;
-        *last = now;
-        *last_bytes = total;
-    }
+    buf.push_back(v);
 }
 
 /// 取一个活跃物理接口的 IPv4，用于服务端显示监听地址。
