@@ -132,7 +132,119 @@ pub fn get_interfaces() -> Vec<InterfaceInfo> {
     result
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+pub fn get_interfaces() -> Vec<InterfaceInfo> {
+    use nix::ifaddrs::getifaddrs;
+    use std::collections::BTreeMap;
+    use std::fs;
+
+    // 1) 用 getifaddrs 收集每个接口的 IPv4/IPv6 + 前缀。
+    struct Acc {
+        ipv4: Vec<String>,
+        ipv6: Vec<String>,
+        cidr: Option<String>,
+    }
+    let mut accs: BTreeMap<String, Acc> = BTreeMap::new();
+
+    if let Ok(addrs) = getifaddrs() {
+        for ifa in addrs {
+            let name = ifa.interface_name.clone();
+            if name == "lo" {
+                continue;
+            }
+            let entry = accs.entry(name).or_insert(Acc {
+                ipv4: Vec::new(),
+                ipv6: Vec::new(),
+                cidr: None,
+            });
+            if let Some(addr) = ifa.address.as_ref() {
+                if let Some(sin) = addr.as_sockaddr_in() {
+                    let ip = sin.ip(); // 已是 Ipv4Addr
+                    if !ip.is_loopback() {
+                        let prefix = ifa
+                            .netmask
+                            .as_ref()
+                            .and_then(|m| m.as_sockaddr_in())
+                            .map(|m| m.ip())
+                            .and_then(linux::mask_to_prefix);
+                        if entry.cidr.is_none() {
+                            if let Some(p) = prefix {
+                                entry.cidr = Some(format!("{}/{}", ip, p));
+                            }
+                        }
+                        entry.ipv4.push(ip.to_string());
+                    }
+                } else if let Some(sin6) = addr.as_sockaddr_in6() {
+                    let ip6 = sin6.ip(); // 已是 Ipv6Addr
+                    if !ip6.is_loopback() {
+                        entry.ipv6.push(ip6.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // 2) 遍历 /sys/class/net，合并 sysfs 元数据 + getifaddrs 地址。
+    let mut result = Vec::new();
+    let sys = match fs::read_dir("/sys/class/net") {
+        Ok(d) => d,
+        Err(_) => return result,
+    };
+    for ent in sys.flatten() {
+        let name = ent.file_name().to_string_lossy().to_string();
+        if name == "lo" {
+            continue;
+        }
+        let base = format!("/sys/class/net/{name}");
+        let read = |f: &str| fs::read_to_string(format!("{base}/{f}")).unwrap_or_default();
+
+        let mac = read("address").trim().to_string();
+        let is_up = linux::parse_operstate(&read("operstate"));
+        let link_speed_bps = linux::parse_speed_bps(&read("speed"));
+        let is_physical = fs::symlink_metadata(format!("{base}/device")).is_ok();
+        let is_wireless = fs::metadata(format!("{base}/wireless")).is_ok()
+            || fs::symlink_metadata(format!("{base}/phy80211")).is_ok();
+        let interface_type = if is_wireless {
+            "Ieee80211".to_string()
+        } else if is_physical {
+            "EthernetCsmacd".to_string()
+        } else {
+            "Other".to_string()
+        };
+
+        let acc = accs.remove(&name);
+        let (ipv4, ipv6, cidr) = acc
+            .map(|a| (a.ipv4, a.ipv6, a.cidr))
+            .unwrap_or((Vec::new(), Vec::new(), None));
+
+        let ssid = if is_wireless && is_up {
+            crate::utils::wlan::ssid_of(&name)
+        } else {
+            None
+        };
+
+        result.push(InterfaceInfo {
+            name: name.clone(),
+            description: name.clone(),
+            mac,
+            ipv4,
+            ipv6,
+            is_up,
+            ssid,
+            dhcp_enabled: false,
+            is_physical,
+            interface_type,
+            cidr,
+            guid: name.clone(),
+            link_speed_bps,
+        });
+    }
+
+    result.sort_by(|a, b| b.is_up.cmp(&a.is_up).then_with(|| a.name.cmp(&b.name)));
+    result
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
 pub fn get_interfaces() -> Vec<InterfaceInfo> {
     Vec::new()
 }

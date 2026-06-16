@@ -233,6 +233,12 @@ pub fn query(_guid: &str) -> Option<WirelessInfo> {
     None
 }
 
+/// 取无线网卡当前 SSID（Linux 在后续任务用 `iw` 实现；占位先返回 None）。
+#[cfg(not(target_os = "windows"))]
+pub fn ssid_of(_iface: &str) -> Option<String> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
