@@ -31,7 +31,8 @@ rand = "0.8"
 #   libc       —— AF_PACKET 原始套接字（主动 ARP）
 [target.'cfg(unix)'.dependencies]
 surge-ping = "0.8"
-socket2 = "0.5"
+# features=["all"]：启用 Type::RAW / Protocol::ICMPV4 等（默认 feature 不含）
+socket2 = { version = "0.5", features = ["all"] }
 nix = { version = "0.29", features = ["net"] }
 libc = "0.2"
 
