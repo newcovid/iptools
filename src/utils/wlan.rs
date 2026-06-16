@@ -228,15 +228,59 @@ pub fn query(guid: &str) -> Option<WirelessInfo> {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+/// Linux：guid 即接口名。组合 `iw link` + band/channel 纯函数。缺字段降级。
+#[cfg(target_os = "linux")]
+pub fn query(guid: &str) -> Option<WirelessInfo> {
+    let link = linux::parse_iw_link(&run_iw(&["dev", guid, "link"])?)?;
+    let freq_mhz = link.freq_mhz.unwrap_or(0);
+    let (band, channel) = band_and_channel(freq_mhz * 1000); // 纯函数吃 kHz
+    let signal_quality = link
+        .signal_dbm
+        .map(|d| (((d + 100).max(0).min(50)) as u32) * 2) // -100..-50dBm → 0..100%
+        .unwrap_or(0);
+    Some(WirelessInfo {
+        ssid: link.ssid.unwrap_or_default(),
+        bssid: link.bssid.unwrap_or_default(),
+        signal_quality,
+        rssi_dbm: link.signal_dbm.unwrap_or_else(|| rssi_from_quality(signal_quality)),
+        phy_type: "-".to_string(),
+        wifi_gen: 0,
+        band,
+        channel,
+        freq_mhz,
+        rx_rate_mbps: link.rx_mbps.unwrap_or(0),
+        tx_rate_mbps: link.tx_mbps.unwrap_or(0),
+        auth: "-".to_string(),
+        cipher: "-".to_string(),
+    })
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
 pub fn query(_guid: &str) -> Option<WirelessInfo> {
     None
 }
 
-/// 取无线网卡当前 SSID（Linux 在后续任务用 `iw` 实现；占位先返回 None）。
-#[cfg(not(target_os = "windows"))]
+/// Linux：经 `iw dev <if> link` 取当前 SSID。
+#[cfg(target_os = "linux")]
+pub fn ssid_of(iface: &str) -> Option<String> {
+    let out = run_iw(&["dev", iface, "link"])?;
+    linux::parse_iw_link(&out).and_then(|l| l.ssid)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
 pub fn ssid_of(_iface: &str) -> Option<String> {
     None
+}
+
+/// 跑 `iw <args>`，返回 stdout；命令缺失/失败 → None。
+#[cfg(target_os = "linux")]
+fn run_iw(args: &[&str]) -> Option<String> {
+    let out = std::process::Command::new("iw").args(args).output().ok()?;
+    if out.status.success() {
+        Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        None
+    }
 }
 
 /// Linux 无线信息：解析 `iw` 输出的纯函数。平台无关，始终编译。
