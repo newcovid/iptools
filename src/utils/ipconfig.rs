@@ -237,8 +237,9 @@ pub(crate) mod linux {
                 s.push_str("      dhcp4: false\n");
                 s.push_str(&format!("      addresses:\n        - {ip}/{prefix}\n"));
                 if let Some(g) = gw {
+                    // netplan 默认网关用 routes（gateway4 已弃用）：必须是 to/via 结构。
                     s.push_str("      routes:\n");
-                    s.push_str(&format!("        - {g}\n"));
+                    s.push_str(&format!("        - to: default\n          via: {g}\n"));
                 }
                 if !dns.is_empty() {
                     s.push_str("      nameservers:\n        addresses:\n");
@@ -336,7 +337,9 @@ mod tests {
         assert!(y.contains("eth0:"));
         assert!(y.contains("dhcp4: false"));
         assert!(y.contains("192.168.1.50/24"));
-        assert!(y.contains("- 192.168.1.1"));
+        // 网关用 netplan 的 to/via 结构（gateway4 已弃用）
+        assert!(y.contains("to: default"));
+        assert!(y.contains("via: 192.168.1.1"));
         assert!(y.contains("1.1.1.1"));
     }
 
