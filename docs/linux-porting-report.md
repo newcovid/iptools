@@ -2,6 +2,8 @@
 
 > 生成日期：2026-06-10 | 基于 commit: ef7b364 (v0.2.0)
 
+> **实施状态（2026-06-16）**：Phase 1 + Phase 2 + Phase 3 均已实现（网卡枚举 / ICMP(Trace+链路质量) / 主动 ARP MAC / 链路速率 / WiFi 详情 / IP 写入三层后端 / 代理检测 / CI）。详见 `docs/superpowers/plans/2026-06-16-linux-cross-platform.md`。下表为移植前评估，Linux 列现已大多 ✅。
+
 ---
 
 ## 一、总览
@@ -17,14 +19,14 @@
 
 | 模块 | Windows | Linux | 缺失原因 |
 |------|---------|-------|----------|
-| Dashboard 概览 | ✅ | ⚠️ 无活跃网卡 | `get_interfaces()` 返回空 |
-| Adapter 适配器 | ✅ | ❌ 空列表 | 同上 |
-| Scanner 扫描 | ✅ | ⚠️ 无 MAC | `resolve_mac_address` 无 Linux 实现 |
-| Traffic 流量 | ✅ | ❌ 无数据 | 依赖 `get_interfaces()` |
+| Dashboard 概览 | ✅ | ✅ | 已实现：sysfs/getifaddrs 网卡枚举 |
+| Adapter 适配器 | ✅ | ✅ | 已实现：sysfs/getifaddrs 枚举 + nmcli/netplan/ip 写入 |
+| Scanner 扫描 | ✅ | ✅（需 CAP_NET_RAW） | 已实现：AF_PACKET 原始套接字主动 ARP 解析 MAC |
+| Traffic 流量 | ✅ | ✅ | 已实现：依赖 `get_interfaces()`，已补全 |
 | Ping | ✅ | ✅ | `surge-ping` 已实现 |
-| Trace 路由 | ✅ | ❌ stub | `icmp::echo_once` 无 Linux 实现 |
+| Trace 路由 | ✅ | ✅（需 CAP_NET_RAW） | 已实现：socket2 原始 ICMP 套接字（TTL 递增） |
 | Port Scan 端口扫描 | ✅ | ✅ | 纯 TCP，天然跨平台 |
-| Link Quality 链路质量 | ✅ | ❌ stub | `icmp::echo_once_from` 无 Linux 实现 |
+| Link Quality 链路质量 | ✅ | ✅（需 CAP_NET_RAW；WiFi 详情需 iw） | 已实现：socket2 源绑定 ICMP + iw 无线详情 |
 | Public Speed 公网测速 | ✅ | ✅ | reqwest，天然跨平台 |
 | LAN Speed 内网测速 | ✅ | ✅ | 纯 TCP，天然跨平台 |
 | Settings 设置 | ✅ | ✅ | 纯逻辑 |
