@@ -511,38 +511,83 @@ pub fn link_speed_for_guid(_guid: &str) -> Option<u64> {
     None
 }
 
+/// Windows：扫描热路径取 MAC（兼作存活探测）。
+///
+/// 不再用 `SendARP`——它对**离线**主机无超时参数、内部重试 1-3s 且受内核 ARP 解析节流，
+/// 整个 /24 扫描极慢。改为两步、纯原生 IP Helper：
+/// 1) 发一个**短超时 ICMP echo** 触发协议栈对目标的 ARP 解析（离线主机 ~200ms 封顶）。
+///    即使主机被防火墙挡 ICMP，只要它应答 ARP，邻居缓存就会被填充。
+/// 2) 读**邻居表**（`GetIpNetTable2`，即 ARP 缓存）取该 IP 的 MAC。
+///
+/// 仍按 L2/ARP 发现（稳，能找到挡 ICMP 的主机），但每主机封顶 200ms 且真并发。
 #[cfg(target_os = "windows")]
 pub fn resolve_mac_address(ip: Ipv4Addr) -> Option<String> {
-    use std::ffi::CString;
-    use windows::core::PCSTR; // 引入 PCSTR
-    use windows::Win32::NetworkManagement::IpHelper::SendARP;
-    use windows::Win32::Networking::WinSock::inet_addr;
+    win_trigger_arp(ip, 200);
+    win_neighbor_mac(ip)
+}
 
+/// 发一个短超时 ICMP echo，仅为触发协议栈解析目标 MAC、填充邻居缓存（回包结果不关心）。
+#[cfg(target_os = "windows")]
+fn win_trigger_arp(ip: Ipv4Addr, timeout_ms: u32) {
+    use std::ffi::c_void;
+    use windows::Win32::NetworkManagement::IpHelper::{
+        IcmpCloseHandle, IcmpCreateFile, IcmpSendEcho,
+    };
     unsafe {
-        let ip_str = CString::new(ip.to_string()).ok()?;
-        // 修复：inet_addr 在 windows-rs 0.58 需要 PCSTR 参数
-        // 强制转换 *const i8 为 *const u8，并包装为 PCSTR
-        let dest_ip = inet_addr(PCSTR(ip_str.as_ptr() as *const u8));
-
-        let src_ip = 0u32;
-        let mut mac_buf = [0u8; 6];
-        let mut mac_len = 6u32;
-
-        let ret = SendARP(
-            dest_ip,
-            src_ip,
-            mac_buf.as_mut_ptr() as *mut _,
-            &mut mac_len,
+        let handle = match IcmpCreateFile() {
+            Ok(h) => h,
+            Err(_) => return,
+        };
+        let dest = u32::from_le_bytes(ip.octets());
+        let payload = [0u8; 1];
+        let mut reply = vec![0u8; 256];
+        let _ = IcmpSendEcho(
+            handle,
+            dest,
+            payload.as_ptr() as *const c_void,
+            payload.len() as u16,
+            None,
+            reply.as_mut_ptr() as *mut c_void,
+            reply.len() as u32,
+            timeout_ms,
         );
+        let _ = IcmpCloseHandle(handle);
+    }
+}
 
-        if ret == 0 && mac_len == 6 {
-            Some(format!(
-                "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                mac_buf[0], mac_buf[1], mac_buf[2], mac_buf[3], mac_buf[4], mac_buf[5]
-            ))
-        } else {
-            None
+/// 读邻居表（ARP 缓存），取 `ip` 对应、含 6 字节非全零 MAC 的项；无则 None。
+#[cfg(target_os = "windows")]
+fn win_neighbor_mac(ip: Ipv4Addr) -> Option<String> {
+    use std::ffi::c_void;
+    use windows::Win32::NetworkManagement::IpHelper::{
+        FreeMibTable, GetIpNetTable2, MIB_IPNET_TABLE2,
+    };
+    use windows::Win32::Networking::WinSock::AF_INET;
+    unsafe {
+        let mut table: *mut MIB_IPNET_TABLE2 = std::ptr::null_mut();
+        if GetIpNetTable2(AF_INET, &mut table).0 != 0 || table.is_null() {
+            return None;
         }
+        let t = &*table;
+        let want = u32::from_ne_bytes(ip.octets());
+        let rows = std::slice::from_raw_parts(t.Table.as_ptr(), t.NumEntries as usize);
+        let mut found = None;
+        for row in rows {
+            if row.Address.Ipv4.sin_addr.S_un.S_addr == want && row.PhysicalAddressLength == 6 {
+                let mac = &row.PhysicalAddress[..6];
+                if mac.iter().any(|&b| b != 0) {
+                    found = Some(
+                        mac.iter()
+                            .map(|b| format!("{:02x}", b))
+                            .collect::<Vec<_>>()
+                            .join(":"),
+                    );
+                    break;
+                }
+            }
+        }
+        FreeMibTable(table as *const c_void);
+        found
     }
 }
 
@@ -588,7 +633,8 @@ pub fn resolve_mac_address(ip: Ipv4Addr) -> Option<String> {
         if fd < 0 {
             return None;
         }
-        let tv = libc::timeval { tv_sec: 0, tv_usec: 250_000 };
+        // 每轮 recv 最多 ~90ms；共 3 轮（重发），总窗口 ~270ms，与原 250ms 单次相当。
+        let tv = libc::timeval { tv_sec: 0, tv_usec: 90_000 };
         libc::setsockopt(
             fd,
             libc::SOL_SOCKET,
@@ -604,33 +650,39 @@ pub fn resolve_mac_address(ip: Ipv4Addr) -> Option<String> {
         sll.sll_halen = 6;
         sll.sll_addr[..6].copy_from_slice(&[0xff; 6]);
 
-        let sent = libc::sendto(
-            fd,
-            frame.as_ptr() as *const libc::c_void,
-            frame.len(),
-            0,
-            &sll as *const _ as *const libc::sockaddr,
-            std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t,
-        );
-        if sent < 0 {
-            libc::close(fd);
-            return None;
-        }
-
-        let deadline = Instant::now() + Duration::from_millis(250);
+        // 重试 3 轮：每轮重发一次 ARP request + 持续收最多 ~90ms。某台繁忙主机若丢了
+        // 某一轮的请求，下一轮还能命中——比「只发一次」更稳，总耗时几乎不变。任一轮
+        // 收到目标的 reply 即返回。
+        let mut result = None;
         let mut buf = [0u8; 1500];
-        let result = loop {
-            if Instant::now() >= deadline {
-                break None;
+        'rounds: for _round in 0..3 {
+            let sent = libc::sendto(
+                fd,
+                frame.as_ptr() as *const libc::c_void,
+                frame.len(),
+                0,
+                &sll as *const _ as *const libc::sockaddr,
+                std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t,
+            );
+            if sent < 0 {
+                break;
             }
-            let n = libc::recv(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0);
-            if n <= 0 {
-                break None;
+            let round_deadline = Instant::now() + Duration::from_millis(90);
+            loop {
+                if Instant::now() >= round_deadline {
+                    break; // 本轮超时 → 进入下一轮重发
+                }
+                let n = libc::recv(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0);
+                if n <= 0 {
+                    break; // recv 超时（SO_RCVTIMEO）→ 下一轮
+                }
+                if let Some(mac) = linux::parse_arp_reply(&buf[..n as usize], ip) {
+                    result = Some(mac);
+                    break 'rounds;
+                }
+                // 非目标的 ARP 包 → 继续本轮接收
             }
-            if let Some(mac) = linux::parse_arp_reply(&buf[..n as usize], ip) {
-                break Some(mac);
-            }
-        };
+        }
         libc::close(fd);
         result
     }
