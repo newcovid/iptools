@@ -65,11 +65,13 @@ impl Default for LanConfig {
 enum Field {
     Mode,
     Port,
+    Proto,
     Direction,
     Peer,
     Duration,
     Streams,
     Payload,
+    Rate,
 }
 
 pub struct LanSpeedTool {
@@ -141,11 +143,15 @@ impl LanSpeedTool {
     fn active_fields(&self) -> Vec<Field> {
         let mut v = vec![Field::Mode, Field::Port];
         if self.mode == Mode::Client {
+            v.push(Field::Proto);
             v.push(Field::Direction);
             v.push(Field::Peer);
             v.push(Field::Duration);
             v.push(Field::Streams);
             v.push(Field::Payload);
+            if self.proto == Proto::Udp {
+                v.push(Field::Rate);
+            }
         }
         v
     }
@@ -157,7 +163,8 @@ impl LanSpeedTool {
             Field::Duration => Some(&mut self.config.duration),
             Field::Streams => Some(&mut self.config.streams),
             Field::Payload => Some(&mut self.config.payload),
-            Field::Mode | Field::Direction => None,
+            Field::Rate => Some(&mut self.config.rate),
+            Field::Mode | Field::Direction | Field::Proto => None,
         }
     }
 
@@ -286,6 +293,19 @@ impl LanSpeedTool {
                     return;
                 }
             }
+            Field::Proto => {
+                if matches!(action, Some(Action::Left) | Some(Action::Right)) {
+                    self.proto = match self.proto {
+                        Proto::Tcp => Proto::Udp,
+                        Proto::Udp => Proto::Tcp,
+                    };
+                    let n = self.active_fields().len();
+                    if self.config_state.selected().unwrap_or(0) >= n {
+                        self.config_state.select(Some(n - 1));
+                    }
+                    return;
+                }
+            }
             Field::Direction => {
                 if matches!(action, Some(Action::Left) | Some(Action::Right)) {
                     self.direction = match (self.direction, action) {
@@ -406,20 +426,21 @@ impl LanSpeedTool {
                     .parse::<u16>()
                     .unwrap_or(1)
                     .clamp(1, 32);
+                let rate_mbps = self.config.rate.value().parse::<u32>().unwrap_or(0).min(100_000);
                 let payload_size = self
                     .config
                     .payload
                     .value()
                     .parse::<u32>()
                     .unwrap_or(65536)
-                    .clamp(1024, 1_048_576);
+                    .clamp(64, if self.proto == Proto::Udp { 65507 } else { 1_048_576 });
 
                 let spec = TestSpec {
-                    proto: Proto::Tcp,
+                    proto: self.proto,
                     direction: self.direction,
                     duration_ms,
                     streams,
-                    rate_mbps: 0,
+                    rate_mbps,
                     payload_size,
                 };
                 tokio::spawn(async move { run_client(peer, port, spec, tx, abort).await });
@@ -688,12 +709,20 @@ impl LanSpeedTool {
                     ));
                     items.push(ListItem::new(vec![label_line, Line::from(spans)]));
                 }
+                Field::Proto => {
+                    let val = match self.proto {
+                        Proto::Tcp => i18n.t("diag_lan_proto_tcp"),
+                        Proto::Udp => i18n.t("diag_lan_proto_udp"),
+                    };
+                    items.push(self.toggle_item(&i18n.t("diag_lan_proto"), &val, is_sel, is_active, i18n));
+                }
                 _ => {
                     let (label, input) = match field {
                         Field::Port => (i18n.t("diag_lan_port"), &self.config.port),
                         Field::Duration => (i18n.t("diag_lan_duration"), &self.config.duration),
                         Field::Streams => (i18n.t("diag_lan_streams"), &self.config.streams),
                         Field::Payload => (i18n.t("diag_lan_payload"), &self.config.payload),
+                        Field::Rate => (i18n.t("diag_lan_rate"), &self.config.rate),
                         _ => unreachable!(),
                     };
                     let hint = if active { Some(i18n.t("diag_hint_digits")) } else { None };
