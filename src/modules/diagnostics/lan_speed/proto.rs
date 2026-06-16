@@ -496,10 +496,15 @@ pub async fn run_server(port: u16, tx: mpsc::Sender<LanEvent>, abort: Arc<Mutex<
             run_tcp_session(conns, role, spec, tx, abort).await;
         }
         Proto::Udp => {
-            // 后续任务实现；当前回报不支持以免静默卡住。
-            let _ = tx
-                .send(LanEvent::Error("diag_lan_udp_todo".into()))
-                .await;
+            let sock = match UdpSocket::bind(("0.0.0.0", port)).await {
+                Ok(s) => s,
+                Err(_) => {
+                    let _ = tx.send(LanEvent::Error("diag_lan_err".into())).await;
+                    return;
+                }
+            };
+            run_udp_server_socket(sock, spec, tx, abort).await;
+            drop(ctrl);
         }
     }
 }
@@ -556,18 +561,272 @@ pub async fn run_client(
             run_tcp_session(conns, role, spec, tx, abort).await;
         }
         Proto::Udp => {
-            let _ = tx
-                .send(LanEvent::Error("diag_lan_udp_todo".into()))
-                .await;
+            run_udp_client(peer, port, spec, tx, abort).await;
+            drop(ctrl);
         }
     }
+}
+
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use tokio::net::UdpSocket;
+
+fn now_nanos() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+}
+
+/// 服务端 UDP：用已绑定的 socket。收数据计入 per-stream tracker；
+/// 若方向需要本端发送（Down/Bidir），用注册报文学到的客户端地址回发。
+pub(crate) async fn run_udp_server_socket(
+    sock: UdpSocket,
+    spec: TestSpec,
+    tx: mpsc::Sender<LanEvent>,
+    abort: Arc<Mutex<bool>>,
+) {
+    let role = role_for(true, spec.direction);
+    run_udp_session(sock, role, spec, None, tx, abort).await;
+}
+
+/// 客户端 UDP：自绑定 socket，连到服务端。
+pub async fn run_udp_client(
+    peer_ip: String,
+    port: u16,
+    spec: TestSpec,
+    tx: mpsc::Sender<LanEvent>,
+    abort: Arc<Mutex<bool>>,
+) {
+    let sock = match UdpSocket::bind("0.0.0.0:0").await {
+        Ok(s) => s,
+        Err(_) => {
+            let _ = tx.send(LanEvent::Error("diag_lan_err".into())).await;
+            return;
+        }
+    };
+    let dest: SocketAddr = match format!("{}:{}", peer_ip, port).parse() {
+        Ok(a) => a,
+        Err(_) => match tokio::net::lookup_host((peer_ip.as_str(), port)).await {
+            Ok(mut it) => match it.next() {
+                Some(a) => a,
+                None => {
+                    let _ = tx.send(LanEvent::Error("diag_lan_err".into())).await;
+                    return;
+                }
+            },
+            Err(_) => {
+                let _ = tx.send(LanEvent::Error("diag_lan_err".into())).await;
+                return;
+            }
+        },
+    };
+    let role = role_for(false, spec.direction);
+    run_udp_session(sock, role, spec, Some(dest), tx, abort).await;
+}
+
+/// UDP 会话核心：单 socket，按角色并发收/发。
+/// `dest` 为客户端已知的服务端地址；服务端为 None（从注册报文学客户端地址）。
+async fn run_udp_session(
+    sock: UdpSocket,
+    role: Role,
+    spec: TestSpec,
+    dest: Option<SocketAddr>,
+    tx: mpsc::Sender<LanEvent>,
+    abort: Arc<Mutex<bool>>,
+) {
+    let sock = Arc::new(sock);
+    let tx_bytes = Arc::new(AtomicU64::new(0));
+    let rx_bytes = Arc::new(AtomicU64::new(0));
+    let _ = tx
+        .send(LanEvent::Status("diag_lan_status_connected".into()))
+        .await;
+
+    let start = Instant::now();
+    let deadline = start + Duration::from_millis(spec.duration_ms);
+    let has_tx = matches!(role, Role::Send | Role::Both);
+    let has_rx = matches!(role, Role::Recv | Role::Both);
+    let payload = spec.payload_size.max(UDP_HEADER_LEN as u32) as usize;
+    let n_streams = spec.streams.max(1);
+
+    // 客户端：先发注册报文（让服务端学到地址）。
+    if let Some(d) = dest {
+        let mut hdr = vec![0u8; payload];
+        for sid in 0..n_streams {
+            write_udp_header(&mut hdr, sid, REG_SEQ, 0);
+            let _ = sock.send_to(&hdr, d).await;
+        }
+    }
+
+    let peers: Arc<Mutex<HashMap<u16, SocketAddr>>> = Arc::new(Mutex::new(HashMap::new()));
+    let trackers: Arc<Mutex<HashMap<u16, StreamTracker>>> = Arc::new(Mutex::new(HashMap::new()));
+
+    // 接收任务（总是开：服务端纯发送也要收注册报文；统计仅在 has_rx 时累加）。
+    let recv_task = {
+        let sock = sock.clone();
+        let rxb = rx_bytes.clone();
+        let peers = peers.clone();
+        let trackers = trackers.clone();
+        let abort = abort.clone();
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 1 << 16];
+            loop {
+                if *abort.lock().unwrap() {
+                    break;
+                }
+                match tokio::time::timeout(Duration::from_millis(500), sock.recv_from(&mut buf)).await
+                {
+                    Ok(Ok((n, from))) => {
+                        if let Some((sid, seq, ts)) = read_udp_header(&buf[..n]) {
+                            if seq == REG_SEQ {
+                                peers.lock().unwrap().insert(sid, from);
+                            } else if has_rx {
+                                rxb.fetch_add(n as u64, Ordering::Relaxed);
+                                let arr = now_nanos();
+                                let mut t = trackers.lock().unwrap();
+                                t.entry(sid).or_default().on_packet(seq, ts, arr);
+                            }
+                        }
+                    }
+                    Ok(Err(_)) => break,
+                    Err(_) => {} // 读超时
+                }
+                if Instant::now() >= deadline {
+                    break;
+                }
+            }
+        })
+    };
+
+    // 发送任务（has_tx 时）：每流一个，定速。
+    let mut send_handles = Vec::new();
+    if has_tx {
+        // 服务端需等注册报文到达以学到回发地址。
+        if dest.is_none() {
+            let pdead = Instant::now() + Duration::from_millis(1000);
+            loop {
+                if peers.lock().unwrap().len() as u16 >= n_streams || Instant::now() >= pdead {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+        let interval = packet_interval_ns(spec.rate_mbps, payload as u32);
+        for sid in 0..n_streams {
+            let target = match dest {
+                Some(d) => Some(d),
+                None => peers.lock().unwrap().get(&sid).copied(),
+            };
+            let target = match target {
+                Some(t) => t,
+                None => continue,
+            };
+            let sock = sock.clone();
+            let txb = tx_bytes.clone();
+            let abort = abort.clone();
+            send_handles.push(tokio::spawn(async move {
+                let mut buf = vec![0u8; payload];
+                let mut seq = 0u64;
+                loop {
+                    if *abort.lock().unwrap() {
+                        break;
+                    }
+                    write_udp_header(&mut buf, sid, seq, now_nanos());
+                    match sock.send_to(&buf, target).await {
+                        Ok(_) => {
+                            txb.fetch_add(payload as u64, Ordering::Relaxed);
+                            seq += 1;
+                        }
+                        Err(_) => break,
+                    }
+                    if Instant::now() >= deadline {
+                        break;
+                    }
+                    if interval > 0 {
+                        tokio::time::sleep(Duration::from_nanos(interval)).await;
+                    }
+                }
+            }));
+        }
+    }
+
+    // 采样上报
+    let reporter = {
+        let rtx = tx.clone();
+        let rtxb = tx_bytes.clone();
+        let rrxb = rx_bytes.clone();
+        let rabort = abort.clone();
+        tokio::spawn(async move {
+            let mut last = Instant::now();
+            let (mut last_tx, mut last_rx) = (0u64, 0u64);
+            loop {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                if *rabort.lock().unwrap() || Instant::now() >= deadline {
+                    break;
+                }
+                let now = Instant::now();
+                let since = now.duration_since(last).as_secs_f64().max(0.001);
+                let cur_tx = rtxb.load(Ordering::Relaxed);
+                let cur_rx = rrxb.load(Ordering::Relaxed);
+                let elapsed = now.duration_since(start).as_millis() as u64;
+                if has_tx {
+                    let _ = rtx
+                        .send(LanEvent::Progress {
+                            flow: Flow::Tx,
+                            total_bytes: cur_tx,
+                            elapsed_ms: elapsed,
+                            inst_bps: ((cur_tx - last_tx) as f64 / since) as u64,
+                        })
+                        .await;
+                }
+                if has_rx {
+                    let _ = rtx
+                        .send(LanEvent::Progress {
+                            flow: Flow::Rx,
+                            total_bytes: cur_rx,
+                            elapsed_ms: elapsed,
+                            inst_bps: ((cur_rx - last_rx) as f64 / since) as u64,
+                        })
+                        .await;
+                }
+                last = now;
+                last_tx = cur_tx;
+                last_rx = cur_rx;
+            }
+        })
+    };
+
+    for h in send_handles {
+        let _ = h.await;
+    }
+    let _ = recv_task.await;
+    let _ = reporter.await;
+
+    let elapsed = start.elapsed().as_millis() as u64;
+    let udp = if has_rx {
+        let t = trackers.lock().unwrap();
+        let vec: Vec<StreamTracker> = t.values().cloned().collect();
+        Some(aggregate_udp(&vec))
+    } else {
+        None
+    };
+    let _ = tx
+        .send(LanEvent::Summary(TestSummary {
+            tx_bytes: tx_bytes.load(Ordering::Relaxed),
+            rx_bytes: rx_bytes.load(Ordering::Relaxed),
+            elapsed_ms: elapsed,
+            udp,
+        }))
+        .await;
+    let _ = tx.send(LanEvent::Status("diag_lan_done".into())).await;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
-    use tokio::net::{TcpListener, TcpStream};
+    use tokio::net::{TcpListener, TcpStream, UdpSocket};
     use tokio::sync::mpsc;
 
     async fn drain_summary(rx: &mut mpsc::Receiver<LanEvent>) -> Option<TestSummary> {
@@ -725,5 +984,34 @@ mod tests {
         assert_eq!(packet_interval_ns(8, 1000), 1_000_000);
         assert_eq!(packet_interval_ns(0, 1000), 0); // 无限速
         assert_eq!(packet_interval_ns(100, 0), 0);
+    }
+
+    #[tokio::test]
+    async fn udp_session_up_counts_packets() {
+        let srv = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let srv_addr = srv.local_addr().unwrap();
+        let spec = TestSpec {
+            proto: Proto::Udp,
+            direction: Direction::Up,
+            duration_ms: 300,
+            streams: 1,
+            rate_mbps: 0,
+            payload_size: 1200,
+        };
+        let sspec = spec.clone();
+        let server = tokio::spawn(async move {
+            let (tx, mut rx) = mpsc::channel(512);
+            let abort = Arc::new(Mutex::new(false));
+            run_udp_server_socket(srv, sspec, tx, abort).await;
+            drain_summary(&mut rx).await
+        });
+
+        let (ctx, _crx) = mpsc::channel(512);
+        let cabort = Arc::new(Mutex::new(false));
+        run_udp_client(srv_addr.ip().to_string(), srv_addr.port(), spec, ctx, cabort).await;
+
+        let s = server.await.unwrap().unwrap();
+        let u = s.udp.unwrap();
+        assert!(u.received > 0, "server should receive udp packets");
     }
 }
