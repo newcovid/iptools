@@ -209,3 +209,141 @@ mod win {
         Ok(())
     }
 }
+
+/// Linux IP 写入后端：分层探测 nmcli → netplan → ip。平台无关编译（仅用 Command/fs）。
+pub(crate) mod linux {
+    #![allow(dead_code)]
+    use std::process::Command;
+
+    /// 点分掩码 → 前缀长度（连续 1 才合法）。
+    pub fn mask_to_prefix(mask: &str) -> Option<u8> {
+        let ip: std::net::Ipv4Addr = mask.parse().ok()?;
+        let bits = u32::from(ip);
+        let ones = bits.leading_ones();
+        let expected = if ones == 0 { 0 } else { u32::MAX << (32 - ones) };
+        if bits == expected { Some(ones as u8) } else { None }
+    }
+
+    /// 生成受管 netplan YAML。`static_cfg = Some((ip, prefix, gw, dns))` 为静态；None 为 DHCP。
+    pub fn netplan_yaml(
+        iface: &str,
+        static_cfg: Option<(&str, u8, Option<&str>, Vec<String>)>,
+    ) -> String {
+        let mut s = String::from("# Managed by iptools — do not edit by hand\nnetwork:\n  version: 2\n  ethernets:\n");
+        s.push_str(&format!("    {iface}:\n"));
+        match static_cfg {
+            None => s.push_str("      dhcp4: true\n"),
+            Some((ip, prefix, gw, dns)) => {
+                s.push_str("      dhcp4: false\n");
+                s.push_str(&format!("      addresses:\n        - {ip}/{prefix}\n"));
+                if let Some(g) = gw {
+                    s.push_str("      routes:\n");
+                    s.push_str(&format!("        - {g}\n"));
+                }
+                if !dns.is_empty() {
+                    s.push_str("      nameservers:\n        addresses:\n");
+                    for d in &dns {
+                        s.push_str(&format!("          - {d}\n"));
+                    }
+                }
+            }
+        }
+        s
+    }
+
+    /// 后端种类。
+    pub enum Backend {
+        NetworkManager,
+        Netplan,
+        IpFallback,
+    }
+
+    /// 探测可用后端：NM 活动优先，其次 netplan，最后 ip 兜底。
+    pub fn detect_backend() -> Backend {
+        if let Ok(out) = Command::new("systemctl")
+            .args(["is-active", "NetworkManager"])
+            .output()
+        {
+            if out.status.success()
+                && String::from_utf8_lossy(&out.stdout).trim() == "active"
+            {
+                return Backend::NetworkManager;
+            }
+        }
+        if std::path::Path::new("/etc/netplan").exists() {
+            if let Ok(rd) = std::fs::read_dir("/etc/netplan") {
+                if rd.flatten().any(|e| {
+                    e.path().extension().map_or(false, |x| x == "yaml")
+                }) {
+                    return Backend::Netplan;
+                }
+            }
+        }
+        Backend::IpFallback
+    }
+
+    /// 运行命令，失败时返回 stderr 文本。成功返回 Ok(())。
+    pub fn run(cmd: &str, args: &[&str]) -> Result<(), String> {
+        let out = Command::new(cmd)
+            .args(args)
+            .output()
+            .map_err(|e| format!("无法执行 {cmd}: {e}"))?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "{cmd} 失败: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ))
+        }
+    }
+
+    /// 找接口对应的 NM 连接名（active 优先）。
+    pub fn nm_connection_for(iface: &str) -> Option<String> {
+        let out = Command::new("nmcli")
+            .args(["-t", "-f", "NAME,DEVICE", "connection", "show", "--active"])
+            .output()
+            .ok()?;
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            if let Some((name, dev)) = line.rsplit_once(':') {
+                if dev == iface {
+                    return Some(name.to_string());
+                }
+            }
+        }
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::linux::*;
+
+    #[test]
+    fn mask_to_prefix_works() {
+        assert_eq!(mask_to_prefix("255.255.255.0"), Some(24));
+        assert_eq!(mask_to_prefix("255.255.0.0"), Some(16));
+        assert_eq!(mask_to_prefix("255.0.255.0"), None);
+        assert_eq!(mask_to_prefix("oops"), None);
+    }
+
+    #[test]
+    fn netplan_static_yaml_shape() {
+        let y = netplan_yaml(
+            "eth0",
+            Some(("192.168.1.50", 24, Some("192.168.1.1"), vec!["1.1.1.1".into()])),
+        );
+        assert!(y.contains("eth0:"));
+        assert!(y.contains("dhcp4: false"));
+        assert!(y.contains("192.168.1.50/24"));
+        assert!(y.contains("- 192.168.1.1"));
+        assert!(y.contains("1.1.1.1"));
+    }
+
+    #[test]
+    fn netplan_dhcp_yaml_shape() {
+        let y = netplan_yaml("eth0", None);
+        assert!(y.contains("eth0:"));
+        assert!(y.contains("dhcp4: true"));
+    }
+}
