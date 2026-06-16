@@ -333,6 +333,133 @@ async fn tcp_recv_half(
     }
 }
 
+use tokio::net::TcpListener;
+
+/// 接受一条连接，期间轮询 abort；中止或出错返回 None。
+async fn accept_with_abort(
+    listener: &TcpListener,
+    abort: &Arc<Mutex<bool>>,
+) -> Option<TcpStream> {
+    loop {
+        if *abort.lock().unwrap() {
+            return None;
+        }
+        match tokio::time::timeout(Duration::from_millis(500), listener.accept()).await {
+            Ok(Ok((s, _))) => return Some(s),
+            Ok(Err(_)) => return None,
+            Err(_) => continue,
+        }
+    }
+}
+
+/// 服务端：监听端口，第一条连接是控制连接（读 spec、回 Ack），
+/// 随后按 spec.proto 建数据通道并跑会话。
+pub async fn run_server(port: u16, tx: mpsc::Sender<LanEvent>, abort: Arc<Mutex<bool>>) {
+    let listener = match TcpListener::bind(("0.0.0.0", port)).await {
+        Ok(l) => l,
+        Err(_) => {
+            let _ = tx.send(LanEvent::Error("diag_lan_err".into())).await;
+            return;
+        }
+    };
+    let _ = tx
+        .send(LanEvent::Status("diag_lan_status_listening".into()))
+        .await;
+
+    let mut ctrl = match accept_with_abort(&listener, &abort).await {
+        Some(s) => s,
+        None => return,
+    };
+    let spec: TestSpec = match read_frame(&mut ctrl).await {
+        Some(s) => s,
+        None => {
+            let _ = tx.send(LanEvent::Error("diag_lan_err".into())).await;
+            return;
+        }
+    };
+    let _ = write_frame(&mut ctrl, &Ack { ok: true }).await;
+
+    match spec.proto {
+        Proto::Tcp => {
+            let role = role_for(true, spec.direction);
+            let n = spec.streams.max(1) as usize;
+            let mut conns = Vec::new();
+            for _ in 0..n {
+                match accept_with_abort(&listener, &abort).await {
+                    Some(s) => conns.push(s),
+                    None => return,
+                }
+            }
+            run_tcp_session(conns, role, spec, tx, abort).await;
+        }
+        Proto::Udp => {
+            // 后续任务实现；当前回报不支持以免静默卡住。
+            let _ = tx
+                .send(LanEvent::Error("diag_lan_udp_todo".into()))
+                .await;
+        }
+    }
+}
+
+/// 客户端：连控制端口、发 spec、收 Ack，再开 N 条数据连接跑会话。
+pub async fn run_client(
+    peer: String,
+    port: u16,
+    spec: TestSpec,
+    tx: mpsc::Sender<LanEvent>,
+    abort: Arc<Mutex<bool>>,
+) {
+    if peer.is_empty() {
+        let _ = tx.send(LanEvent::Error("diag_lan_err".into())).await;
+        return;
+    }
+    let _ = tx
+        .send(LanEvent::Status("diag_lan_status_connecting".into()))
+        .await;
+
+    let mut ctrl = match TcpStream::connect((peer.as_str(), port)).await {
+        Ok(s) => s,
+        Err(_) => {
+            let _ = tx.send(LanEvent::Error("diag_lan_err".into())).await;
+            return;
+        }
+    };
+    if write_frame(&mut ctrl, &spec).await.is_err() {
+        let _ = tx.send(LanEvent::Error("diag_lan_err".into())).await;
+        return;
+    }
+    let _ack: Ack = match read_frame(&mut ctrl).await {
+        Some(a) => a,
+        None => {
+            let _ = tx.send(LanEvent::Error("diag_lan_err".into())).await;
+            return;
+        }
+    };
+
+    match spec.proto {
+        Proto::Tcp => {
+            let role = role_for(false, spec.direction);
+            let n = spec.streams.max(1) as usize;
+            let mut conns = Vec::new();
+            for _ in 0..n {
+                match TcpStream::connect((peer.as_str(), port)).await {
+                    Ok(s) => conns.push(s),
+                    Err(_) => {
+                        let _ = tx.send(LanEvent::Error("diag_lan_err".into())).await;
+                        return;
+                    }
+                }
+            }
+            run_tcp_session(conns, role, spec, tx, abort).await;
+        }
+        Proto::Udp => {
+            let _ = tx
+                .send(LanEvent::Error("diag_lan_udp_todo".into()))
+                .await;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
