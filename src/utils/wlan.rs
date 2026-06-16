@@ -37,6 +37,8 @@ pub fn band_and_channel(freq_khz: u32) -> (String, u32) {
 }
 
 /// DOT11_PHY_TYPE 原始值 → (友好标签, Wi-Fi 代际)。`band6` 用于区分 Wi-Fi 6/6E。
+/// Windows `query` 与单测使用；Linux query 经 `iw` 取不到 PHY 制式，故 release 构建未用。
+#[allow(dead_code)]
 pub fn phy_label(phy: i32, band6: bool) -> (String, u8) {
     match phy {
         11 => ("802.11be · Wi-Fi 7".to_string(), 7),
@@ -58,6 +60,7 @@ pub fn phy_label(phy: i32, band6: bool) -> (String, u8) {
 }
 
 /// DOT11_AUTH_ALGORITHM 原始值 → 友好标签。
+#[allow(dead_code)]
 pub fn auth_label(a: i32) -> String {
     match a {
         1 => "Open",
@@ -77,6 +80,7 @@ pub fn auth_label(a: i32) -> String {
 }
 
 /// DOT11_CIPHER_ALGORITHM 原始值 → 友好标签。
+#[allow(dead_code)]
 pub fn cipher_label(c: i32) -> String {
     match c {
         0 => "None",
