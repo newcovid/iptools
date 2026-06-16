@@ -175,13 +175,9 @@ pub(crate) mod unix_icmp {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
-pub fn echo_once(_dest: Ipv4Addr, _ttl: u8, _timeout_ms: u32) -> EchoResult {
-    EchoResult {
-        status: u32::MAX,
-        addr: None,
-        rtt_ms: None,
-    }
+#[cfg(unix)]
+pub fn echo_once(dest: Ipv4Addr, ttl: u8, timeout_ms: u32) -> EchoResult {
+    unix_send(None, dest, ttl, timeout_ms, 32)
 }
 
 /// 从指定源地址 `src` 发送一个 ICMP Echo（绑定出口网卡），载荷 `payload_len` 字节。
@@ -272,19 +268,96 @@ pub fn echo_once_from(
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(unix)]
 pub fn echo_once_from(
-    _src: Ipv4Addr,
-    _dest: Ipv4Addr,
-    _ttl: u8,
-    _timeout_ms: u32,
-    _payload_len: usize,
+    src: Ipv4Addr,
+    dest: Ipv4Addr,
+    ttl: u8,
+    timeout_ms: u32,
+    payload_len: usize,
 ) -> EchoResult {
-    EchoResult {
-        status: u32::MAX,
-        addr: None,
-        rtt_ms: None,
+    unix_send(Some(src), dest, ttl, timeout_ms, payload_len)
+}
+
+/// unix 下用 raw ICMP 套接字发一个 echo 并等回包。`src` 非空时绑定出口源 IP。
+/// 收 Echo Reply → reached；收 Time Exceeded → 中间跳（addr 来自回包源地址）。
+#[cfg(unix)]
+fn unix_send(
+    src: Option<Ipv4Addr>,
+    dest: Ipv4Addr,
+    ttl: u8,
+    timeout_ms: u32,
+    payload_len: usize,
+) -> EchoResult {
+    use socket2::{Domain, Protocol, SockAddr, Socket, Type};
+    use std::mem::MaybeUninit;
+    use std::net::SocketAddr;
+    use std::time::{Duration, Instant};
+
+    let sock = match Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4)) {
+        Ok(s) => s,
+        Err(_) => return EchoResult { status: u32::MAX, addr: None, rtt_ms: None },
+    };
+    if sock.set_ttl(ttl as u32).is_err()
+        || sock
+            .set_read_timeout(Some(Duration::from_millis(timeout_ms.max(1) as u64)))
+            .is_err()
+    {
+        return EchoResult { status: u32::MAX, addr: None, rtt_ms: None };
     }
+    if let Some(s) = src {
+        if sock.bind(&SockAddr::from(SocketAddr::new(s.into(), 0))).is_err() {
+            return EchoResult { status: u32::MAX, addr: None, rtt_ms: None };
+        }
+    }
+
+    let id = (std::process::id() & 0xFFFF) as u16;
+    let seq = 1u16;
+    let pkt = unix_icmp::build_echo_request(id, seq, payload_len.clamp(0, 1472));
+
+    let to = SockAddr::from(SocketAddr::new(dest.into(), 0));
+    let start = Instant::now();
+    if sock.send_to(&pkt, &to).is_err() {
+        return EchoResult { status: u32::MAX, addr: None, rtt_ms: None };
+    }
+
+    let deadline = start + Duration::from_millis(timeout_ms.max(1) as u64);
+    let mut buf = [MaybeUninit::<u8>::uninit(); 1500];
+    loop {
+        if Instant::now() >= deadline {
+            return EchoResult { status: IP_REQ_TIMED_OUT, addr: None, rtt_ms: None };
+        }
+        match sock.recv_from(&mut buf) {
+            Ok((n, from)) => {
+                let data = unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, n) };
+                match unix_icmp::parse_reply(data, id, seq) {
+                    Some(unix_icmp::ReplyKind::EchoReply) => {
+                        let rtt = start.elapsed().as_millis() as u64;
+                        return EchoResult { status: IP_SUCCESS, addr: Some(dest), rtt_ms: Some(rtt) };
+                    }
+                    Some(unix_icmp::ReplyKind::TimeExceeded) => {
+                        let rtt = start.elapsed().as_millis() as u64;
+                        let router = from.as_socket_ipv4().map(|s| *s.ip()).unwrap_or(dest);
+                        return EchoResult { status: IP_TTL_EXPIRED_TRANSIT, addr: Some(router), rtt_ms: Some(rtt) };
+                    }
+                    None => continue,
+                }
+            }
+            Err(_) => return EchoResult { status: IP_REQ_TIMED_OUT, addr: None, rtt_ms: None },
+        }
+    }
+}
+
+/// 非 unix 且非 windows（罕见）—— 保持 stub 防编译断裂。
+#[cfg(all(not(unix), not(target_os = "windows")))]
+pub fn echo_once(_dest: Ipv4Addr, _ttl: u8, _timeout_ms: u32) -> EchoResult {
+    EchoResult { status: u32::MAX, addr: None, rtt_ms: None }
+}
+#[cfg(all(not(unix), not(target_os = "windows")))]
+pub fn echo_once_from(
+    _src: Ipv4Addr, _dest: Ipv4Addr, _ttl: u8, _timeout_ms: u32, _payload_len: usize,
+) -> EchoResult {
+    EchoResult { status: u32::MAX, addr: None, rtt_ms: None }
 }
 
 #[cfg(test)]
