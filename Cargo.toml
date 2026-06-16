@@ -24,9 +24,16 @@ dns-lookup = "2.0"
 unicode-width = "0.1"
 rand = "0.8"
 
-# 非 Windows 平台使用 surge-ping (需要 Root)
-[target.'cfg(not(windows))'.dependencies]
+# 非 Windows（unix）平台依赖：
+#   surge-ping —— ping.rs 持续发包（已工作，保留）
+#   socket2    —— icmp.rs raw ICMP（设 TTL、绑定源、收 Time-Exceeded）
+#   nix        —— getifaddrs / if_nametoindex（网卡枚举、出口网卡定位）
+#   libc       —— AF_PACKET 原始套接字（主动 ARP）
+[target.'cfg(unix)'.dependencies]
 surge-ping = "0.8"
+socket2 = "0.5"
+nix = { version = "0.29", features = ["net"] }
+libc = "0.2"
 
 # Windows 平台专用依赖
 [target.'cfg(windows)'.dependencies]
