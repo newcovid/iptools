@@ -106,6 +106,75 @@ pub fn echo_once(dest: Ipv4Addr, ttl: u8, timeout_ms: u32) -> EchoResult {
     }
 }
 
+/// 通用 unix 的 ICMP 报文构造与解析（纯函数，便于单测）。平台无关，始终编译。
+pub(crate) mod unix_icmp {
+    #![allow(dead_code)]
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum ReplyKind {
+        EchoReply,
+        TimeExceeded,
+    }
+
+    /// 标准 RFC1071 ones-complement 校验和。
+    pub fn checksum(data: &[u8]) -> u16 {
+        let mut sum = 0u32;
+        let mut i = 0;
+        while i + 1 < data.len() {
+            sum += u16::from_be_bytes([data[i], data[i + 1]]) as u32;
+            i += 2;
+        }
+        if i < data.len() {
+            sum += (data[i] as u32) << 8;
+        }
+        while (sum >> 16) != 0 {
+            sum = (sum & 0xFFFF) + (sum >> 16);
+        }
+        !(sum as u16)
+    }
+
+    /// 构造 ICMP Echo Request：type=8,code=0,checksum,id,seq + payload_len 字节 0 载荷。
+    pub fn build_echo_request(id: u16, seq: u16, payload_len: usize) -> Vec<u8> {
+        let mut pkt = vec![0u8; 8 + payload_len];
+        pkt[0] = 8;
+        pkt[1] = 0;
+        pkt[4..6].copy_from_slice(&id.to_be_bytes());
+        pkt[6..8].copy_from_slice(&seq.to_be_bytes());
+        let c = checksum(&pkt);
+        pkt[2..4].copy_from_slice(&c.to_be_bytes());
+        pkt
+    }
+
+    /// 取 IPv4 头长度（IHL*4）。buf 须以 IP 头开头（IPv4 raw 套接字交付如此）。
+    fn ip_header_len(buf: &[u8]) -> Option<usize> {
+        let ihl = (buf.first()? & 0x0F) as usize * 4;
+        if ihl >= 20 && ihl <= buf.len() { Some(ihl) } else { None }
+    }
+
+    /// 解析内核交付的 raw 套接字缓冲，匹配我们发出的 (id, seq)。不匹配/非关心类型 → None。
+    pub fn parse_reply(buf: &[u8], want_id: u16, want_seq: u16) -> Option<ReplyKind> {
+        let ihl = ip_header_len(buf)?;
+        let icmp = buf.get(ihl..)?;
+        let icmp_type = *icmp.first()?;
+        match icmp_type {
+            0 => {
+                let id = u16::from_be_bytes([*icmp.get(4)?, *icmp.get(5)?]);
+                let seq = u16::from_be_bytes([*icmp.get(6)?, *icmp.get(7)?]);
+                if id == want_id && seq == want_seq { Some(ReplyKind::EchoReply) } else { None }
+            }
+            11 => {
+                let inner = icmp.get(8..)?;
+                let inner_ihl = ip_header_len(inner)?;
+                let orig_icmp = inner.get(inner_ihl..)?;
+                let id = u16::from_be_bytes([*orig_icmp.get(4)?, *orig_icmp.get(5)?]);
+                let seq = u16::from_be_bytes([*orig_icmp.get(6)?, *orig_icmp.get(7)?]);
+                if id == want_id && seq == want_seq { Some(ReplyKind::TimeExceeded) } else { None }
+            }
+            _ => None,
+        }
+    }
+}
+
 #[cfg(not(target_os = "windows"))]
 pub fn echo_once(_dest: Ipv4Addr, _ttl: u8, _timeout_ms: u32) -> EchoResult {
     EchoResult {
@@ -215,5 +284,51 @@ pub fn echo_once_from(
         status: u32::MAX,
         addr: None,
         rtt_ms: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unix_icmp::*;
+
+    #[test]
+    fn checksum_known_vector() {
+        let pkt = build_echo_request(0x1234, 1, 0);
+        assert_eq!(checksum(&pkt), 0);
+        assert_eq!(pkt[0], 8);
+        assert_eq!(pkt[1], 0);
+    }
+
+    #[test]
+    fn echo_request_has_id_seq_and_payload() {
+        let pkt = build_echo_request(0xBEEF, 7, 16);
+        assert_eq!(pkt.len(), 8 + 16);
+        assert_eq!(u16::from_be_bytes([pkt[4], pkt[5]]), 0xBEEF);
+        assert_eq!(u16::from_be_bytes([pkt[6], pkt[7]]), 7);
+    }
+
+    #[test]
+    fn parse_echo_reply_matches_id_seq() {
+        let mut buf = vec![0u8; 20];
+        buf[0] = 0x45;
+        buf.extend_from_slice(&[0u8, 0, 0, 0, 0, 0, 0, 0]);
+        buf[24..26].copy_from_slice(&0xABCDu16.to_be_bytes());
+        buf[26..28].copy_from_slice(&5u16.to_be_bytes());
+        assert!(matches!(parse_reply(&buf, 0xABCD, 5), Some(ReplyKind::EchoReply)));
+        assert!(parse_reply(&buf, 0x1111, 5).is_none());
+    }
+
+    #[test]
+    fn parse_time_exceeded_matches_embedded_id_seq() {
+        let mut buf = vec![0u8; 20];
+        buf[0] = 0x45;
+        buf.extend_from_slice(&[11u8, 0, 0, 0, 0, 0, 0, 0]);
+        let mut inner_ip = vec![0u8; 20];
+        inner_ip[0] = 0x45;
+        buf.extend_from_slice(&inner_ip);
+        buf.extend_from_slice(&[8u8, 0, 0, 0]);
+        buf.extend_from_slice(&0x77AAu16.to_be_bytes());
+        buf.extend_from_slice(&9u16.to_be_bytes());
+        assert!(matches!(parse_reply(&buf, 0x77AA, 9), Some(ReplyKind::TimeExceeded)));
     }
 }
