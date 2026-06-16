@@ -24,10 +24,14 @@ pub fn apply_static(
     {
         win::apply_static(guid, ip, mask, gateway, dns)
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::apply_static(guid, ip, mask, gateway, dns)
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
     {
         let _ = (guid, ip, mask, gateway, dns);
-        Err("not supported on this platform".to_string())
+        Err("当前平台暂不支持 IP 写入".to_string())
     }
 }
 
@@ -37,10 +41,14 @@ pub fn apply_dhcp(guid: &str) -> Result<(), String> {
     {
         win::apply_dhcp(guid)
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::apply_dhcp(guid)
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
     {
         let _ = guid;
-        Err("not supported on this platform".to_string())
+        Err("当前平台暂不支持 IP 写入".to_string())
     }
 }
 
@@ -313,6 +321,85 @@ pub(crate) mod linux {
             }
         }
         None
+    }
+
+    /// guid = 接口名。按后端派发静态配置写入。
+    pub fn apply_static(
+        guid: &str,
+        ip: &str,
+        mask: &str,
+        gateway: Option<&str>,
+        dns: &[String],
+    ) -> Result<(), String> {
+        let prefix = mask_to_prefix(mask).ok_or_else(|| "子网掩码无效".to_string())?;
+        match detect_backend() {
+            Backend::NetworkManager => {
+                let con = nm_connection_for(guid)
+                    .ok_or_else(|| format!("未找到接口 {guid} 的 NetworkManager 连接"))?;
+                let addr = format!("{ip}/{prefix}");
+                run("nmcli", &["con", "mod", &con, "ipv4.method", "manual",
+                    "ipv4.addresses", &addr])?;
+                run("nmcli", &["con", "mod", &con, "ipv4.gateway",
+                    gateway.unwrap_or("")])?;
+                let dns_joined = dns.join(" ");
+                run("nmcli", &["con", "mod", &con, "ipv4.dns", &dns_joined])?;
+                run("nmcli", &["con", "up", &con])?;
+                Ok(())
+            }
+            Backend::Netplan => {
+                let yaml = netplan_yaml(guid, Some((ip, prefix, gateway, dns.to_vec())));
+                std::fs::write("/etc/netplan/99-iptools.yaml", yaml)
+                    .map_err(|e| format!("写 netplan 文件失败: {e}"))?;
+                let _ = Command::new("chmod")
+                    .args(["600", "/etc/netplan/99-iptools.yaml"]).status();
+                run("netplan", &["apply"])?;
+                Ok(())
+            }
+            Backend::IpFallback => {
+                run("ip", &["addr", "flush", "dev", guid])?;
+                let addr = format!("{ip}/{prefix}");
+                run("ip", &["addr", "add", &addr, "dev", guid])?;
+                if let Some(gw) = gateway {
+                    let _ = run("ip", &["route", "replace", "default", "via", gw]);
+                }
+                if !dns.is_empty() {
+                    let mut args = vec!["dns", guid];
+                    for d in dns {
+                        args.push(d);
+                    }
+                    let _ = run("resolvectl", &args);
+                }
+                Err("__IP_RUNTIME_ONLY__".to_string())
+            }
+        }
+    }
+
+    /// guid = 接口名。按后端派发 DHCP 切换。
+    pub fn apply_dhcp(guid: &str) -> Result<(), String> {
+        match detect_backend() {
+            Backend::NetworkManager => {
+                let con = nm_connection_for(guid)
+                    .ok_or_else(|| format!("未找到接口 {guid} 的 NetworkManager 连接"))?;
+                run("nmcli", &["con", "mod", &con, "ipv4.method", "auto",
+                    "ipv4.gateway", "", "ipv4.dns", ""])?;
+                run("nmcli", &["con", "up", &con])?;
+                Ok(())
+            }
+            Backend::Netplan => {
+                let yaml = netplan_yaml(guid, None);
+                std::fs::write("/etc/netplan/99-iptools.yaml", yaml)
+                    .map_err(|e| format!("写 netplan 文件失败: {e}"))?;
+                let _ = Command::new("chmod")
+                    .args(["600", "/etc/netplan/99-iptools.yaml"]).status();
+                run("netplan", &["apply"])?;
+                Ok(())
+            }
+            Backend::IpFallback => {
+                run("ip", &["addr", "flush", "dev", guid])?;
+                let _ = run("dhclient", &["-1", guid]);
+                Err("__IP_RUNTIME_ONLY__".to_string())
+            }
+        }
     }
 }
 
