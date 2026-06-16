@@ -312,7 +312,9 @@ fn unix_send(
     }
 
     let id = (std::process::id() & 0xFFFF) as u16;
-    let seq = 1u16;
+    // seq 取 ttl：raw ICMP 套接字会收到所有 ICMP 流量，trace 逐跳用不同 TTL，
+    // 以 seq=ttl 区分各跳，避免上一跳迟到的 Time-Exceeded 被下一跳的套接字误配。
+    let seq = ttl as u16;
     let pkt = unix_icmp::build_echo_request(id, seq, payload_len.clamp(0, 1472));
 
     let to = SockAddr::from(SocketAddr::new(dest.into(), 0));
