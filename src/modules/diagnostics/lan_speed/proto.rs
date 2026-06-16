@@ -56,6 +56,53 @@ pub fn decode_frame<T: DeserializeOwned>(frame: &[u8]) -> Option<T> {
     serde_json::from_slice(body).ok()
 }
 
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+/// 向异步写端发一帧。
+pub async fn write_frame<W, T>(w: &mut W, v: &T) -> std::io::Result<()>
+where
+    W: AsyncWriteExt + Unpin,
+    T: Serialize,
+{
+    let frame = encode_frame(v);
+    w.write_all(&frame).await
+}
+
+/// 从异步读端读一帧（先读 4 字节长度，再读 body）。失败/超长返回 None。
+pub async fn read_frame<R, T>(r: &mut R) -> Option<T>
+where
+    R: AsyncReadExt + Unpin,
+    T: DeserializeOwned,
+{
+    let mut len_buf = [0u8; 4];
+    r.read_exact(&mut len_buf).await.ok()?;
+    let len = u32::from_le_bytes(len_buf) as usize;
+    if len == 0 || len > 64 * 1024 {
+        return None;
+    }
+    let mut body = vec![0u8; len];
+    r.read_exact(&mut body).await.ok()?;
+    serde_json::from_slice(&body).ok()
+}
+
+/// 一条数据连接/socket 在本端扮演的角色。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Role {
+    Send,
+    Recv,
+    Both,
+}
+
+/// 由「本端是否服务端 + 方向」推出角色。
+/// Up=客户端→服务端；Down=服务端→客户端；Bidir=两端同时收发。
+pub(crate) fn role_for(is_server: bool, dir: Direction) -> Role {
+    match (is_server, dir) {
+        (false, Direction::Up) | (true, Direction::Down) => Role::Send,
+        (true, Direction::Up) | (false, Direction::Down) => Role::Recv,
+        (_, Direction::Bidir) => Role::Both,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,5 +129,15 @@ mod tests {
     fn decode_rejects_short_frame() {
         let r: Option<TestSpec> = decode_frame(&[1, 2]);
         assert!(r.is_none());
+    }
+
+    #[test]
+    fn roles_follow_direction() {
+        assert_eq!(role_for(false, Direction::Up), Role::Send);
+        assert_eq!(role_for(true, Direction::Up), Role::Recv);
+        assert_eq!(role_for(false, Direction::Down), Role::Recv);
+        assert_eq!(role_for(true, Direction::Down), Role::Send);
+        assert_eq!(role_for(true, Direction::Bidir), Role::Both);
+        assert_eq!(role_for(false, Direction::Bidir), Role::Both);
     }
 }
