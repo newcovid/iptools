@@ -261,6 +261,7 @@
     "diag_lan_done": "测速完成",
     "diag_lan_err": "测速失败：连接错误或参数无效",
     "diag_lan_hint": "一端选服务端先启动，另一端选客户端填对端 IP 后启动",
+    "diag_lan_udp_todo": "UDP 模式尚未实现",
     "mru_popup_title": "历史 (↑↓ 选 · 回车 填入 · Esc 关)",
     "mru_popup_empty": "暂无历史"
 }
