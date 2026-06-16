@@ -140,8 +140,10 @@ iptools -c D:\path\my.json   # 使用自定义配置文件
 需 Rust 工具链：`cargo build --release`。构建依赖：`pkg-config`、`libssl-dev`（reqwest 在 Linux 走 openssl）。
 
 **权限**：局域网扫描（ARP）、路由跟踪（Trace）、链路质量探测用原始套接字，需 `CAP_NET_RAW`：
-- 推荐一次性授权二进制：`sudo setcap cap_net_raw+ep ./target/release/iptools`
+- **最简单**：发行包内自带 `install.sh`，`sudo ./install.sh`（或 `sudo ./install.sh --system` 装到 `/usr/local/bin`）一键授权
+- 或手动一次性授权：`sudo setcap cap_net_raw+ep ./target/release/iptools`
 - 或直接 `sudo ./target/release/iptools` 运行
+- 缺 `CAP_NET_RAW` 时程序退出会打印一行提示，告知确切命令
 
 **无线详情**：需安装 `iw`（`sudo apt install -y iw`）。
 
