@@ -239,6 +239,57 @@ pub fn ssid_of(_iface: &str) -> Option<String> {
     None
 }
 
+/// Linux 无线信息：解析 `iw` 输出的纯函数。平台无关，始终编译。
+pub(crate) mod linux {
+    #![allow(dead_code)]
+
+    /// `iw dev <if> link` 解析结果（缺字段为 None）。
+    #[derive(Debug, Default, Clone)]
+    pub struct IwLink {
+        pub ssid: Option<String>,
+        pub bssid: Option<String>,
+        pub signal_dbm: Option<i32>,
+        pub freq_mhz: Option<u32>,
+        pub tx_mbps: Option<u32>,
+        pub rx_mbps: Option<u32>,
+    }
+
+    /// 解析 `iw dev <if> link`。"Not connected" → None。
+    pub fn parse_iw_link(out: &str) -> Option<IwLink> {
+        if out.contains("Not connected") {
+            return None;
+        }
+        let mut l = IwLink::default();
+        for line in out.lines() {
+            let t = line.trim();
+            if let Some(rest) = t.strip_prefix("Connected to ") {
+                l.bssid = rest.split_whitespace().next().map(|s| s.to_string());
+            } else if let Some(v) = t.strip_prefix("SSID: ") {
+                l.ssid = Some(v.trim().to_string());
+            } else if let Some(v) = t.strip_prefix("freq: ") {
+                l.freq_mhz = v.trim().parse().ok();
+            } else if let Some(v) = t.strip_prefix("signal: ") {
+                l.signal_dbm = v.split_whitespace().next().and_then(|s| s.parse().ok());
+            } else if let Some(v) = t.strip_prefix("tx bitrate: ") {
+                l.tx_mbps = parse_bitrate_mbps(v);
+            } else if let Some(v) = t.strip_prefix("rx bitrate: ") {
+                l.rx_mbps = parse_bitrate_mbps(v);
+            }
+        }
+        if l.bssid.is_some() || l.ssid.is_some() {
+            Some(l)
+        } else {
+            None
+        }
+    }
+
+    /// "866.7 MBit/s ..." → 866（取整 Mbps）。
+    fn parse_bitrate_mbps(s: &str) -> Option<u32> {
+        let num = s.split_whitespace().next()?;
+        num.parse::<f64>().ok().map(|f| f as u32)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,5 +334,31 @@ mod tests {
         assert_eq!(auth_label(9), "WPA3-Personal");
         assert_eq!(auth_label(99), "-");
         assert_eq!(cipher_label(99), "-");
+    }
+
+    #[test]
+    fn iw_link_parses_fields() {
+        let sample = "\
+Connected to 11:22:33:44:55:66 (on wlan0)
+\tSSID: MyHome-5G
+\tfreq: 5180
+\tRX: 9999 bytes (12 packets)
+\tTX: 8888 bytes (10 packets)
+\tsignal: -53 dBm
+\ttx bitrate: 866.7 MBit/s
+\trx bitrate: 780.0 MBit/s
+";
+        let p = super::linux::parse_iw_link(sample).expect("should parse");
+        assert_eq!(p.ssid.as_deref(), Some("MyHome-5G"));
+        assert_eq!(p.bssid.as_deref(), Some("11:22:33:44:55:66"));
+        assert_eq!(p.signal_dbm, Some(-53));
+        assert_eq!(p.freq_mhz, Some(5180));
+        assert_eq!(p.tx_mbps, Some(866));
+        assert_eq!(p.rx_mbps, Some(780));
+    }
+
+    #[test]
+    fn iw_link_not_connected() {
+        assert!(super::linux::parse_iw_link("Not connected.\n").is_none());
     }
 }
