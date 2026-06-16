@@ -479,6 +479,101 @@ pub fn resolve_mac_address(ip: Ipv4Addr) -> Option<String> {
     }
 }
 
+/// Linux：主动发 ARP request 并等 reply（语义等价 Windows SendARP）。
+/// 自动选出口网卡（按目标 IP 落在哪个本机子网）。需 CAP_NET_RAW，无权限/超时返回 None。
+#[cfg(target_os = "linux")]
+pub fn resolve_mac_address(ip: Ipv4Addr) -> Option<String> {
+    use nix::net::if_::if_nametoindex;
+    use std::time::{Duration, Instant};
+
+    // 1) 选出口网卡：目标 IP 与某网卡 ipv4 同子网。
+    let ifaces = get_interfaces();
+    let (if_name, src_ip, src_mac) = ifaces.iter().find_map(|i| {
+        if !i.is_up {
+            return None;
+        }
+        let cidr = i.cidr.as_ref()?;
+        let net: ipnetwork::Ipv4Network = cidr.parse().ok()?;
+        if !net.contains(ip) {
+            return None;
+        }
+        let src_ip: Ipv4Addr = i.ipv4.first()?.parse().ok()?;
+        let mut mac = [0u8; 6];
+        for (k, part) in i.mac.split(':').enumerate() {
+            if k >= 6 {
+                break;
+            }
+            mac[k] = u8::from_str_radix(part, 16).ok()?;
+        }
+        Some((i.name.clone(), src_ip, mac))
+    })?;
+
+    let ifindex = if_nametoindex(if_name.as_str()).ok()? as i32;
+    let frame = linux::build_arp_request(src_mac, src_ip, ip);
+
+    // 2) AF_PACKET 原始套接字收发（unsafe libc）。
+    unsafe {
+        let fd = libc::socket(
+            libc::AF_PACKET,
+            libc::SOCK_RAW,
+            (libc::ETH_P_ARP as u16).to_be() as i32,
+        );
+        if fd < 0 {
+            return None;
+        }
+        let tv = libc::timeval { tv_sec: 0, tv_usec: 250_000 };
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_RCVTIMEO,
+            &tv as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+        );
+
+        let mut sll: libc::sockaddr_ll = std::mem::zeroed();
+        sll.sll_family = libc::AF_PACKET as u16;
+        sll.sll_protocol = (libc::ETH_P_ARP as u16).to_be();
+        sll.sll_ifindex = ifindex;
+        sll.sll_halen = 6;
+        sll.sll_addr[..6].copy_from_slice(&[0xff; 6]);
+
+        let sent = libc::sendto(
+            fd,
+            frame.as_ptr() as *const libc::c_void,
+            frame.len(),
+            0,
+            &sll as *const _ as *const libc::sockaddr,
+            std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t,
+        );
+        if sent < 0 {
+            libc::close(fd);
+            return None;
+        }
+
+        let deadline = Instant::now() + Duration::from_millis(250);
+        let mut buf = [0u8; 1500];
+        let result = loop {
+            if Instant::now() >= deadline {
+                break None;
+            }
+            let n = libc::recv(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0);
+            if n <= 0 {
+                break None;
+            }
+            if let Some(mac) = linux::parse_arp_reply(&buf[..n as usize], ip) {
+                break Some(mac);
+            }
+        };
+        libc::close(fd);
+        result
+    }
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+pub fn resolve_mac_address(_ip: Ipv4Addr) -> Option<String> {
+    None
+}
+
 /// 解析设备主机名，多路回退以适配「系统 DNS 不可用/被 VPN 接管」的局域网场景：
 ///
 /// 1. **反向 DNS**（`getnameinfo`）：走系统当前 DNS 解析器。最快，但若无 PTR 记录
