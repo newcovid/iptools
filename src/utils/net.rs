@@ -622,6 +622,39 @@ fn decode_dns_name(buf: &[u8], start: usize) -> Option<(String, usize)> {
     Some((labels.join("."), next.unwrap_or(off)))
 }
 
+/// Linux 专属辅助：sysfs 文本解析、掩码换算。纯函数，便于单测。
+/// 平台无关，始终编译；Windows 上不调用，故 allow(dead_code)。
+pub(crate) mod linux {
+    #![allow(dead_code)]
+    use std::net::Ipv4Addr;
+
+    /// `/sys/class/net/<if>/operstate` == "up" 视为启用。
+    pub fn parse_operstate(s: &str) -> bool {
+        s.trim() == "up"
+    }
+
+    /// `/sys/class/net/<if>/speed`（Mbps）→ bit/s。负值/非数字/空 → None。
+    pub fn parse_speed_bps(s: &str) -> Option<u64> {
+        let mbps = s.trim().parse::<i64>().ok()?;
+        if mbps <= 0 { None } else { Some(mbps as u64 * 1_000_000) }
+    }
+
+    /// 点分十进制子网掩码 → 前缀长度；要求是连续 1。非连续返回 None。
+    pub fn mask_to_prefix(mask: Ipv4Addr) -> Option<u8> {
+        let bits = u32::from(mask);
+        let ones = bits.leading_ones();
+        let expected = if ones == 0 { 0 } else { u32::MAX << (32 - ones) };
+        if bits == expected { Some(ones as u8) } else { None }
+    }
+
+    /// 前缀长度 → 点分十进制掩码。
+    pub fn prefix_to_mask(prefix: u8) -> Ipv4Addr {
+        let p = prefix.min(32);
+        let bits = if p == 0 { 0 } else { u32::MAX << (32 - p) };
+        Ipv4Addr::from(bits)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -662,6 +695,32 @@ mod tests {
         buf.extend_from_slice(&[0x00, 0x00]); // flags：unique
 
         assert_eq!(parse_netbios_response(&buf).as_deref(), Some("VIVO-PHONE"));
+    }
+
+    #[test]
+    fn parse_operstate_up() {
+        assert!(super::linux::parse_operstate("up\n"));
+        assert!(!super::linux::parse_operstate("down"));
+        assert!(!super::linux::parse_operstate("unknown"));
+    }
+
+    #[test]
+    fn parse_speed_valid_and_invalid() {
+        assert_eq!(super::linux::parse_speed_bps("1000\n"), Some(1_000_000_000));
+        assert_eq!(super::linux::parse_speed_bps("100"), Some(100_000_000));
+        assert_eq!(super::linux::parse_speed_bps("-1"), None);
+        assert_eq!(super::linux::parse_speed_bps("oops"), None);
+    }
+
+    #[test]
+    fn mask_prefix_roundtrip() {
+        use std::net::Ipv4Addr;
+        assert_eq!(super::linux::mask_to_prefix(Ipv4Addr::new(255,255,255,0)), Some(24));
+        assert_eq!(super::linux::mask_to_prefix(Ipv4Addr::new(255,255,0,0)), Some(16));
+        assert_eq!(super::linux::mask_to_prefix(Ipv4Addr::new(255,255,255,255)), Some(32));
+        assert_eq!(super::linux::mask_to_prefix(Ipv4Addr::new(0,0,0,0)), Some(0));
+        assert_eq!(super::linux::mask_to_prefix(Ipv4Addr::new(255,0,255,0)), None);
+        assert_eq!(super::linux::prefix_to_mask(24), Ipv4Addr::new(255,255,255,0));
     }
 
     #[test]
