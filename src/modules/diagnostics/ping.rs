@@ -849,8 +849,16 @@ async fn run_ping_unix(
     abort: Arc<Mutex<bool>>,
 ) {
     let payload = vec![0u8; config.packet_size as usize];
-    let mut pinger = match surge_ping::Pinger::new(target_ip).await {
-        Ok(p) => p,
+    // surge-ping 0.8：先建 Client（ICMP 套接字，需 root/CAP_NET_RAW），再按目标地址族建 Pinger。
+    let cfg = if target_ip.is_ipv6() {
+        surge_ping::Config::builder()
+            .kind(surge_ping::ICMP::V6)
+            .build()
+    } else {
+        surge_ping::Config::default()
+    };
+    let client = match surge_ping::Client::new(&cfg) {
+        Ok(c) => c,
         Err(e) => {
             let evt = if e.to_string().contains("Permission") {
                 PingEvent::Error {
@@ -867,6 +875,9 @@ async fn run_ping_unix(
             return;
         }
     };
+    // 标识符固定（取进程低 16 位），序列号每次自增，匹配回包。
+    let ident = surge_ping::PingIdentifier((std::process::id() & 0xFFFF) as u16);
+    let mut pinger = client.pinger(target_ip, ident).await;
 
     let mut seq = 0;
     let mut interval = tokio::time::interval(Duration::from_millis(config.interval_ms));
@@ -878,7 +889,7 @@ async fn run_ping_unix(
         interval.tick().await;
 
         match pinger
-            .ping(surge_ping::PingIdentifier(seq as u16), &payload)
+            .ping(surge_ping::PingSequence(seq as u16), &payload)
             .await
         {
             Ok((_packet, duration)) => {
