@@ -63,5 +63,17 @@ async fn main() -> Result<()> {
 
     // 4. 程序退出时恢复终端状态
     tui.exit()?;
+
+    // 5. Linux：退出后（终端已恢复，提示可见）若缺 CAP_NET_RAW 则友好提醒——
+    //    这正是「扫描扫不到设备 / Ping 报权限」的根因。已授权则不打扰。
+    #[cfg(target_os = "linux")]
+    {
+        if !crate::utils::net::has_cap_net_raw() {
+            eprintln!();
+            eprintln!("提示：未检测到 CAP_NET_RAW —— 局域网扫描 / Ping / Trace / 链路质量需要它。");
+            eprintln!("      一次性授权：sudo setcap cap_net_raw+ep <本程序路径>   （或用 sudo 运行）");
+            eprintln!("      发行包内可直接：sudo ./install.sh");
+        }
+    }
     Ok(())
 }

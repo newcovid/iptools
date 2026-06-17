@@ -207,15 +207,10 @@ impl ScannerModule {
                                 return;
                             }
 
+                            // resolve_mac_address 各平台均有实现（Windows SendARP / Linux AF_PACKET 主动 ARP /
+                            // 其它 unix stub）。它兼作「主机存活」探测——拿到 MAC 才算发现设备。
                             let mac_opt = tokio::task::spawn_blocking(move || {
-                                #[cfg(target_os = "windows")]
-                                {
-                                    net::resolve_mac_address(ip)
-                                }
-                                #[cfg(not(target_os = "windows"))]
-                                {
-                                    None
-                                }
+                                net::resolve_mac_address(ip)
                             })
                             .await
                             .unwrap_or(None);
