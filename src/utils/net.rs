@@ -132,7 +132,175 @@ pub fn get_interfaces() -> Vec<InterfaceInfo> {
     result
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+pub fn get_interfaces() -> Vec<InterfaceInfo> {
+    let mut ifs = linux_core_interfaces();
+    // 富化（含子进程，仅 dashboard(手动/初始)、adapter(2s 节流+阻塞池) 等低频路径调用；
+    // 扫描热路径 resolve_mac_address 走 linux_core_interfaces 不富化，避免每个 IP 起子进程）：
+    //   - SSID：无线且 up 时经 `iw` 查询
+    //   - DHCP：经 `nmcli` 查 ipv4.method（auto=DHCP），反映系统改成 DHCP 后的真实状态
+    let dhcp = linux_dhcp_map();
+    for i in ifs.iter_mut() {
+        if let Some(&is_dhcp) = dhcp.get(&i.name) {
+            i.dhcp_enabled = is_dhcp;
+        }
+        if i.interface_type == "Ieee80211" && i.is_up {
+            i.ssid = crate::utils::wlan::ssid_of(&i.name);
+        }
+    }
+    ifs
+}
+
+/// 廉价网卡枚举：仅 `/sys/class/net` + `getifaddrs`，**无任何子进程**。
+/// 供扫描热路径（`resolve_mac_address` 对每个目标 IP 调一次）复用；
+/// SSID(iw)/DHCP(nmcli) 富化由 `get_interfaces` 叠加。
+#[cfg(target_os = "linux")]
+fn linux_core_interfaces() -> Vec<InterfaceInfo> {
+    use nix::ifaddrs::getifaddrs;
+    use std::collections::BTreeMap;
+    use std::fs;
+
+    // 1) 用 getifaddrs 收集每个接口的 IPv4/IPv6 + 前缀。
+    struct Acc {
+        ipv4: Vec<String>,
+        ipv6: Vec<String>,
+        cidr: Option<String>,
+    }
+    let mut accs: BTreeMap<String, Acc> = BTreeMap::new();
+
+    if let Ok(addrs) = getifaddrs() {
+        for ifa in addrs {
+            let name = ifa.interface_name.clone();
+            if name == "lo" {
+                continue;
+            }
+            let entry = accs.entry(name).or_insert(Acc {
+                ipv4: Vec::new(),
+                ipv6: Vec::new(),
+                cidr: None,
+            });
+            if let Some(addr) = ifa.address.as_ref() {
+                if let Some(sin) = addr.as_sockaddr_in() {
+                    let ip = sin.ip(); // 已是 Ipv4Addr
+                    if !ip.is_loopback() {
+                        let prefix = ifa
+                            .netmask
+                            .as_ref()
+                            .and_then(|m| m.as_sockaddr_in())
+                            .map(|m| m.ip())
+                            .and_then(linux::mask_to_prefix);
+                        if entry.cidr.is_none() {
+                            if let Some(p) = prefix {
+                                entry.cidr = Some(format!("{}/{}", ip, p));
+                            }
+                        }
+                        entry.ipv4.push(ip.to_string());
+                    }
+                } else if let Some(sin6) = addr.as_sockaddr_in6() {
+                    let ip6 = sin6.ip(); // 已是 Ipv6Addr
+                    if !ip6.is_loopback() {
+                        entry.ipv6.push(ip6.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // 2) 遍历 /sys/class/net，合并 sysfs 元数据 + getifaddrs 地址。
+    let mut result = Vec::new();
+    let sys = match fs::read_dir("/sys/class/net") {
+        Ok(d) => d,
+        Err(_) => return result,
+    };
+    for ent in sys.flatten() {
+        let name = ent.file_name().to_string_lossy().to_string();
+        if name == "lo" {
+            continue;
+        }
+        let base = format!("/sys/class/net/{name}");
+        let read = |f: &str| fs::read_to_string(format!("{base}/{f}")).unwrap_or_default();
+
+        let mac = read("address").trim().to_string();
+        let is_up = linux::parse_operstate(&read("operstate"));
+        let link_speed_bps = linux::parse_speed_bps(&read("speed"));
+        let is_physical = fs::symlink_metadata(format!("{base}/device")).is_ok();
+        let is_wireless = fs::metadata(format!("{base}/wireless")).is_ok()
+            || fs::symlink_metadata(format!("{base}/phy80211")).is_ok();
+        let interface_type = if is_wireless {
+            "Ieee80211".to_string()
+        } else if is_physical {
+            "EthernetCsmacd".to_string()
+        } else {
+            "Other".to_string()
+        };
+
+        let acc = accs.remove(&name);
+        let (ipv4, ipv6, cidr) = acc
+            .map(|a| (a.ipv4, a.ipv6, a.cidr))
+            .unwrap_or((Vec::new(), Vec::new(), None));
+
+        // SSID 富化移至 get_interfaces（避免扫描热路径起 iw 子进程）。
+        let ssid: Option<String> = None;
+
+        result.push(InterfaceInfo {
+            name: name.clone(),
+            description: name.clone(),
+            mac,
+            ipv4,
+            ipv6,
+            is_up,
+            ssid,
+            dhcp_enabled: false,
+            is_physical,
+            interface_type,
+            cidr,
+            guid: name.clone(),
+            link_speed_bps,
+        });
+    }
+
+    result.sort_by(|a, b| b.is_up.cmp(&a.is_up).then_with(|| a.name.cmp(&b.name)));
+    result
+}
+
+/// 经 `nmcli` 建立「网卡名 → 是否 DHCP」映射（ipv4.method=auto 视为 DHCP）。
+/// 无 nmcli / 失败时返回空表（各网卡回退为非 DHCP，与改造前一致）。仅 get_interfaces 低频调用。
+#[cfg(target_os = "linux")]
+fn linux_dhcp_map() -> std::collections::HashMap<String, bool> {
+    use std::collections::HashMap;
+    use std::process::Command;
+
+    let mut map = HashMap::new();
+    let out = match Command::new("nmcli")
+        .args(["-t", "-f", "DEVICE,CONNECTION", "device", "status"])
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return map,
+    };
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    for line in text.lines() {
+        let (dev, con) = match line.split_once(':') {
+            Some(p) => p,
+            None => continue,
+        };
+        if dev.is_empty() || con.is_empty() || con == "--" {
+            continue;
+        }
+        let method = Command::new("nmcli")
+            .args(["-t", "-f", "ipv4.method", "connection", "show", con])
+            .output()
+            .ok()
+            .filter(|m| m.status.success())
+            .map(|m| String::from_utf8_lossy(&m.stdout).to_lowercase())
+            .unwrap_or_default();
+        // 输出形如 "auto" 或 "ipv4.method:auto"；auto=DHCP，manual/disabled=静态。
+        map.insert(dev.to_string(), method.contains("auto"));
+    }
+    map
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
 pub fn get_interfaces() -> Vec<InterfaceInfo> {
     Vec::new()
 }
@@ -327,42 +495,216 @@ pub fn link_speed_for_guid(guid: &str) -> Option<u64> {
     None
 }
 
-#[cfg(not(target_os = "windows"))]
+/// Linux：guid 即接口名，读 /sys/class/net/<if>/speed（Mbps→bps）。
+#[cfg(target_os = "linux")]
+pub fn link_speed_for_guid(guid: &str) -> Option<u64> {
+    // 防路径穿越：接口名不含 '/'。
+    if guid.is_empty() || guid.contains('/') {
+        return None;
+    }
+    let s = std::fs::read_to_string(format!("/sys/class/net/{guid}/speed")).ok()?;
+    linux::parse_speed_bps(&s)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
 pub fn link_speed_for_guid(_guid: &str) -> Option<u64> {
     None
 }
 
+/// Windows：扫描热路径取 MAC（兼作存活探测）。
+///
+/// 不再用 `SendARP`——它对**离线**主机无超时参数、内部重试 1-3s 且受内核 ARP 解析节流，
+/// 整个 /24 扫描极慢。改为两步、纯原生 IP Helper：
+/// 1) 发一个**短超时 ICMP echo** 触发协议栈对目标的 ARP 解析（离线主机 ~200ms 封顶）。
+///    即使主机被防火墙挡 ICMP，只要它应答 ARP，邻居缓存就会被填充。
+/// 2) 读**邻居表**（`GetIpNetTable2`，即 ARP 缓存）取该 IP 的 MAC。
+///
+/// 仍按 L2/ARP 发现（稳，能找到挡 ICMP 的主机），但每主机封顶 200ms 且真并发。
 #[cfg(target_os = "windows")]
 pub fn resolve_mac_address(ip: Ipv4Addr) -> Option<String> {
-    use std::ffi::CString;
-    use windows::core::PCSTR; // 引入 PCSTR
-    use windows::Win32::NetworkManagement::IpHelper::SendARP;
-    use windows::Win32::Networking::WinSock::inet_addr;
+    win_trigger_arp(ip, 200);
+    win_neighbor_mac(ip)
+}
 
+/// 发一个短超时 ICMP echo，仅为触发协议栈解析目标 MAC、填充邻居缓存（回包结果不关心）。
+#[cfg(target_os = "windows")]
+fn win_trigger_arp(ip: Ipv4Addr, timeout_ms: u32) {
+    use std::ffi::c_void;
+    use windows::Win32::NetworkManagement::IpHelper::{
+        IcmpCloseHandle, IcmpCreateFile, IcmpSendEcho,
+    };
     unsafe {
-        let ip_str = CString::new(ip.to_string()).ok()?;
-        // 修复：inet_addr 在 windows-rs 0.58 需要 PCSTR 参数
-        // 强制转换 *const i8 为 *const u8，并包装为 PCSTR
-        let dest_ip = inet_addr(PCSTR(ip_str.as_ptr() as *const u8));
+        let handle = match IcmpCreateFile() {
+            Ok(h) => h,
+            Err(_) => return,
+        };
+        let dest = u32::from_le_bytes(ip.octets());
+        let payload = [0u8; 1];
+        let mut reply = vec![0u8; 256];
+        let _ = IcmpSendEcho(
+            handle,
+            dest,
+            payload.as_ptr() as *const c_void,
+            payload.len() as u16,
+            None,
+            reply.as_mut_ptr() as *mut c_void,
+            reply.len() as u32,
+            timeout_ms,
+        );
+        let _ = IcmpCloseHandle(handle);
+    }
+}
 
-        let src_ip = 0u32;
-        let mut mac_buf = [0u8; 6];
-        let mut mac_len = 6u32;
+/// 读邻居表（ARP 缓存），取 `ip` 对应、含 6 字节非全零 MAC 的项；无则 None。
+#[cfg(target_os = "windows")]
+fn win_neighbor_mac(ip: Ipv4Addr) -> Option<String> {
+    use std::ffi::c_void;
+    use windows::Win32::NetworkManagement::IpHelper::{
+        FreeMibTable, GetIpNetTable2, MIB_IPNET_TABLE2,
+    };
+    use windows::Win32::Networking::WinSock::AF_INET;
+    unsafe {
+        let mut table: *mut MIB_IPNET_TABLE2 = std::ptr::null_mut();
+        if GetIpNetTable2(AF_INET, &mut table).0 != 0 || table.is_null() {
+            return None;
+        }
+        let t = &*table;
+        let want = u32::from_ne_bytes(ip.octets());
+        let rows = std::slice::from_raw_parts(t.Table.as_ptr(), t.NumEntries as usize);
+        let mut found = None;
+        for row in rows {
+            if row.Address.Ipv4.sin_addr.S_un.S_addr == want && row.PhysicalAddressLength == 6 {
+                let mac = &row.PhysicalAddress[..6];
+                if mac.iter().any(|&b| b != 0) {
+                    found = Some(
+                        mac.iter()
+                            .map(|b| format!("{:02x}", b))
+                            .collect::<Vec<_>>()
+                            .join(":"),
+                    );
+                    break;
+                }
+            }
+        }
+        FreeMibTable(table as *const c_void);
+        found
+    }
+}
 
-        let ret = SendARP(
-            dest_ip,
-            src_ip,
-            mac_buf.as_mut_ptr() as *mut _,
-            &mut mac_len,
+/// Linux：主动发 ARP request 并等 reply（语义等价 Windows SendARP）。
+/// 自动选出口网卡（按目标 IP 落在哪个本机子网）。需 CAP_NET_RAW，无权限/超时返回 None。
+#[cfg(target_os = "linux")]
+pub fn resolve_mac_address(ip: Ipv4Addr) -> Option<String> {
+    use nix::net::if_::if_nametoindex;
+    use std::time::{Duration, Instant};
+
+    // 1) 选出口网卡：目标 IP 与某网卡 ipv4 同子网。用廉价 core（不起 iw/nmcli 子进程）。
+    let ifaces = linux_core_interfaces();
+    let (if_name, src_ip, src_mac) = ifaces.iter().find_map(|i| {
+        if !i.is_up {
+            return None;
+        }
+        let cidr = i.cidr.as_ref()?;
+        let net: ipnetwork::Ipv4Network = cidr.parse().ok()?;
+        if !net.contains(ip) {
+            return None;
+        }
+        let src_ip: Ipv4Addr = i.ipv4.first()?.parse().ok()?;
+        let mut mac = [0u8; 6];
+        for (k, part) in i.mac.split(':').enumerate() {
+            if k >= 6 {
+                break;
+            }
+            mac[k] = u8::from_str_radix(part, 16).ok()?;
+        }
+        Some((i.name.clone(), src_ip, mac))
+    })?;
+
+    let ifindex = if_nametoindex(if_name.as_str()).ok()? as i32;
+    let frame = linux::build_arp_request(src_mac, src_ip, ip);
+
+    // 2) AF_PACKET 原始套接字收发（unsafe libc）。
+    unsafe {
+        let fd = libc::socket(
+            libc::AF_PACKET,
+            libc::SOCK_RAW,
+            (libc::ETH_P_ARP as u16).to_be() as i32,
+        );
+        if fd < 0 {
+            return None;
+        }
+        // 每轮 recv 最多 ~90ms；共 3 轮（重发），总窗口 ~270ms，与原 250ms 单次相当。
+        let tv = libc::timeval { tv_sec: 0, tv_usec: 90_000 };
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_RCVTIMEO,
+            &tv as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::timeval>() as libc::socklen_t,
         );
 
-        if ret == 0 && mac_len == 6 {
-            Some(format!(
-                "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                mac_buf[0], mac_buf[1], mac_buf[2], mac_buf[3], mac_buf[4], mac_buf[5]
-            ))
+        let mut sll: libc::sockaddr_ll = std::mem::zeroed();
+        sll.sll_family = libc::AF_PACKET as u16;
+        sll.sll_protocol = (libc::ETH_P_ARP as u16).to_be();
+        sll.sll_ifindex = ifindex;
+        sll.sll_halen = 6;
+        sll.sll_addr[..6].copy_from_slice(&[0xff; 6]);
+
+        // 重试 3 轮：每轮重发一次 ARP request + 持续收最多 ~90ms。某台繁忙主机若丢了
+        // 某一轮的请求，下一轮还能命中——比「只发一次」更稳，总耗时几乎不变。任一轮
+        // 收到目标的 reply 即返回。
+        let mut result = None;
+        let mut buf = [0u8; 1500];
+        'rounds: for _round in 0..3 {
+            let sent = libc::sendto(
+                fd,
+                frame.as_ptr() as *const libc::c_void,
+                frame.len(),
+                0,
+                &sll as *const _ as *const libc::sockaddr,
+                std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t,
+            );
+            if sent < 0 {
+                break;
+            }
+            let round_deadline = Instant::now() + Duration::from_millis(90);
+            loop {
+                if Instant::now() >= round_deadline {
+                    break; // 本轮超时 → 进入下一轮重发
+                }
+                let n = libc::recv(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0);
+                if n <= 0 {
+                    break; // recv 超时（SO_RCVTIMEO）→ 下一轮
+                }
+                if let Some(mac) = linux::parse_arp_reply(&buf[..n as usize], ip) {
+                    result = Some(mac);
+                    break 'rounds;
+                }
+                // 非目标的 ARP 包 → 继续本轮接收
+            }
+        }
+        libc::close(fd);
+        result
+    }
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+pub fn resolve_mac_address(_ip: Ipv4Addr) -> Option<String> {
+    None
+}
+
+/// 探测当前进程是否具备 `CAP_NET_RAW`（创建原始套接字的能力）。
+/// 缺它则局域网扫描 / Ping / Trace / 链路质量都不可用——退出时据此给用户友好提示。
+/// 直接尝试创建一个原始 ICMP 套接字：成功即有能力。
+#[cfg(target_os = "linux")]
+pub fn has_cap_net_raw() -> bool {
+    unsafe {
+        let fd = libc::socket(libc::AF_INET, libc::SOCK_RAW, libc::IPPROTO_ICMP);
+        if fd < 0 {
+            false
         } else {
-            None
+            libc::close(fd);
+            true
         }
     }
 }
@@ -622,6 +964,82 @@ fn decode_dns_name(buf: &[u8], start: usize) -> Option<(String, usize)> {
     Some((labels.join("."), next.unwrap_or(off)))
 }
 
+/// Linux 专属辅助：sysfs 文本解析、掩码换算。纯函数，便于单测。
+/// 平台无关，始终编译；Windows 上不调用，故 allow(dead_code)。
+pub(crate) mod linux {
+    #![allow(dead_code)]
+    use std::net::Ipv4Addr;
+
+    /// `/sys/class/net/<if>/operstate` == "up" 视为启用。
+    pub fn parse_operstate(s: &str) -> bool {
+        s.trim() == "up"
+    }
+
+    /// `/sys/class/net/<if>/speed`（Mbps）→ bit/s。负值/非数字/空 → None。
+    pub fn parse_speed_bps(s: &str) -> Option<u64> {
+        let mbps = s.trim().parse::<i64>().ok()?;
+        if mbps <= 0 { None } else { Some(mbps as u64 * 1_000_000) }
+    }
+
+    /// 点分十进制子网掩码 → 前缀长度；要求是连续 1。非连续返回 None。
+    pub fn mask_to_prefix(mask: Ipv4Addr) -> Option<u8> {
+        let bits = u32::from(mask);
+        let ones = bits.leading_ones();
+        let expected = if ones == 0 { 0 } else { u32::MAX << (32 - ones) };
+        if bits == expected { Some(ones as u8) } else { None }
+    }
+
+    /// 前缀长度 → 点分十进制掩码。
+    pub fn prefix_to_mask(prefix: u8) -> Ipv4Addr {
+        let p = prefix.min(32);
+        let bits = if p == 0 { 0 } else { u32::MAX << (32 - p) };
+        Ipv4Addr::from(bits)
+    }
+
+    /// 构造以太网广播帧 + ARP request（who-has dst_ip，tell src_ip）。42 字节。
+    pub fn build_arp_request(src_mac: [u8; 6], src_ip: Ipv4Addr, dst_ip: Ipv4Addr) -> Vec<u8> {
+        let mut f = Vec::with_capacity(42);
+        f.extend_from_slice(&[0xff; 6]);
+        f.extend_from_slice(&src_mac);
+        f.extend_from_slice(&[0x08, 0x06]);
+        f.extend_from_slice(&[0x00, 0x01]);
+        f.extend_from_slice(&[0x08, 0x00]);
+        f.push(6);
+        f.push(4);
+        f.extend_from_slice(&[0x00, 0x01]);
+        f.extend_from_slice(&src_mac);
+        f.extend_from_slice(&src_ip.octets());
+        f.extend_from_slice(&[0u8; 6]);
+        f.extend_from_slice(&dst_ip.octets());
+        f
+    }
+
+    /// 从收到的帧解析 ARP reply 的 sender MAC（要求 sender IP == want_ip 且 opcode=reply）。
+    pub fn parse_arp_reply(frame: &[u8], want_ip: Ipv4Addr) -> Option<String> {
+        if frame.len() < 42 {
+            return None;
+        }
+        if frame[12..14] != [0x08, 0x06] {
+            return None;
+        }
+        if frame[20..22] != [0x00, 0x02] {
+            return None;
+        }
+        let sender_mac = &frame[22..28];
+        let sender_ip = Ipv4Addr::new(frame[28], frame[29], frame[30], frame[31]);
+        if sender_ip != want_ip {
+            return None;
+        }
+        Some(
+            sender_mac
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<Vec<_>>()
+                .join(":"),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -662,6 +1080,70 @@ mod tests {
         buf.extend_from_slice(&[0x00, 0x00]); // flags：unique
 
         assert_eq!(parse_netbios_response(&buf).as_deref(), Some("VIVO-PHONE"));
+    }
+
+    #[test]
+    fn parse_operstate_up() {
+        assert!(super::linux::parse_operstate("up\n"));
+        assert!(!super::linux::parse_operstate("down"));
+        assert!(!super::linux::parse_operstate("unknown"));
+    }
+
+    #[test]
+    fn parse_speed_valid_and_invalid() {
+        assert_eq!(super::linux::parse_speed_bps("1000\n"), Some(1_000_000_000));
+        assert_eq!(super::linux::parse_speed_bps("100"), Some(100_000_000));
+        assert_eq!(super::linux::parse_speed_bps("-1"), None);
+        assert_eq!(super::linux::parse_speed_bps("oops"), None);
+    }
+
+    #[test]
+    fn mask_prefix_roundtrip() {
+        use std::net::Ipv4Addr;
+        assert_eq!(super::linux::mask_to_prefix(Ipv4Addr::new(255,255,255,0)), Some(24));
+        assert_eq!(super::linux::mask_to_prefix(Ipv4Addr::new(255,255,0,0)), Some(16));
+        assert_eq!(super::linux::mask_to_prefix(Ipv4Addr::new(255,255,255,255)), Some(32));
+        assert_eq!(super::linux::mask_to_prefix(Ipv4Addr::new(0,0,0,0)), Some(0));
+        assert_eq!(super::linux::mask_to_prefix(Ipv4Addr::new(255,0,255,0)), None);
+        assert_eq!(super::linux::prefix_to_mask(24), Ipv4Addr::new(255,255,255,0));
+    }
+
+    #[test]
+    fn arp_request_frame_layout() {
+        use std::net::Ipv4Addr;
+        let src_mac = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
+        let frame = super::linux::build_arp_request(
+            src_mac,
+            Ipv4Addr::new(192, 168, 1, 10),
+            Ipv4Addr::new(192, 168, 1, 1),
+        );
+        assert_eq!(frame.len(), 42);
+        assert_eq!(&frame[0..6], &[0xff; 6]);
+        assert_eq!(&frame[6..12], &src_mac);
+        assert_eq!(&frame[12..14], &[0x08, 0x06]);
+        assert_eq!(&frame[20..22], &[0x00, 0x01]);
+        assert_eq!(&frame[38..42], &[192, 168, 1, 1]);
+    }
+
+    #[test]
+    fn arp_reply_extracts_sender_mac() {
+        use std::net::Ipv4Addr;
+        let mut frame = vec![0u8; 14];
+        frame[12..14].copy_from_slice(&[0x08, 0x06]);
+        frame.extend_from_slice(&[0x00, 0x01, 0x08, 0x00, 0x06, 0x04, 0x00, 0x02]);
+        let sender_mac = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
+        frame.extend_from_slice(&sender_mac);
+        frame.extend_from_slice(&[192, 168, 1, 1]);
+        frame.extend_from_slice(&[0u8; 6]);
+        frame.extend_from_slice(&[192, 168, 1, 10]);
+        assert_eq!(
+            super::linux::parse_arp_reply(&frame, Ipv4Addr::new(192, 168, 1, 1)),
+            Some("aa:bb:cc:dd:ee:ff".to_string())
+        );
+        assert_eq!(
+            super::linux::parse_arp_reply(&frame, Ipv4Addr::new(192, 168, 1, 2)),
+            None
+        );
     }
 
     #[test]

@@ -14,7 +14,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 |---|---|---|
 | Dashboard 概览 | 本地+公网信息聚合 | ✅ 基本完成 |
 | Adapter 适配器 | 列出网卡 **+ 配置静态IP/DNS/DHCP**（item 4） | ✅ 展示 + IP 配置均已实现（编辑态 UI + 校验 + 二次确认 + WMI 写入）。状态变化（USB 插拔/启停）后台节流自动刷新。⚠️ 真机实测已暴露并修复两个写入 BUG（静态 IP 掩码预填错成 /32 致错误码 66、DHCP 误判「方法不存在」），写入路径仍建议再次真机复测 |
-| Scanner 扫描 | 局域网 IP/MAC/主机名扫描 | ⚠️ **仅 Windows**。`resolve_mac_address` 在非 Windows 返回 `None`，Unix 上扫不到结果 |
+| Scanner 扫描 | 局域网 IP/MAC/主机名扫描 | ✅ **Windows + Linux**。Windows 用 SendARP；Linux 用 AF_PACKET 原始套接字主动 ARP（需 CAP_NET_RAW）。其它 Unix 仍返回 `None` |
 | Traffic 流量 | 实时速率 / 会话 / 累计 | ✅ 完成 |
 | Diagnostics 诊断 | Ping/路由跟踪/端口扫描/链路质量/公网测速/内网测速 | ✅ **6/6 全部实现**：Ping、端口扫描、公网测速、路由跟踪、链路质量、内网测速 |
 | Settings 设置 | 并发数、语言等 | ✅ 语言 + 扫描并发数（快捷键可经 config.json 自定义） |
@@ -38,7 +38,7 @@ cargo check              # 快速类型检查
 - `keymap::tests::*` — 快捷键解析 / 覆盖 / 容错。
 - `utils::format::tests::*` — 速率/体积格式化。
 
-**主要面向 Windows**：`Cargo.toml` 用 `cfg` 区分平台依赖。Windows 走 `windows` (windows-rs 0.58)、`ipconfig`、`winreg`；非 Windows 走 `surge-ping`（需 root）。许多功能（网卡枚举、ARP、ICMP）只有 Windows 实现，非 Windows 分支大多为 stub。
+**Windows + Linux 双平台**：`Cargo.toml` 用 `cfg` 区分平台依赖。Windows 走 `windows` (windows-rs 0.58)、`ipconfig`、`winreg`；Linux 走 `socket2`/`nix`/`libc`（原始套接字 ICMP、AF_PACKET ARP、sysfs/getifaddrs 网卡枚举）+ `surge-ping`（Ping，需 root）；其它 Unix 分支仍为 stub。Linux 原始套接字（扫描/Trace/链路质量）需 `CAP_NET_RAW`；IP 写入需 PolicyKit(NetworkManager) 或 sudo。
 
 ## 架构
 
@@ -97,7 +97,7 @@ cargo check              # 快速类型检查
 - `public_speed.rs`（`PublicSpeedTool`）— 流式型：reqwest 分块下载，任务内计时算瞬时速率，Sparkline 曲线。
 - `trace.rs`（`TraceTool`）— 逐跳 ICMP（TTL 递增），Windows 原生，复用 `icmp::echo_once`。
 - `link_quality.rs`（`LinkQualityTool`）— **可选网卡**（多网卡并存时 ←→ 切换）：探测经 `icmp::echo_once_from` 绑定该网卡源 IP（`IcmpSendEcho2Ex`）。测试期间**持续采样**延迟与无线射频状态（RSSI/信号质量），有线/无线分别采集专业参数（无线：RSSI dBm、信号质量%、PHY/Wi-Fi 代际、频段+信道+频率、Tx/Rx 协商速率、BSSID、认证/加密；有线：协商链路速率、媒体、MAC）。**多维加权评分**（`mod score` 纯函数；有线 丢包40/延迟35/抖动25，无线 丢包25/延迟20/抖动15/信号25/速率10/制式5）→ 总评级 + 分项条 + 最弱维度高亮；延迟与 RSSI 双 Sparkline。无线信息经 `utils/wlan.rs` 查询（`WlanQueryInterface`+`WlanGetNetworkBssList`）。
-- `lan_speed.rs`（`LanSpeedTool`）— 服务端/客户端 TCP 吞吐对测（iperf 风格），跨平台。
+- `lan_speed/`（`LanSpeedTool` + `proto.rs`）— 服务端/客户端吞吐对测（iperf 风格），**跨平台纯 tokio TCP/UDP，无 FFI**。已从单文件拆为目录：`mod.rs`（工具结构体 + TUI + 动态配置面板 + 持久化）与 `proto.rs`（线路协议 + 收发 worker + 测量纯逻辑，带 loopback 单测）。能力：**轻量控制握手**（客户端发长度前缀 JSON `TestSpec`，服务端据此自动配合）；**TCP/UDP** 可选；**并发多流**（1–32）；**上行/下行/双向全双工**（双向分别汇报 TX/RX）；**时长可配**（1–600s）；结束汇总**平均/峰值吞吐 + 总量 + 用时**；**UDP 定速流**（速率 Mbps，0=全速冲）接收侧统计**丢包/乱序/抖动**（per-stream `StreamTracker`，RFC3550 式抖动）。UDP 用注册报文(REG_SEQ)让服务端学客户端地址（重发 4 轮抗首包丢失）。worker 收发计数走 `Arc<AtomicU64>`，250ms 采样上报，结束发 `Summary`。**收发 worker 循环「先 I/O 再判 deadline」**——保证每条流至少完成一次收发，避免高负载/短时长下 worker 被调度到 deadline 之后零字节退出。
 
 `icmp.rs` 收敛单次 ICMP Echo 的 unsafe FFI：`echo_once`（默认路由，trace 用）与 `echo_once_from`（源地址绑定 + 可变载荷，链路质量按网卡用，`IcmpSendEcho2Ex`，需 `Win32_System_IO` feature）；`ping.rs` 因用途不同保留自己的发包循环。`utils/wlan.rs` 收敛无线丰富信息查询（纯换算/标签函数 + Windows `query(guid)`）。子工具统一持有 config/state + `mpsc` 回传 + `Arc<Mutex<bool>>` abort flag；`draw(f, main_area, config_area, i18n, is_focused, active_focus)` 签名一致。**诊断 `match current_tool` 已无 `_` 兜底分支——新增工具须在 update/on_key/draw 三处显式补齐，否则编译报 non-exhaustive。**
 
@@ -143,7 +143,7 @@ cargo check              # 快速类型检查
 
 ### 会话参数持久化（`session.rs` + `app.rs::maybe_persist`）
 
-把各页面/诊断子工具用户输入过的参数（Ping/Trace/端口扫描/链路质量的目标 IP·间隔·超时·载荷·跳数、内网测速模式/对端/端口…）落进 `config.json` 的 `session` 段，重启回灌，避免每次重置。**扫描页 CIDR 不持久化**——每次启动重新按活动网卡推断默认值，用户历史由 MRU 池独立管理（灰字补全 + Ctrl+R）。
+把各页面/诊断子工具用户输入过的参数（Ping/Trace/端口扫描/链路质量的目标 IP·间隔·超时·载荷·跳数、内网测速模式/协议/方向/对端/端口/时长/流数/包大小/速率…）落进 `config.json` 的 `session` 段，重启回灌，避免每次重置。**扫描页 CIDR 不持久化**——每次启动重新按活动网卡推断默认值，用户历史由 MRU 池独立管理（灰字补全 + Ctrl+R）。
 
 - **纯数据层**：`src/session.rs` 定义 `SessionState` 聚合 + 各工具的 `*Persist` 子结构（serde）。所有结构体用**容器级 `#[serde(default)]` + 自定义 `Default`**，对缺字段/旧配置逐字段回退默认值——向后/向前兼容（旧 `config.json` 无 `session` 段、或新增字段都不会让解析失败）。
 - **工具契约**：每个相关工具实现一对 `export_persist()`（导出快照）/`apply_persist()`（回灌）。`DiagnosticsModule` 用 `export_into`/`apply_persist` 委派给六个子工具。新增需持久化参数的工具/字段时，在对应 `*Persist` 加字段并在工具的 export/apply 里接线。
@@ -180,5 +180,5 @@ cargo check              # 快速类型检查
 
 - **再次实测 Adapter IP 配置写入**：两个写入 BUG 已修（见上节「真机实测踩过的两个坑」），但修复后的写入路径需管理员权限再做一次真机验证：静态↔DHCP 往返、确认掩码预填为正常值（如 255.255.255.0）。DHCP 模式下 DNS 已尽力重置为自动（`SetDNSServerSearchOrder` 传空数组 = VT_NULL）。
 - **Scanner OUI 表**：`utils::oui` 仅收录少量高置信度前缀，可扩充（或接入完整 OUI 数据库）。
-- **跨平台迁移**：当前聚焦 Windows。端口扫描/公网测速/内网测速已天然跨平台；网卡枚举/ARP/ICMP(traceroute,链路质量,含源绑定 echo_once_from)/无线信息(`utils/wlan.rs`)/IP 配置仅 Windows，非 Windows 多为 stub 或本地化"不支持"（`wlan::query` 非 Windows 返回 `None`，评分回退为仅连通性权重）。迁移时在 `cfg(not(windows))` 侧补实现，参照 `utils/net.rs`、`diagnostics/icmp.rs`。
+- **跨平台现状（Linux 已实现）**：端口扫描/公网测速/内网测速天然跨平台；网卡枚举（sysfs/getifaddrs）、ARP 扫描（AF_PACKET）、ICMP(traceroute/链路质量，含源绑定 echo_once_from)（socket2 原始套接字）、无线信息（`utils/wlan.rs`，解析 `iw dev link`）、IP 配置写入（nmcli→netplan→ip 三层后端）**在 Linux 均已有实现**（需 `CAP_NET_RAW` / sudo / `iw`，详见 README "Linux 支持" 节）。macOS 等其它 Unix 仍为 stub；继续迁移时在 `cfg(not(windows))` 侧参照 `utils/net.rs`、`diagnostics/icmp.rs`、`utils/wlan.rs`。
 - **再次实测链路质量增强**：网卡选择/源绑定探测/无线参数采集/多维评分已实现并通过 `cargo build --release` + 32 项单测；**FFI(WLAN 查询、IcmpSendEcho2Ex)与 TUI 布局需在多网卡(含一块 Wi-Fi)真机、管理员权限下手动复测**（见 `docs/superpowers/plans/2026-06-09-link-quality-enhancement.md` Task 8 清单）。

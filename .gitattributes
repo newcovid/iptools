@@ -1,0 +1,2 @@
+# Shell 脚本必须用 LF 行尾——否则 shebang 带 \r 会让 Linux 无法执行（install.sh）。
+*.sh text eol=lf

@@ -489,7 +489,9 @@ impl TraceTool {
 // 平台实现
 // -----------------------------------------------------------------------------
 
-#[cfg(target_os = "windows")]
+// Windows 与 unix（Linux）共用同一逐跳逻辑：仅依赖跨平台的 icmp::echo_once、tokio、
+// mpsc 与 dns_lookup，无平台专属符号。unix 的 echo_once 由 socket2 raw 套接字实现。
+#[cfg(any(target_os = "windows", unix))]
 async fn run_trace(
     target: String,
     max_hops: u32,
@@ -575,15 +577,3 @@ async fn run_trace(
     let _ = tx.send(TraceEvent::Done).await;
 }
 
-#[cfg(not(target_os = "windows"))]
-async fn run_trace(
-    _target: String,
-    _max_hops: u32,
-    _timeout_ms: u32,
-    tx: mpsc::Sender<TraceEvent>,
-    _abort: Arc<Mutex<bool>>,
-) {
-    let _ = tx
-        .send(TraceEvent::Error("diag_trace_unsupported".into()))
-        .await;
-}

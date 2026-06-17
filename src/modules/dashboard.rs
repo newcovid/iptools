@@ -103,6 +103,41 @@ impl Dashboard {
                 }
             }
         }
+
+        #[cfg(target_os = "linux")]
+        {
+            use std::process::Command;
+            self.proxy_setting = None;
+            // GNOME：mode 为 manual 时取 http host:port。best-effort，非 GNOME/无命令则跳过。
+            let mode = Command::new("gsettings")
+                .args(["get", "org.gnome.system.proxy", "mode"])
+                .output()
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_default();
+            if mode.contains("manual") {
+                let host = Command::new("gsettings")
+                    .args(["get", "org.gnome.system.proxy.http", "host"])
+                    .output()
+                    .ok()
+                    .map(|o| {
+                        String::from_utf8_lossy(&o.stdout)
+                            .trim()
+                            .trim_matches('\'')
+                            .to_string()
+                    })
+                    .unwrap_or_default();
+                let port = Command::new("gsettings")
+                    .args(["get", "org.gnome.system.proxy.http", "port"])
+                    .output()
+                    .ok()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .unwrap_or_default();
+                if !host.is_empty() {
+                    self.proxy_setting = Some(format!("{host}:{port}"));
+                }
+            }
+        }
     }
 
     /// 多端点 HTTPS 回退 + 尊重系统代理 + 8s 超时版本。
