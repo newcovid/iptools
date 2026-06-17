@@ -1,6 +1,6 @@
 [package]
 name = "iptools"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 authors = ["Your Name <you@example.com>"]
 description = "A modular, cross-platform IP management and testing CLI tool."
