@@ -6,13 +6,13 @@
 [![CI](https://github.com/newcovid/iptools/actions/workflows/ci.yml/badge.svg)](https://github.com/newcovid/iptools/actions/workflows/ci.yml)
 [![Release](https://github.com/newcovid/iptools/actions/workflows/release.yml/badge.svg)](https://github.com/newcovid/iptools/actions/workflows/release.yml)
 [![Latest Release](https://img.shields.io/github/v/release/newcovid/iptools)](https://github.com/newcovid/iptools/releases/latest)
-![Platform](https://img.shields.io/badge/platform-Windows-blue)
+![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-blue)
 ![Rust](https://img.shields.io/badge/rust-2021-orange)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 把日常要装一堆小工具、敲一堆命令才能搞定的事——看本机/公网信息、配 IP、扫局域网、
-看流量、ping/路由跟踪/端口扫描/测速/链路质量评测——收进**一个零外部依赖的单文件二进制**里，
-用方向键和鼠标就能玩转。
+看流量、ping/路由跟踪/端口扫描/测速/链路质量评测——收进**一个单文件二进制**里，
+用方向键和鼠标就能玩转。**Windows / Linux 双平台**。
 
 ---
 
@@ -20,7 +20,7 @@
 
 - 🧭 **六大模块，一个界面**：概览 · 适配器 · 扫描 · 流量 · 诊断 · 设置，`Tab` 切换。
 - 🖱️ **键鼠双操作**：方向键/`hjkl`/数字键导航，鼠标点击切页/选项、滚轮滚动，文本框点击定位光标。
-- 🌐 **零外部依赖**：不调用 `netsh`/`arp`/`ping.exe`，全部走原生 Windows API（windows-rs）。
+- 🌐 **原生优先**：Windows 全程原生 API（windows-rs，不调 `netsh`/`arp`/`ping.exe`）；Linux 读取（网卡枚举/ARP/ICMP）走原生 sysfs/getifaddrs/原始套接字，IP 写入与 Wi-Fi 详情借发行版预装命令（`nmcli`/`netplan`/`ip`/`iw`）。
 - 🌏 **多语言 i18n**：中文 / 英文，运行时 `Ctrl+L` 切换，首启按系统区域自动选择。
 - 📦 **单文件分发**：语言包经 `include_str!` 编译期内嵌，发布二进制开箱即用。
 - ⚙️ **可定制快捷键**：`config.json` 里随意重绑任意动作。
@@ -32,7 +32,7 @@
 | 模块 | 能做什么 |
 |---|---|
 | **概览 Dashboard** | 本机信息（时间、活动网卡、SSID、IP 及静态/DHCP、物理/虚拟、实时速率、开机流量）＋ 公网信息（公网 IP、归属地、运营商）聚合一屏。公网信息走 **HTTPS 多端点回退**（ip.sb→ipinfo，可在 `public_ip` 自定义），**尊重系统代理**、8s 超时，**TUN/代理下也能识别** |
-| **适配器 Adapter** | 列出物理/虚拟网卡（IPv4/IPv6/MAC/描述）＋ **配置静态 IP / 掩码 / 网关 / DNS / 切换 DHCP**（带校验 + 二次确认 + WMI 写入）。USB 插拔/启停后台自动刷新 |
+| **适配器 Adapter** | 列出物理/虚拟网卡（IPv4/IPv6/MAC/描述）＋ **配置静态 IP / 掩码 / 网关 / DNS / 切换 DHCP**（带校验 + 二次确认；写入走 Windows WMI 或 Linux nmcli·netplan·ip 分层后端）。USB 插拔/启停后台自动刷新 |
 | **扫描 Scanner** | 局域网 IP / MAC / 主机名扫描（基于原生 ARP），可自定义 CIDR 与并发数。主机名三级回退：反向 DNS →（VPN/无 PTR 时）NetBIOS → mDNS，不靠系统 DNS 也能认出设备名 |
 | **流量 Traffic** | 实时上下行速率、当前会话累计、开机后累计 |
 | **诊断 Diagnostics** | **6 合 1**：Ping · 路由跟踪 · 端口扫描 · 公网测速 · **内网测速（iperf 风格对测）** · **链路质量评测（有线/无线）** |
@@ -57,7 +57,8 @@
 前往 [**Releases**](https://github.com/newcovid/iptools/releases/latest) 下载对应平台的可执行文件，
 解压即用，无需安装运行时。
 
-> 适配器 IP 配置写入、ICMP 等部分功能需**管理员权限**，请「以管理员身份运行」。
+> 部分功能（适配器 IP 写入、ICMP、ARP 扫描）需提权：**Windows** 请「以管理员身份运行」；
+> **Linux** 用 `sudo ./install.sh` 一键授予 `CAP_NET_RAW`（或 `sudo` 运行），IP 写入另需 sudo/PolicyKit。
 
 ### 方式二：从源码构建
 
@@ -133,7 +134,7 @@ iptools -c D:\path\my.json   # 使用自定义配置文件
 | 路由跟踪 / 链路质量 | ✅ | ✅（需 CAP_NET_RAW） | ⛔ stub |
 | 无线信息 | ✅ | ✅（需 `iw`） | ⛔ stub |
 | IP 配置写入 | ✅ | ✅（nmcli/netplan/ip） | ⛔ stub |
-| Ping | ✅ | ✅（需 root，`surge-ping`） | ✅（需 root） |
+| Ping | ✅ | ✅（需 CAP_NET_RAW，`surge-ping`） | ✅（需 root） |
 
 ## Linux 支持
 
