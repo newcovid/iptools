@@ -14,6 +14,13 @@ use web_sys::{window, Document, Element};
 
 use unicode_width::UnicodeWidthStr;
 
+fn checked_cell_position(cell_count: usize, width: u16, x: u16, y: u16) -> Option<usize> {
+    let position = (y as usize)
+        .checked_mul(width as usize)?
+        .checked_add(x as usize)?;
+    (position < cell_count).then_some(position)
+}
+
 use crate::{
     backend::{
         cell_sized::CellSized,
@@ -317,14 +324,16 @@ impl Backend for DomBackend {
         }
 
         for (x, y, cell) in content {
-            let cell_position = (y * self.size.width + x) as usize;
+            let Some(cell_position) =
+                checked_cell_position(self.cells.len(), self.size.width, x, y)
+            else {
+                continue;
+            };
             // A resize is observed by the backend during this draw, while
             // Ratatui's frame still has the previous dimensions. The next
             // frame autoresizes; skip the transient overflow instead of
             // panicking in this single hand-off frame.
-            let Some(elem) = self.cells.get(cell_position) else {
-                continue;
-            };
+            let elem = &self.cells[cell_position];
 
             elem.set_inner_html(cell.symbol());
             elem.set_attribute("style", &get_cell_style_as_css(cell))
@@ -443,6 +452,18 @@ impl Backend for DomBackend {
             ClearType::All => self.clear(),
             _ => Err(IoError::other("unimplemented")),
         }
+    }
+}
+
+#[cfg(test)]
+mod iptools_regression_tests {
+    use super::checked_cell_position;
+
+    #[test]
+    fn resize_handoff_skips_old_frame_overflow() {
+        assert_eq!(checked_cell_position(80, 10, 9, 7), Some(79));
+        assert_eq!(checked_cell_position(80, 10, 0, 8), None);
+        assert_eq!(checked_cell_position(80, 10, 10, 7), None);
     }
 }
 

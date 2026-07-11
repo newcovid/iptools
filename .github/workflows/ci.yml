@@ -69,8 +69,16 @@ jobs:
         shell: pwsh
         run: ./scripts/check-architecture.ps1
 
+      - name: Verify Web font coverage
+        run: |
+          python3 -m pip install "fonttools[woff]==4.61.0"
+          python3 scripts/subset-web-font.py --verify-only
+
       - name: Check WebAssembly crate
         run: cargo check -p iptools-web --target wasm32-unknown-unknown
+
+      - name: Test vendored Ratzilla patches
+        run: cargo test --manifest-path vendor/ratzilla/Cargo.toml --lib
 
       - name: Install Trunk
         run: cargo install trunk --version 0.21.14 --locked
@@ -111,12 +119,15 @@ jobs:
           npm ci
           npx playwright install --with-deps ${{ matrix.browser }}
 
+      - name: Build browser test artifact
+        shell: pwsh
+        run: ./scripts/build-web.ps1
+
       - name: Start Web exhibit
-        working-directory: crates/iptools-web
         run: |
-          trunk serve --address 127.0.0.1 --port 8099 > /tmp/iptools-trunk.log 2>&1 &
+          python3 -m http.server 8099 --directory crates/iptools-web/dist > /tmp/iptools-web.log 2>&1 &
           for i in {1..90}; do curl --fail --silent http://127.0.0.1:8099/ >/dev/null && exit 0; sleep 1; done
-          cat /tmp/iptools-trunk.log
+          cat /tmp/iptools-web.log
           exit 1
 
       - name: Run browser interaction tests

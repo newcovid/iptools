@@ -23,11 +23,15 @@ use ratatui::{
     prelude::Backend,
     style::{Color, Modifier},
 };
+use unicode_width::UnicodeWidthStr;
 use web_sys::{
     js_sys::{Boolean, Map},
     wasm_bindgen::{JsCast, JsValue},
 };
-use unicode_width::UnicodeWidthStr;
+
+fn clip_cell_width(symbol: &str) -> usize {
+    symbol.width().max(1)
+}
 
 /// Width of a single cell.
 ///
@@ -328,7 +332,7 @@ impl CanvasBackend {
                     self.canvas.context.save();
 
                     self.canvas.context.begin_path();
-                    let symbol_width = cell.symbol().width().max(1) as f64;
+                    let symbol_width = clip_cell_width(cell.symbol()) as f64;
                     self.canvas.context.rect(
                         x as f64 * CELL_WIDTH,
                         y as f64 * CELL_HEIGHT,
@@ -453,6 +457,18 @@ impl CanvasBackend {
         self.canvas.context.restore();
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod iptools_regression_tests {
+    use super::clip_cell_width;
+
+    #[test]
+    fn cjk_clip_uses_two_terminal_cells() {
+        assert_eq!(clip_cell_width("网"), 2);
+        assert_eq!(clip_cell_width("A"), 1);
+        assert_eq!(clip_cell_width("\u{301}"), 1);
     }
 }
 

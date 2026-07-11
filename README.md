@@ -11,7 +11,9 @@
 
 ## 在线交互体验
 
-[打开 GitHub Pages WebAssembly Demo](https://newcovid.github.io/iptools/) · [下载最新原生版本](https://github.com/newcovid/iptools/releases/latest)
+[Pages 预览部署状态](https://github.com/newcovid/iptools/actions/workflows/pages.yml) · [下载最新原生版本](https://github.com/newcovid/iptools/releases/latest)
+
+> `v0.4.0-alpha.1` 预览将在 Pages 工作流首次成功部署并确认可离线访问后开放固定体验地址；README 不提前指向尚未上线的 404 页面。
 
 Web 展览与原生 `iptools --demo` 使用相同的状态机和确定性场景，可以实际切换页面、编辑、启动和停止任务。它始终显示 **SIMULATED DATA / 模拟数据**，不会扫描浏览器所在设备或局域网；首次在线加载后可离线使用。
 
@@ -133,7 +135,7 @@ cd crates/iptools-web
 trunk serve
 ```
 
-浏览器端以 Ratzilla 0.3.1 为基础。项目携带两个小型可审计补丁：Canvas 按 Unicode 双宽裁剪，DOM 在 resize 交接帧跳过越界单元；中文字体是 OFL-1.1 的 Maple Mono CN 约 103 KiB 字形子集，许可证和生成说明位于 `crates/iptools-web/assets/fonts/`。
+浏览器端以 Ratzilla 0.3.1 为基础。项目携带两个小型可审计补丁：Canvas 按 Unicode 双宽裁剪，DOM 在 resize 交接帧跳过越界单元；中文字体是 OFL-1.1 的 Maple Mono CN 约 320 KiB 可重复字形子集，许可证、固定源文件哈希和生成脚本说明位于 `crates/iptools-web/assets/fonts/`。
 
 UI 和真实网络写入仍需要在目标系统上手动验证。新增界面文案时必须同时更新 `assets/locales/en-US.json` 和 `assets/locales/zh-CN.json`，并重新生成 Web 字体子集；测试会检查语言包和浏览器字体加载。
 

@@ -65,6 +65,7 @@ Web 默认使用 Canvas，中文自动选择 DOM；`?renderer=canvas` / `?render
 - DOM resize 交接帧忽略旧 frame 超出新 cell vector 的单元，下一帧由 Ratatui autoresize 对齐。
 
 Maple Mono CN 字体以 OFL-1.1 许可分发。Web 只携带项目字符、Latin-1、箭头和框线符号的 WOFF2 子集，避免完整 CJK 字体突破首载预算。
+子集固定使用 Maple Mono NF CN 7.900 的 SHA-256，并由 `scripts/subset-web-font.py` 从共享源码、场景、Web 外壳与语言包重新生成；CI 验证所有必需字符均存在。
 
 所有资源同源且无遥测。Service Worker 对导航采用 network-first，对静态资源采用 cache-first；首次在线加载后支持离线 Demo。
 

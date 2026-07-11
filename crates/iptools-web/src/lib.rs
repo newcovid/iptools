@@ -23,6 +23,7 @@ mod wasm {
         runtime: DemoRuntime,
         ui: UiState,
         last_frame_ms: f64,
+        input_generation: u64,
     }
 
     impl WebApp {
@@ -38,10 +39,12 @@ mod wasm {
                 runtime,
                 ui: UiState::default(),
                 last_frame_ms: performance_now(),
+                input_generation: 0,
             })
         }
 
         fn input(&mut self, input: InputEvent) {
+            self.input_generation = self.input_generation.saturating_add(1);
             let previous_language = self.model.language;
             let effects = self.model.update(Message::Input(input));
             self.dispatch(effects);
@@ -147,9 +150,12 @@ mod wasm {
         terminal.draw_web(move |frame| {
             let mut state = app.borrow_mut();
             state.tick();
+            let input_generation = state.input_generation;
             let WebApp { model, ui, .. } = &mut *state;
             iptools_ui::render(frame, model, ui);
+            mark_rendered(input_generation);
         });
+        focus_terminal();
         Ok(())
     }
 
@@ -199,6 +205,7 @@ mod wasm {
                 if let Some(action) = parse_action(&name) {
                     app.borrow_mut().input(InputEvent::Action(action));
                 }
+                focus_terminal();
             });
             element.add_event_listener_with_callback("click", closure.as_ref().unchecked_ref())?;
             closure.forget();
@@ -381,6 +388,28 @@ mod wasm {
             .and_then(|value| value.performance())
             .map(|value| value.now())
             .unwrap_or_default()
+    }
+
+    fn focus_terminal() {
+        if let Some(terminal) = window()
+            .and_then(|value| value.document())
+            .and_then(|document| document.get_element_by_id("terminal"))
+            .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
+        {
+            let _ = terminal.focus();
+        }
+    }
+
+    fn mark_rendered(input_generation: u64) {
+        if let Some(terminal) = window()
+            .and_then(|value| value.document())
+            .and_then(|document| document.get_element_by_id("terminal"))
+        {
+            let _ = terminal.set_attribute(
+                "data-rendered-input-generation",
+                &input_generation.to_string(),
+            );
+        }
     }
 
     fn js_error(error: impl std::fmt::Display) -> JsValue {

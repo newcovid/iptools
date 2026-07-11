@@ -50,3 +50,6 @@ unicode-width = "0.2.2"
 [dev-dependencies]
 wasm-bindgen-test = "0.3.58"
 critical-section = { version = "1.2", features = ["std"] }
+
+[workspace]
+resolver = "2"

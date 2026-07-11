@@ -24,6 +24,14 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - run: cargo install trunk --version 0.21.14 --locked
+      - name: Build portable Web artifact
+        shell: pwsh
+        run: ./scripts/build-web.ps1 -PublicUrl ./
+      - uses: actions/upload-artifact@v7
+        with:
+          name: iptools-web-portable
+          path: crates/iptools-web/dist
+          retention-days: 30
       - name: Build Pages artifact
         shell: pwsh
         run: ./scripts/build-web.ps1 -PublicUrl /iptools/

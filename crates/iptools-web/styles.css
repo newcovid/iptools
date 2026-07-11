@@ -79,6 +79,15 @@ button:hover, a:hover, select:hover { border-color: #5ee8ff; }
   box-shadow: 0 .5rem 2rem #000a;
 }
 
+:fullscreen body {
+  min-height: 100vh;
+  padding: .5rem;
+}
+
+:fullscreen #terminal {
+  min-height: min(76vh, 900px);
+}
+
 @media (max-width: 720px) and (orientation: portrait) {
   .rotate { display: block; }
   #terminal { min-height: 360px; }

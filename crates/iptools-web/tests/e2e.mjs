@@ -23,7 +23,9 @@ try {
   await page.waitForSelector("#terminal_ratzilla_grid");
   await page.waitForTimeout(600);
   await page.evaluate(() => document.fonts.ready);
+  assert.match(await page.locator(".demo-badge").textContent(), /v0\.4 PREVIEW.*SIMULATED DATA/);
   await page.locator("#terminal").focus();
+  assert.equal(await page.evaluate(() => document.activeElement?.id), "terminal");
   assert.equal(
     await page.evaluate(() => document.fonts.check('16px "Maple Mono CN iptools"')),
     true,
@@ -58,6 +60,43 @@ try {
   await page.waitForTimeout(100);
   const help = hash(await page.locator("#terminal").screenshot());
   assert.notEqual(help, scanning, "Touch controls should reach the shared reducer");
+  assert.equal(
+    await page.evaluate(() => document.activeElement?.id),
+    "terminal",
+    "Touch controls should restore terminal focus",
+  );
+
+  const wheelGeneration = Number(
+    await page.locator("#terminal").getAttribute("data-rendered-input-generation"),
+  );
+  const terminalBox = await page.locator("#terminal").boundingBox();
+  assert.ok(terminalBox);
+  await page.mouse.move(terminalBox.x + terminalBox.width / 2, terminalBox.y + terminalBox.height / 2);
+  await page.mouse.wheel(0, 120);
+  await page.waitForFunction(
+    (generation) =>
+      Number(document.getElementById("terminal")?.dataset.renderedInputGeneration) > generation,
+    wheelGeneration,
+  );
+
+  for (const zoom of ["80%", "100%", "125%", "150%"]) {
+    await page.evaluate((value) => {
+      document.body.style.zoom = value;
+    }, zoom);
+    await page.waitForTimeout(100);
+    const box = await page.locator("#terminal").boundingBox();
+    assert.ok(box && box.width > 300 && box.height > 200, `Terminal should remain visible at ${zoom}`);
+  }
+  await page.evaluate(() => {
+    document.body.style.zoom = "100%";
+  });
+
+  if (browserName === "chromium") {
+    await page.getByRole("button", { name: "Fullscreen" }).click();
+    await page.waitForFunction(() => document.fullscreenElement !== null);
+    await page.getByRole("button", { name: "Exit fullscreen" }).click();
+    await page.waitForFunction(() => document.fullscreenElement === null);
+  }
 
   const foreignOrigins = await page.evaluate(() =>
     performance
@@ -67,6 +106,24 @@ try {
   );
   assert.deepEqual(foreignOrigins, []);
   assert.deepEqual(pageErrors, []);
+
+  if (browserName === "chromium") {
+    assert.equal(
+      await page.evaluate(async () => {
+        await navigator.serviceWorker.ready;
+        return (await caches.keys()).some((name) =>
+          name.startsWith("iptools-web-v0.4-alpha.1-"),
+        );
+      }),
+      true,
+      "The current offline cache should be active",
+    );
+    await page.context().setOffline(true);
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForSelector("#terminal_ratzilla_grid");
+    assert.match(await page.locator(".demo-badge").textContent(), /SIMULATED DATA/);
+    await page.context().setOffline(false);
+  }
 
   const canvasPage = await browser.newPage({ viewport: { width: 1200, height: 800 } });
   await canvasPage.goto(`${baseURL}?renderer=canvas&lang=en&scenario=home-network`, {
@@ -82,13 +139,77 @@ try {
     canvasBefore,
     "Canvas keyboard input should reach the shared reducer",
   );
+  const latencies = await measureInputLatencies(canvasPage, 40);
+  const p95 = percentile(latencies, 0.95);
+  assert.ok(p95 <= 100, `Canvas input latency p95 should be <=100ms, got ${p95.toFixed(1)}ms`);
   await canvasPage.close();
 
-  console.log(`iptools web e2e: ${browserName} Chinese DOM, Canvas and interaction passed`);
+  const chineseCanvas = await browser.newPage({ viewport: { width: 1200, height: 800 } });
+  const chineseCanvasErrors = [];
+  chineseCanvas.on("pageerror", (error) => chineseCanvasErrors.push(error.message));
+  await chineseCanvas.goto(`${baseURL}?renderer=canvas&lang=zh&scenario=multi-adapter`, {
+    waitUntil: "networkidle",
+  });
+  await chineseCanvas.waitForSelector("#terminal canvas");
+  await chineseCanvas.evaluate(() => document.fonts.ready);
+  assert.equal(
+    await chineseCanvas.evaluate(() => document.fonts.check('16px "Maple Mono CN iptools"')),
+    true,
+  );
+  assert.deepEqual(chineseCanvasErrors, []);
+  await chineseCanvas.close();
+
+  const narrowPage = await browser.newPage({ viewport: { width: 390, height: 844 } });
+  await narrowPage.goto(`${baseURL}?lang=zh`, { waitUntil: "networkidle" });
+  assert.notEqual(
+    await narrowPage.locator(".rotate").evaluate((element) => getComputedStyle(element).display),
+    "none",
+    "Portrait layouts should display the landscape hint",
+  );
+  await narrowPage.close();
+
+  console.log(`iptools web e2e: ${browserName} DOM, Canvas, offline and interaction passed`);
 } finally {
   await browser.close();
 }
 
 function hash(buffer) {
   return crypto.createHash("sha256").update(buffer).digest("hex");
+}
+
+async function measureInputLatencies(page, iterations) {
+  return page.evaluate(async (count) => {
+    const terminal = document.getElementById("terminal");
+    const samples = [];
+    for (let index = 0; index < count; index += 1) {
+      const previous = terminal.dataset.renderedInputGeneration;
+      const start = performance.now();
+      await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          observer.disconnect();
+          reject(new Error("render acknowledgement timed out"));
+        }, 1000);
+        const observer = new MutationObserver(() => {
+          if (terminal.dataset.renderedInputGeneration === previous) return;
+          clearTimeout(timeout);
+          observer.disconnect();
+          resolve();
+        });
+        observer.observe(terminal, {
+          attributes: true,
+          attributeFilter: ["data-rendered-input-generation"],
+        });
+        terminal.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
+        );
+      });
+      samples.push(performance.now() - start);
+    }
+    return samples;
+  }, iterations);
+}
+
+function percentile(values, fraction) {
+  const sorted = [...values].sort((left, right) => left - right);
+  return sorted[Math.max(0, Math.ceil(sorted.length * fraction) - 1)];
 }

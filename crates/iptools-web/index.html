@@ -21,7 +21,7 @@
     <header>
       <div>
         <strong>iptools</strong>
-        <span class="demo-badge">SIMULATED DATA</span>
+        <span class="demo-badge">v0.4 PREVIEW · SIMULATED DATA</span>
       </div>
       <nav aria-label="Demo controls">
         <label>Scenario
@@ -33,6 +33,8 @@
         </label>
         <button data-action="language" type="button">中文 / EN</button>
         <button data-action="reset" type="button">Reset</button>
+        <button id="fullscreen-button" type="button">Fullscreen</button>
+        <a href="https://github.com/newcovid/iptools/actions/workflows/pages.yml" title="Download the portable Web artifact from the latest Pages run">Portable Web</a>
         <a href="https://github.com/newcovid/iptools/releases/latest">Download</a>
         <a href="https://github.com/newcovid/iptools">GitHub</a>
       </nav>
@@ -55,7 +57,7 @@
       <button data-action="help">F1</button>
     </section>
 
-    <div id="update-toast" hidden>
+    <div id="update-toast" role="status" aria-live="polite" hidden>
       A new version is available.
       <button id="reload-button" type="button">Reload</button>
     </div>
@@ -70,19 +72,52 @@
         url.searchParams.set("scenario", select.value);
         location.href = url;
       });
+      const terminal = document.getElementById("terminal");
+      const fullscreenButton = document.getElementById("fullscreen-button");
+      fullscreenButton.addEventListener("click", async () => {
+        if (document.fullscreenElement) {
+          await document.exitFullscreen();
+        } else {
+          await document.documentElement.requestFullscreen();
+        }
+        terminal.focus();
+      });
+      document.addEventListener("fullscreenchange", () => {
+        fullscreenButton.textContent = document.fullscreenElement ? "Exit fullscreen" : "Fullscreen";
+        terminal.focus();
+      });
+
+      let waitingWorker;
+      let reloadingForUpdate = false;
       if ("serviceWorker" in navigator) {
         navigator.serviceWorker.register("service-worker.js").then((registration) => {
+          if (registration.waiting) {
+            waitingWorker = registration.waiting;
+            document.getElementById("update-toast").hidden = false;
+          }
           registration.addEventListener("updatefound", () => {
             const worker = registration.installing;
             worker?.addEventListener("statechange", () => {
               if (worker.state === "installed" && navigator.serviceWorker.controller) {
+                waitingWorker = worker;
                 document.getElementById("update-toast").hidden = false;
               }
             });
           });
         });
+        navigator.serviceWorker.addEventListener("controllerchange", () => {
+          if (!reloadingForUpdate) return;
+          location.reload();
+        });
       }
-      document.getElementById("reload-button").addEventListener("click", () => location.reload());
+      document.getElementById("reload-button").addEventListener("click", () => {
+        if (!waitingWorker) {
+          location.reload();
+          return;
+        }
+        reloadingForUpdate = true;
+        waitingWorker.postMessage({ type: "SKIP_WAITING" });
+      });
     </script>
   </body>
 </html>

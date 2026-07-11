@@ -1,5 +1,6 @@
 # Rust build output
 /target/
+/vendor/ratzilla/target/
 /crates/iptools-web/dist/
 /crates/iptools-web/node_modules/
 
