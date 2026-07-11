@@ -1,5 +1,6 @@
 //! Structured lifecycle management for native background jobs.
 
+mod port_scan;
 mod scanner;
 
 use std::{collections::HashMap, future::Future};
@@ -72,6 +73,14 @@ impl NativeRuntime {
                 Ok(())
             }
             Effect::CancelScan(job) => {
+                self.cancel(job);
+                Ok(())
+            }
+            Effect::StartPortScan { job, request } => {
+                self.spawn_port_scan(job, request);
+                Ok(())
+            }
+            Effect::StopPortScan(job) => {
                 self.cancel(job);
                 Ok(())
             }

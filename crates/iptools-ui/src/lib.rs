@@ -583,4 +583,40 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn port_scan_states_render_in_both_languages_and_compact_sizes() {
+        for (width, height) in [(80, 24), (120, 36)] {
+            for language in [Language::En, Language::Zh] {
+                for status in [
+                    TaskStatus::Idle,
+                    TaskStatus::Running,
+                    TaskStatus::Done,
+                    TaskStatus::Failed("resolve failed".into()),
+                ] {
+                    let backend = TestBackend::new(width, height);
+                    let mut terminal = Terminal::new(backend).unwrap();
+                    let mut model = AppModel::default();
+                    model.page = Page::Diagnostics;
+                    model.language = language;
+                    model.diagnostics.tool = DiagnosticTool::PortScan;
+                    model.diagnostics.port_scan.request.target = "192.0.2.10".into();
+                    model.diagnostics.port_scan.common.status = status;
+                    model.diagnostics.port_scan.common.progress = 75;
+                    model.diagnostics.port_scan.common.primary = "open: 443".into();
+                    model.diagnostics.port_scan.common.log = vec!["open: 22".into()];
+                    model.diagnostics.port_scan.open_ports = vec![22, 443];
+                    let mut ui = UiState::default();
+
+                    terminal
+                        .draw(|frame| render(frame, &model, &mut ui))
+                        .unwrap();
+                    let text = terminal.backend().to_string();
+                    assert!(text.contains("192.0.2.10"));
+                    assert!(text.contains("open: 443"));
+                    assert!(ui.diagnostic_action.is_some());
+                }
+            }
+        }
+    }
 }

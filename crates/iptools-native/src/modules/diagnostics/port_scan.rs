@@ -12,8 +12,7 @@ use crate::ui::theme;
 use crate::utils::i18n::I18n;
 use crate::utils::textinput::{TextInput, filter_host};
 use crossterm::event::{KeyCode, KeyEvent};
-use futures::{StreamExt, stream};
-use iptools_core::{JobId, RuntimeError, RuntimeErrorCode, RuntimeEvent, ToolKind};
+use iptools_core::{Effect, JobId, PortScanRequest, RuntimeEvent, ToolKind};
 use ratatui::{
     prelude::*,
     widgets::{
@@ -21,11 +20,7 @@ use ratatui::{
     },
 };
 use std::cell::RefCell;
-use std::net::{IpAddr, SocketAddr};
 use std::rc::Rc;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 
 use crate::runtime::NativeRuntime;
 
@@ -304,92 +299,29 @@ impl PortScanTool {
             generation: self.generation,
         };
         self.job = Some(job);
-        let total = self.total;
-
-        runtime.spawn(job, move |token, events| async move {
-            let _ = events
-                .send(RuntimeEvent::PortScanStarted { job, total })
-                .await;
-            // 解析目标为 IP（支持域名异步解析）
-            let resolved = async {
-                match target.parse::<IpAddr>() {
-                    Ok(ip) => Some(ip),
-                    Err(_) => tokio::net::lookup_host((target.as_str(), 0u16))
-                        .await
-                        .ok()
-                        .and_then(|mut it| it.next().map(|address| address.ip())),
-                }
-            };
-            let Some(ip) = (tokio::select! {
-                _ = token.cancelled() => None,
-                ip = resolved => ip,
-            }) else {
-                let _ = events
-                    .send(RuntimeEvent::PortScanFailed {
-                        job,
-                        error: RuntimeError::new(
-                            RuntimeErrorCode::ResolveTarget,
-                            "diag_port_err_target",
-                        ),
-                    })
-                    .await;
-                return Ok(());
-            };
-
-            let ports: Vec<u16> = (start as u16..=end as u16).collect();
-            let scanned = Arc::new(AtomicU64::new(0));
-            let mut scan = stream::iter(ports)
-                .map(|port| {
-                    let events = events.clone();
-                    let scanned = Arc::clone(&scanned);
-                    let token = token.clone();
-                    async move {
-                        if token.is_cancelled() {
-                            return;
-                        }
-                        let addr = SocketAddr::new(ip, port);
-                        let fut = tokio::net::TcpStream::connect(addr);
-                        if let Ok(Ok(_stream)) =
-                            tokio::time::timeout(Duration::from_millis(timeout_ms), fut).await
-                        {
-                            let _ = events.send(RuntimeEvent::PortScanOpen { job, port }).await;
-                        }
-                        scanned.fetch_add(1, Ordering::Relaxed);
-                    }
-                })
-                .buffer_unordered(concurrency);
-            let mut ticker = tokio::time::interval(Duration::from_millis(250));
-            loop {
-                tokio::select! {
-                    _ = token.cancelled() => break,
-                    _ = ticker.tick() => {
-                        let current = scanned.load(Ordering::Relaxed);
-                        let _ = events.send(RuntimeEvent::PortScanProgress {
-                            job,
-                            scanned: current,
-                            total,
-                        }).await;
-                    }
-                    item = scan.next() => if item.is_none() { break },
-                }
-            }
-            let current = scanned.load(Ordering::Relaxed);
-            let _ = events
-                .send(RuntimeEvent::PortScanFinished {
-                    job,
-                    scanned: current,
-                    total,
-                    cancelled: token.is_cancelled(),
-                })
-                .await;
-            Ok(())
-        });
+        let effect = Effect::StartPortScan {
+            job,
+            request: PortScanRequest {
+                target,
+                start_port: start as u16,
+                end_port: end as u16,
+                timeout_ms,
+                concurrency,
+            },
+        };
+        if let Err(error) = runtime.dispatch(effect) {
+            tracing::warn!(%error, "failed to dispatch port scan start");
+            self.running = false;
+            self.job = None;
+        }
     }
 
     fn stop(&mut self, runtime: &mut NativeRuntime) {
         self.running = false;
-        if let Some(job) = self.job {
-            runtime.cancel(job);
+        if let Some(job) = self.job
+            && let Err(error) = runtime.dispatch(Effect::StopPortScan(job))
+        {
+            tracing::warn!(%error, "failed to dispatch port scan cancellation");
         }
     }
 

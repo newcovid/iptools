@@ -53,7 +53,7 @@ Web 和 native `--demo` 使用 `iptools-demo::DemoRuntime` 的固定 seed 与定
 
 真实原生页面的既有网络算法暂时保留在 `iptools-native/src/modules` 和 `utils` 中，作为兼容迁移桥；新增跨端行为必须进入 core/ui/runtime 边界，不能继续增加 detached spawn 或无界通道。迁移桥删除前，真实网络算法行为不得因 Web 展览而改变。
 
-Scanner 是首个进入阶段 3 的垂直切片：ARP/主机名解析算法已从旧页面对象移到 `NativeRuntime::dispatch(Effect::StartScan)`；旧原生页仅作为兼容 UI 适配器消费相同 `RuntimeEvent`，共享 `AppModel` 可直接由该 native handler 驱动。
+Scanner 与 Port Scan 已进入阶段 3 的垂直切片：ARP/主机名解析以及 TCP 连接扫描算法已从旧页面对象移到 `NativeRuntime::dispatch(Effect)`；旧原生页仅作为兼容 UI 适配器消费相同 `RuntimeEvent`，共享 `AppModel` 可直接由这些 native handler 驱动。
 
 错误策略：binary 顶层可用 `anyhow`，领域与 runtime 边界使用强类型错误；结构化日志使用 `tracing`，core 不依赖 tracing。
 
