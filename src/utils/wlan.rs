@@ -1,7 +1,7 @@
-//! 无线网卡丰富信息查询（Windows）。
+//! 无线网卡信息查询。
 //!
 //! 纯换算/标签函数（频率→频段/信道、PHY 标签、auth/cipher 标签、RSSI 近似）
-//! 与平台无关，便于单测；Windows FFI `query` 经 WLAN API 取当前关联与 BSS 信息。
+//! 与平台无关，便于单测；Windows 使用 WLAN API，Linux 解析 `iw dev link`。
 
 /// 某块无线网卡当前关联的丰富信息。
 #[derive(Debug, Clone)]
@@ -37,8 +37,7 @@ pub fn band_and_channel(freq_khz: u32) -> (String, u32) {
 }
 
 /// DOT11_PHY_TYPE 原始值 → (友好标签, Wi-Fi 代际)。`band6` 用于区分 Wi-Fi 6/6E。
-/// Windows `query` 与单测使用；Linux query 经 `iw` 取不到 PHY 制式，故 release 构建未用。
-#[allow(dead_code)]
+/// Windows `query` 与单测使用；Linux 的 `iw` 输出不提供对应枚举值。
 pub fn phy_label(phy: i32, band6: bool) -> (String, u8) {
     match phy {
         11 => ("802.11be · Wi-Fi 7".to_string(), 7),
@@ -60,7 +59,6 @@ pub fn phy_label(phy: i32, band6: bool) -> (String, u8) {
 }
 
 /// DOT11_AUTH_ALGORITHM 原始值 → 友好标签。
-#[allow(dead_code)]
 pub fn auth_label(a: i32) -> String {
     match a {
         1 => "Open",
@@ -80,7 +78,6 @@ pub fn auth_label(a: i32) -> String {
 }
 
 /// DOT11_CIPHER_ALGORITHM 原始值 → 友好标签。
-#[allow(dead_code)]
 pub fn cipher_label(c: i32) -> String {
     match c {
         0 => "None",
@@ -246,7 +243,9 @@ pub fn query(guid: &str) -> Option<WirelessInfo> {
         ssid: link.ssid.unwrap_or_default(),
         bssid: link.bssid.unwrap_or_default(),
         signal_quality,
-        rssi_dbm: link.signal_dbm.unwrap_or_else(|| rssi_from_quality(signal_quality)),
+        rssi_dbm: link
+            .signal_dbm
+            .unwrap_or_else(|| rssi_from_quality(signal_quality)),
         phy_type: "-".to_string(),
         wifi_gen: 0,
         band,

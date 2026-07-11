@@ -312,7 +312,10 @@ mod tests {
         let back: SessionState = serde_json::from_str(&json).unwrap();
         assert_eq!(s, back);
         assert_eq!(back.link_quality.adapters["{GUID-ETH}"].target, "10.0.0.1");
-        assert_eq!(back.link_quality.adapters["{GUID-WIFI}"].target, "192.168.1.1");
+        assert_eq!(
+            back.link_quality.adapters["{GUID-WIFI}"].target,
+            "192.168.1.1"
+        );
         assert_eq!(back.link_quality.selected.as_deref(), Some("{GUID-WIFI}"));
     }
 }

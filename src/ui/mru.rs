@@ -115,16 +115,10 @@ pub fn mru_ghost_spans(
 }
 
 /// 在 `anchor` 区域顶部画一个历史下拉浮层（覆盖式）。entries 为空时画一行「暂无历史」。
-pub fn draw_mru_popup(
-    f: &mut Frame,
-    anchor: Rect,
-    entries: &[String],
-    sel: usize,
-    i18n: &I18n,
-) {
-    let max_rows = entries.len().max(1).min(8) as u16;
+pub fn draw_mru_popup(f: &mut Frame, anchor: Rect, entries: &[String], sel: usize, i18n: &I18n) {
+    let max_rows = entries.len().clamp(1, 8) as u16;
     let height = max_rows + 2; // 含上下边框
-    let width = anchor.width.min(48).max(20);
+    let width = anchor.width.clamp(20, 48);
     let area = Rect::new(
         anchor.x,
         anchor.y,
@@ -148,10 +142,7 @@ pub fn draw_mru_popup(
         return;
     }
 
-    let items: Vec<ListItem> = entries
-        .iter()
-        .map(|e| ListItem::new(e.clone()))
-        .collect();
+    let items: Vec<ListItem> = entries.iter().map(|e| ListItem::new(e.clone())).collect();
     let list = List::new(items)
         .block(block)
         .highlight_style(
@@ -203,15 +194,36 @@ mod tests {
         let mut mru = MruState::default();
 
         // History 动作打开下拉。
-        assert!(handle_mru_key(&mut input, &mut mru, &hist, ev(KeyCode::Null), Some(Action::History), false));
+        assert!(handle_mru_key(
+            &mut input,
+            &mut mru,
+            &hist,
+            ev(KeyCode::Null),
+            Some(Action::History),
+            false
+        ));
         assert!(mru.open);
 
         // Down 选到第 2 项 "a"。
-        handle_mru_key(&mut input, &mut mru, &hist, ev(KeyCode::Down), Some(Action::Down), false);
+        handle_mru_key(
+            &mut input,
+            &mut mru,
+            &hist,
+            ev(KeyCode::Down),
+            Some(Action::Down),
+            false,
+        );
         assert_eq!(mru.sel, 1);
 
         // Enter 填入并关闭。
-        handle_mru_key(&mut input, &mut mru, &hist, ev(KeyCode::Enter), Some(Action::Confirm), false);
+        handle_mru_key(
+            &mut input,
+            &mut mru,
+            &hist,
+            ev(KeyCode::Enter),
+            Some(Action::Confirm),
+            false,
+        );
         assert!(!mru.open);
         assert_eq!(input.value(), "a");
     }
@@ -222,7 +234,14 @@ mod tests {
         hist.record("x");
         let mut input = TextInput::with_text("keep");
         let mut mru = MruState { open: true, sel: 0 };
-        handle_mru_key(&mut input, &mut mru, &hist, ev(KeyCode::Esc), Some(Action::Back), false);
+        handle_mru_key(
+            &mut input,
+            &mut mru,
+            &hist,
+            ev(KeyCode::Esc),
+            Some(Action::Back),
+            false,
+        );
         assert!(!mru.open);
         assert_eq!(input.value(), "keep");
     }

@@ -147,4 +147,10 @@ mod tests {
         assert_eq!(c.public_ip.endpoints.len(), 2);
         assert!(c.public_ip.use_system_proxy);
     }
+
+    #[test]
+    fn example_config_is_valid() {
+        serde_json::from_str::<Config>(include_str!("../config.example.json"))
+            .expect("config.example.json must remain a valid Config");
+    }
 }

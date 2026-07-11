@@ -45,7 +45,6 @@ impl TextInput {
         self.chars.len()
     }
 
-    #[allow(dead_code)] // 公共 getter，主要供测试与未来鼠标/渲染细节使用
     pub fn cursor(&self) -> usize {
         self.cursor
     }
@@ -144,7 +143,10 @@ impl TextInput {
             spans.push(Span::styled(pre, base));
         }
         if self.cursor < self.chars.len() {
-            spans.push(Span::styled(self.chars[self.cursor].to_string(), cursor_style));
+            spans.push(Span::styled(
+                self.chars[self.cursor].to_string(),
+                cursor_style,
+            ));
             if self.cursor + 1 < self.chars.len() {
                 let post: String = self.chars[self.cursor + 1..].iter().collect();
                 spans.push(Span::styled(post, base));

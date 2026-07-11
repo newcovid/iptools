@@ -310,8 +310,12 @@ impl App {
             }
             CurrentTab::Traffic => self.traffic.on_key(action),
             CurrentTab::Settings => {
-                self.settings
-                    .on_key(action, &mut self.config, &mut self.i18n, &mut self.dashboard);
+                self.settings.on_key(
+                    action,
+                    &mut self.config,
+                    &mut self.i18n,
+                    &mut self.dashboard,
+                );
                 // 设置页够不到其他模块：清空请求在此由 App 统一执行。
                 if self.settings.take_reset() {
                     self.reset_session();
@@ -361,10 +365,12 @@ impl App {
                     .on_key(dummy, Some(action), self.config.scan_concurrency)
             }
             CurrentTab::Traffic => self.traffic.on_key(Some(action)),
-            CurrentTab::Settings => {
-                self.settings
-                    .on_key(Some(action), &mut self.config, &mut self.i18n, &mut self.dashboard)
-            }
+            CurrentTab::Settings => self.settings.on_key(
+                Some(action),
+                &mut self.config,
+                &mut self.i18n,
+                &mut self.dashboard,
+            ),
             _ => {}
         }
     }
@@ -428,7 +434,8 @@ impl App {
                 if let Some(area) = self.mouse.diag_main {
                     if hit(area, x, y) {
                         self.diag_focused = true;
-                        self.diagnostics.set_focus(crate::modules::diagnostics::FocusArea::Main);
+                        self.diagnostics
+                            .set_focus(crate::modules::diagnostics::FocusArea::Main);
                         return;
                     }
                 }
@@ -443,6 +450,4 @@ impl App {
             _ => {}
         }
     }
-
-    pub fn on_resize(&mut self, _w: u16, _h: u16) {}
 }

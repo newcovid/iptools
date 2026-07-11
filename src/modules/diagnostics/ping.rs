@@ -42,7 +42,6 @@ impl Default for PingConfig {
     }
 }
 
-#[allow(dead_code)] // 暂时允许死代码，直到 update 被 App 调用
 struct PingStats {
     sent: u64,
     recv: u64,
@@ -196,12 +195,7 @@ impl PingTool {
                     self.stats.total_latency += latency;
 
                     if let Some(prev) = self.stats.prev_latency {
-                        let diff = if latency > prev {
-                            latency - prev
-                        } else {
-                            prev - latency
-                        };
-                        self.stats.jitter_sum += diff;
+                        self.stats.jitter_sum += latency.abs_diff(prev);
                     }
 
                     self.stats.prev_latency = Some(latency);
@@ -267,17 +261,17 @@ impl PingTool {
         // （字母能正常打进主机名，左右键移动光标而非调数值；方向上下仍可导航离开）。
         let on_target = self.config_state.selected() == Some(0);
         // MRU：历史下拉 / 行尾灰字采纳 / Ctrl+R 开下拉，优先于普通文本编辑。
-        if self.mru.open || (on_target && !self.running) {
-            if crate::ui::mru::handle_mru_key(
+        if (self.mru.open || (on_target && !self.running))
+            && crate::ui::mru::handle_mru_key(
                 &mut self.config.target,
                 &mut self.mru,
                 &self.history.borrow().targets,
                 key,
                 action,
                 self.running,
-            ) {
-                return;
-            }
+            )
+        {
+            return;
         }
         if on_target && !self.running && self.config.target.handle_key(key.code, filter_host) {
             return;
@@ -519,7 +513,7 @@ impl PingTool {
             0
         };
 
-        let row1 = vec![
+        let row1 = [
             format!(
                 "{}: {} ms",
                 i18n.t("diag_stat_last"),
@@ -536,7 +530,7 @@ impl PingTool {
                 stats.max_latency.unwrap_or(0)
             ),
         ];
-        let row2 = vec![
+        let row2 = [
             format!("{}: {} ms", i18n.t("diag_stat_avg"), avg),
             format!("{}: {} ms", i18n.t("diag_stat_jitter"), jitter),
             format!("{}: {:.1}%", i18n.t("diag_stat_loss"), loss),
@@ -634,10 +628,10 @@ impl PingTool {
         let selected = self.config_state.selected();
 
         let mut items: Vec<ListItem> = Vec::with_capacity(4);
-        for i in 0..4 {
+        for (i, label) in labels.iter().enumerate() {
             let is_sel = selected == Some(i);
             let label_line = Line::from(Span::styled(
-                format!("{}:", labels[i]),
+                format!("{}:", label),
                 Style::default().fg(if is_sel { Color::Yellow } else { Color::Gray }),
             ));
             let val_base = if is_sel && is_active {
@@ -687,7 +681,10 @@ impl PingTool {
             items.push(ListItem::new(vec![label_line, Line::from(value_spans)]));
         }
 
-        f.render_widget(List::new(items).block(Block::default().borders(Borders::NONE)), area);
+        f.render_widget(
+            List::new(items).block(Block::default().borders(Borders::NONE)),
+            area,
+        );
     }
 }
 

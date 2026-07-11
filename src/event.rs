@@ -1,16 +1,14 @@
 use crossterm::event::{Event as CrosstermEvent, KeyEvent, KeyEventKind, MouseEvent};
+use futures::StreamExt;
 use std::time::Duration;
 use tokio::sync::mpsc;
-use futures::StreamExt;
 
 #[derive(Debug, Clone, Copy)]
 pub enum Event {
     Tick,
     Key(KeyEvent),
     Mouse(MouseEvent),
-    // !!! 修复点：添加 allow(dead_code) 压制未使用字段的警告 !!!
-    #[allow(dead_code)]
-    Resize(u16, u16),
+    Resize,
 }
 
 pub struct EventHandler {
@@ -39,15 +37,17 @@ impl EventHandler {
                     Some(Ok(evt)) = crossterm_event => {
                         match evt {
                             CrosstermEvent::Key(key) => {
-                                if key.kind == KeyEventKind::Press {
-                                    if tx.send(Event::Key(key)).is_err() { break; }
+                                if key.kind == KeyEventKind::Press
+                                    && tx.send(Event::Key(key)).is_err()
+                                {
+                                    break;
                                 }
                             }
                             CrosstermEvent::Mouse(mouse) => {
                                 if tx.send(Event::Mouse(mouse)).is_err() { break; }
                             }
-                            CrosstermEvent::Resize(w, h) => {
-                                if tx.send(Event::Resize(w, h)).is_err() { break; }
+                            CrosstermEvent::Resize(_, _) => {
+                                if tx.send(Event::Resize).is_err() { break; }
                             }
                             _ => {}
                         }
@@ -60,6 +60,9 @@ impl EventHandler {
     }
 
     pub async fn next(&mut self) -> anyhow::Result<Event> {
-        self.rx.recv().await.ok_or_else(|| anyhow::anyhow!("Event stream closed"))
+        self.rx
+            .recv()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("Event stream closed"))
     }
 }

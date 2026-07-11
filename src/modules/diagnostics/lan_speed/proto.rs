@@ -51,10 +51,8 @@ pub fn encode_frame<T: Serialize>(v: &T) -> Vec<u8> {
     out
 }
 
-/// 从完整帧（含长度前缀）解析。长度不符返回 None。
-/// `encode_frame` 的对称对照实现；网络路径走 `read_frame`（流式），此函数主要供
-/// 单测校验帧格式，故标 `allow(dead_code)` 保持构建无警告。
-#[allow(dead_code)]
+/// 从完整帧（含长度前缀）解析；仅用于校验帧格式的单元测试。
+#[cfg(test)]
 pub fn decode_frame<T: DeserializeOwned>(frame: &[u8]) -> Option<T> {
     if frame.len() < 4 {
         return None;
@@ -441,10 +439,7 @@ async fn tcp_recv_half(
 use tokio::net::TcpListener;
 
 /// 接受一条连接，期间轮询 abort；中止或出错返回 None。
-async fn accept_with_abort(
-    listener: &TcpListener,
-    abort: &Arc<Mutex<bool>>,
-) -> Option<TcpStream> {
+async fn accept_with_abort(listener: &TcpListener, abort: &Arc<Mutex<bool>>) -> Option<TcpStream> {
     loop {
         if *abort.lock().unwrap() {
             return None;
@@ -684,7 +679,8 @@ async fn run_udp_session(
                 if *abort.lock().unwrap() {
                     break;
                 }
-                match tokio::time::timeout(Duration::from_millis(500), sock.recv_from(&mut buf)).await
+                match tokio::time::timeout(Duration::from_millis(500), sock.recv_from(&mut buf))
+                    .await
                 {
                     Ok(Ok((n, from))) => {
                         if let Some((sid, seq, ts)) = read_udp_header(&buf[..n]) {
@@ -901,13 +897,27 @@ mod tests {
             let conn = listener.accept().await.unwrap().0;
             let (tx, mut rx) = mpsc::channel(256);
             let abort = Arc::new(Mutex::new(false));
-            run_tcp_session(vec![conn], role_for(true, Direction::Bidir), sspec, tx, abort).await;
+            run_tcp_session(
+                vec![conn],
+                role_for(true, Direction::Bidir),
+                sspec,
+                tx,
+                abort,
+            )
+            .await;
             drain_summary(&mut rx).await
         });
         let conn = TcpStream::connect(addr).await.unwrap();
         let (ctx, mut crx) = mpsc::channel(256);
         let cabort = Arc::new(Mutex::new(false));
-        run_tcp_session(vec![conn], role_for(false, Direction::Bidir), spec, ctx, cabort).await;
+        run_tcp_session(
+            vec![conn],
+            role_for(false, Direction::Bidir),
+            spec,
+            ctx,
+            cabort,
+        )
+        .await;
         let client_sum = drain_summary(&mut crx).await.unwrap();
         let server_sum = server.await.unwrap().unwrap();
         assert!(client_sum.tx_bytes > 0 && client_sum.rx_bytes > 0);
@@ -1017,7 +1027,14 @@ mod tests {
 
         let (ctx, _crx) = mpsc::channel(512);
         let cabort = Arc::new(Mutex::new(false));
-        run_udp_client(srv_addr.ip().to_string(), srv_addr.port(), spec, ctx, cabort).await;
+        run_udp_client(
+            srv_addr.ip().to_string(),
+            srv_addr.port(),
+            spec,
+            ctx,
+            cabort,
+        )
+        .await;
 
         let s = server.await.unwrap().unwrap();
         let u = s.udp.unwrap();
@@ -1047,12 +1064,25 @@ mod tests {
 
         let (ctx, mut crx) = mpsc::channel(1024);
         let cabort = Arc::new(Mutex::new(false));
-        run_udp_client(srv_addr.ip().to_string(), srv_addr.port(), spec, ctx, cabort).await;
+        run_udp_client(
+            srv_addr.ip().to_string(),
+            srv_addr.port(),
+            spec,
+            ctx,
+            cabort,
+        )
+        .await;
 
         let client_sum = drain_summary(&mut crx).await.unwrap();
         let server_sum = server.await.unwrap().unwrap();
-        assert!(server_sum.tx_bytes > 0 && server_sum.rx_bytes > 0, "server should send and receive");
-        assert!(client_sum.tx_bytes > 0 && client_sum.rx_bytes > 0, "client should send and receive");
+        assert!(
+            server_sum.tx_bytes > 0 && server_sum.rx_bytes > 0,
+            "server should send and receive"
+        );
+        assert!(
+            client_sum.tx_bytes > 0 && client_sum.rx_bytes > 0,
+            "client should send and receive"
+        );
         assert!(server_sum.udp.unwrap().received > 0, "server udp stats");
         assert!(client_sum.udp.unwrap().received > 0, "client udp stats");
     }

@@ -6,8 +6,6 @@ use crate::ui::mru::MruState;
 use crate::ui::theme;
 use crate::utils::textinput::{filter_cidr, TextInput};
 use crate::utils::{net, oui};
-use std::cell::RefCell;
-use std::rc::Rc;
 use crossterm::event::{KeyCode, KeyEvent};
 use futures::{stream, StreamExt};
 use ipnetwork::Ipv4Network;
@@ -15,7 +13,9 @@ use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Table, TableState},
 };
+use std::cell::RefCell;
 use std::net::Ipv4Addr;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -95,7 +95,9 @@ impl ScannerModule {
     /// 导出可持久化参数。CIDR 不再持久化——每次启动重新按活动网卡推断默认值；
     /// 用户历史由 MRU 池（`history.cidrs`）独立管理，灰字补全与 Ctrl+R 不受影响。
     pub fn export_persist(&self) -> ScannerPersist {
-        ScannerPersist { cidr: String::new() }
+        ScannerPersist {
+            cidr: String::new(),
+        }
     }
 
     /// 回灌持久化参数。空串保留按本机网卡推断的默认 CIDR。
@@ -207,13 +209,12 @@ impl ScannerModule {
                                 return;
                             }
 
-                            // resolve_mac_address 各平台均有实现（Windows SendARP / Linux AF_PACKET 主动 ARP /
-                            // 其它 unix stub）。它兼作「主机存活」探测——拿到 MAC 才算发现设备。
-                            let mac_opt = tokio::task::spawn_blocking(move || {
-                                net::resolve_mac_address(ip)
-                            })
-                            .await
-                            .unwrap_or(None);
+                            // Windows 使用 SendARP，Linux 使用 AF_PACKET 主动 ARP；
+                            // 其它平台返回 None。拿到 MAC 才将目标视为在线。
+                            let mac_opt =
+                                tokio::task::spawn_blocking(move || net::resolve_mac_address(ip))
+                                    .await
+                                    .unwrap_or(None);
 
                             if let Some(mac) = mac_opt {
                                 if *abort_inner.lock().unwrap() {

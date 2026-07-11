@@ -2,7 +2,7 @@
 //!
 //! Windows 实现：用 `IcmpSendEcho` 配合逐跳递增的 TTL（IP_OPTION_INFORMATION），
 //! 中间路由返回 `IP_TTL_EXPIRED_TRANSIT(11013)` 暴露其地址，到达目标时返回成功。
-//! 不依赖外部 `tracert` 程序。非 Windows 暂以"不支持"提示占位（后续统一迁移）。
+//! 不依赖外部 `tracert`/`traceroute` 程序；Windows 与 Linux 均复用内部 ICMP 后端。
 
 use super::{config_field_item, FocusArea};
 use crate::history::HistoryStore;
@@ -156,17 +156,17 @@ impl TraceTool {
     fn handle_config_key(&mut self, key: KeyEvent, action: Option<Action>) {
         // 带光标编辑：目标接受主机名字符，跳数/超时仅数字。
         let on_target = self.config_state.selected() == Some(0);
-        if self.mru.open || (on_target && !self.running) {
-            if crate::ui::mru::handle_mru_key(
+        if (self.mru.open || (on_target && !self.running))
+            && crate::ui::mru::handle_mru_key(
                 &mut self.config.target,
                 &mut self.mru,
                 &self.history.borrow().targets,
                 key,
                 action,
                 self.running,
-            ) {
-                return;
-            }
+            )
+        {
+            return;
         }
         if !self.running {
             if let Some(idx) = self.config_state.selected() {
@@ -176,7 +176,8 @@ impl TraceTool {
                     let consumed = if idx == 0 {
                         self.field_mut(idx).handle_key(key.code, filter_host)
                     } else {
-                        self.field_mut(idx).handle_key(key.code, |c| c.is_ascii_digit())
+                        self.field_mut(idx)
+                            .handle_key(key.code, |c| c.is_ascii_digit())
                     };
                     if consumed {
                         return;
@@ -200,7 +201,11 @@ impl TraceTool {
     }
 
     fn next_config(&mut self) {
-        let i = self.config_state.selected().map(|i| (i + 1) % 3).unwrap_or(0);
+        let i = self
+            .config_state
+            .selected()
+            .map(|i| (i + 1) % 3)
+            .unwrap_or(0);
         self.config_state.select(Some(i));
     }
 
@@ -362,7 +367,8 @@ impl TraceTool {
                 .unwrap_or_else(|| star.clone());
             let host = h.host.clone().unwrap_or_else(|| "-".to_string());
             Row::new(vec![
-                Cell::from(format!("{:>2}", h.ttl)).style(Style::default().fg(theme::COLOR_SECONDARY)),
+                Cell::from(format!("{:>2}", h.ttl))
+                    .style(Style::default().fg(theme::COLOR_SECONDARY)),
                 Cell::from(addr).style(Style::default().fg(Color::White)),
                 Cell::from(rtt).style(Style::default().fg(theme::COLOR_PRIMARY)),
                 Cell::from(host).style(Style::default().fg(Color::DarkGray)),
@@ -386,14 +392,25 @@ impl TraceTool {
             (i18n.t(key), Style::default().fg(theme::COLOR_ERROR))
         } else if self.running {
             (
-                format!("{} | {}", i18n.t("diag_status_running"), i18n.t("diag_msg_stop")),
+                format!(
+                    "{} | {}",
+                    i18n.t("diag_status_running"),
+                    i18n.t("diag_msg_stop")
+                ),
                 Style::default().fg(Color::Green),
             )
         } else if self.done {
-            (i18n.t("diag_trace_done"), Style::default().fg(theme::COLOR_SECONDARY))
+            (
+                i18n.t("diag_trace_done"),
+                Style::default().fg(theme::COLOR_SECONDARY),
+            )
         } else {
             (
-                format!("{} | {}", i18n.t("diag_status_stopped"), i18n.t("diag_msg_start")),
+                format!(
+                    "{} | {}",
+                    i18n.t("diag_status_stopped"),
+                    i18n.t("diag_msg_start")
+                ),
                 Style::default().fg(Color::Red),
             )
         };
@@ -534,10 +551,9 @@ async fn run_trace(
             return;
         }
 
-        let probe = tokio::task::spawn_blocking(move || {
-            super::icmp::echo_once(dest_v4, ttl, timeout_ms)
-        })
-        .await;
+        let probe =
+            tokio::task::spawn_blocking(move || super::icmp::echo_once(dest_v4, ttl, timeout_ms))
+                .await;
         let result = match probe {
             Ok(v) => v,
             Err(_) => return,
@@ -576,4 +592,3 @@ async fn run_trace(
 
     let _ = tx.send(TraceEvent::Done).await;
 }
-

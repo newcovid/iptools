@@ -169,7 +169,11 @@ impl EditForm {
         if let Some(res) = &self.result {
             let ok = res.is_ok();
             self.result = None;
-            return if ok { EditOutcome::Done } else { EditOutcome::Stay };
+            return if ok {
+                EditOutcome::Done
+            } else {
+                EditOutcome::Stay
+            };
         }
 
         // 确认浮层态
@@ -199,8 +203,7 @@ impl EditForm {
             Some(Action::Up) => {
                 // MRU 下拉打开时，Up 由 handle_mru_key 处理
                 if self.mru.open {
-                    let entries: Vec<String> =
-                        self.history.borrow().adapter.entries().to_vec();
+                    let entries: Vec<String> = self.history.borrow().adapter.entries().to_vec();
                     let input = match self.field {
                         1 => &mut self.ip,
                         2 => &mut self.mask,
@@ -229,8 +232,7 @@ impl EditForm {
             Some(Action::Down) => {
                 // MRU 下拉打开时，Down 由 handle_mru_key 处理
                 if self.mru.open {
-                    let entries: Vec<String> =
-                        self.history.borrow().adapter.entries().to_vec();
+                    let entries: Vec<String> = self.history.borrow().adapter.entries().to_vec();
                     let input = match self.field {
                         1 => &mut self.ip,
                         2 => &mut self.mask,
@@ -277,8 +279,7 @@ impl EditForm {
         } else if !self.use_dhcp {
             // 地址字段文本编辑（仅静态模式）：带光标，支持中间插入/删除、
             // 左右移动、Home/End。最长 15 字符（IPv4 文本上限）。
-            let at_cap =
-                self.field_mut().len() >= 15 && matches!(key.code, KeyCode::Char(_));
+            let at_cap = self.field_mut().len() >= 15 && matches!(key.code, KeyCode::Char(_));
             if !at_cap && self.field_mut().handle_key(key.code, filter_ipv4) {
                 return EditOutcome::Stay;
             }
@@ -486,13 +487,13 @@ impl EditForm {
         let hist = self.history.borrow();
 
         let mut items: Vec<ListItem> = Vec::with_capacity(FIELD_COUNT);
-        for i in 0..FIELD_COUNT {
+        for (i, label) in labels.iter().enumerate().take(FIELD_COUNT) {
             let selected = i == self.field;
             // 模式字段恒可编辑；地址字段仅静态模式可编辑。
             let enabled = i == 0 || !self.use_dhcp;
             let marker = if selected { "> " } else { "  " };
             let label_span = Span::styled(
-                format!("{}{:<14}", marker, labels[i]),
+                format!("{}{:<14}", marker, label),
                 if selected {
                     Style::default().fg(Color::Yellow)
                 } else {
@@ -519,8 +520,7 @@ impl EditForm {
                 if input.is_empty() && !active {
                     spans.push(Span::styled("-".to_string(), dimmed));
                 } else if active && !self.use_dhcp {
-                    let ghost_spans =
-                        mru::mru_ghost_spans(input, &hist.adapter, active, val_base);
+                    let ghost_spans = mru::mru_ghost_spans(input, &hist.adapter, active, val_base);
                     // 检测是否有灰字补全
                     if ghost_spans.len() > 1 {
                         has_ghost = true;
@@ -549,12 +549,12 @@ impl EditForm {
                     Style::default().fg(theme::COLOR_UP),
                 )),
                 // 哨兵：ip 兜底路径已应用但非持久（无 NetworkManager/netplan），按警告而非错误展示。
-                Err(msg) if msg.as_str() == "__IP_RUNTIME_ONLY__" => status_lines.push(
-                    Line::styled(
+                Err(msg) if msg.as_str() == "__IP_RUNTIME_ONLY__" => {
+                    status_lines.push(Line::styled(
                         i18n.t("adapter_apply_runtime_only"),
                         Style::default().fg(Color::Yellow),
-                    ),
-                ),
+                    ))
+                }
                 Err(msg) => status_lines.push(Line::styled(
                     format!("{}: {}", i18n.t("adapter_apply_fail"), msg),
                     Style::default().fg(theme::COLOR_ERROR),
@@ -587,7 +587,11 @@ impl EditForm {
         // 文本字段（静态模式）追加 MRU 历史提示
         if self.field >= 1 && !self.use_dhcp {
             let history_label = keymap.primary_label_i18n(Action::History, locale);
-            hint_text.push_str(&i18n.t("adapter_edit_mru_hint").replace("{}", &history_label));
+            hint_text.push_str(
+                &i18n
+                    .t("adapter_edit_mru_hint")
+                    .replace("{}", &history_label),
+            );
         }
         let hint = Paragraph::new(hint_text)
             .style(Style::default().fg(Color::DarkGray))
@@ -715,7 +719,10 @@ mod tests {
 
     #[test]
     fn cidr_to_mask_converts() {
-        assert_eq!(cidr_to_mask("192.168.1.100/24").as_deref(), Some("255.255.255.0"));
+        assert_eq!(
+            cidr_to_mask("192.168.1.100/24").as_deref(),
+            Some("255.255.255.0")
+        );
         assert_eq!(cidr_to_mask("10.0.0.1/8").as_deref(), Some("255.0.0.0"));
         assert_eq!(cidr_to_mask("1.2.3.4/16").as_deref(), Some("255.255.0.0"));
         assert_eq!(cidr_to_mask("no-slash"), None);

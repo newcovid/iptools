@@ -12,7 +12,10 @@ pub struct History {
 
 impl History {
     pub fn new(cap: usize) -> Self {
-        Self { items: Vec::new(), cap: cap.max(1) }
+        Self {
+            items: Vec::new(),
+            cap: cap.max(1),
+        }
     }
 
     /// 从持久化的 Vec 构造（截断到 cap，保持顺序=最近在前）。

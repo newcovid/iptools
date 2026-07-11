@@ -82,7 +82,10 @@ pub fn parse(kind: &str, body: &str) -> Option<PublicInfo> {
         "plaintext" => {
             let ip = body.trim();
             // 粗校验：必须像个 IP（含 '.' 或 ':'，无空白/HTML）。
-            if ip.is_empty() || ip.len() > 64 || ip.contains(char::is_whitespace) || ip.contains('<')
+            if ip.is_empty()
+                || ip.len() > 64
+                || ip.contains(char::is_whitespace)
+                || ip.contains('<')
             {
                 return None;
             }
