@@ -1,0 +1,11 @@
+{
+  "name": "iptools-web-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:e2e": "node tests/e2e.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.61.1"
+  }
+}

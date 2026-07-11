@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+    <meta name="theme-color" content="#081018" />
+    <meta name="description" content="Interactive iptools network diagnostics TUI demo" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'self'" />
+    <title>iptools · Interactive Demo</title>
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="icon" href="icon.svg" type="image/svg+xml" />
+    <link rel="preload" href="assets/fonts/maple-mono-cn-iptools.woff2" as="font" type="font/woff2" crossorigin />
+    <link data-trunk rel="css" href="styles.css" />
+    <link data-trunk rel="copy-file" href="manifest.webmanifest" />
+    <link data-trunk rel="copy-file" href="service-worker.js" />
+    <link data-trunk rel="copy-file" href="icon.svg" />
+    <link data-trunk rel="copy-dir" href="assets" />
+    <link data-trunk rel="rust" data-wasm-opt="z" />
+  </head>
+  <body>
+    <header>
+      <div>
+        <strong>iptools</strong>
+        <span class="demo-badge">v0.4 PREVIEW · SIMULATED DATA</span>
+      </div>
+      <nav aria-label="Demo controls">
+        <label>Scenario
+          <select id="scenario-select">
+            <option value="home-network">Home network</option>
+            <option value="wifi-degraded">Wi-Fi degraded</option>
+            <option value="multi-adapter">Multi-adapter</option>
+          </select>
+        </label>
+        <button data-action="language" type="button">中文 / EN</button>
+        <button data-action="reset" type="button">Reset</button>
+        <button id="fullscreen-button" type="button">Fullscreen</button>
+        <a href="https://github.com/newcovid/iptools/actions/workflows/pages.yml" title="Download the portable Web artifact from the latest Pages run">Portable Web</a>
+        <a href="https://github.com/newcovid/iptools/releases/latest">Download</a>
+        <a href="https://github.com/newcovid/iptools">GitHub</a>
+      </nav>
+    </header>
+
+    <p class="notice">This exhibit runs entirely in your browser. It does not scan your device or local network.</p>
+    <p class="rotate">For the complete terminal layout, rotate your device to landscape.</p>
+    <main id="terminal" tabindex="0" aria-label="Interactive iptools terminal demo"></main>
+
+    <section class="soft-keys" aria-label="Touch keyboard">
+      <button data-action="previous">⇧ Tab</button>
+      <button data-action="next">Tab</button>
+      <button data-action="up">↑</button>
+      <button data-action="left">←</button>
+      <button data-action="down">↓</button>
+      <button data-action="right">→</button>
+      <button data-action="confirm">Enter</button>
+      <button data-action="toggle">Space</button>
+      <button data-action="back">Esc</button>
+      <button data-action="help">F1</button>
+    </section>
+
+    <div id="update-toast" role="status" aria-live="polite" hidden>
+      A new version is available.
+      <button id="reload-button" type="button">Reload</button>
+    </div>
+    <noscript>This demo requires JavaScript and WebAssembly.</noscript>
+    <script>
+      const params = new URLSearchParams(location.search);
+      const scenario = params.get("scenario") || localStorage.getItem("iptools.web.v1.scenario") || "home-network";
+      const select = document.getElementById("scenario-select");
+      select.value = scenario;
+      select.addEventListener("change", () => {
+        const url = new URL(location.href);
+        url.searchParams.set("scenario", select.value);
+        location.href = url;
+      });
+      const terminal = document.getElementById("terminal");
+      const fullscreenButton = document.getElementById("fullscreen-button");
+      fullscreenButton.addEventListener("click", async () => {
+        if (document.fullscreenElement) {
+          await document.exitFullscreen();
+        } else {
+          await document.documentElement.requestFullscreen();
+        }
+        terminal.focus();
+      });
+      document.addEventListener("fullscreenchange", () => {
+        fullscreenButton.textContent = document.fullscreenElement ? "Exit fullscreen" : "Fullscreen";
+        terminal.focus();
+      });
+
+      let waitingWorker;
+      let reloadingForUpdate = false;
+      if ("serviceWorker" in navigator) {
+        navigator.serviceWorker.register("service-worker.js").then((registration) => {
+          if (registration.waiting) {
+            waitingWorker = registration.waiting;
+            document.getElementById("update-toast").hidden = false;
+          }
+          registration.addEventListener("updatefound", () => {
+            const worker = registration.installing;
+            worker?.addEventListener("statechange", () => {
+              if (worker.state === "installed" && navigator.serviceWorker.controller) {
+                waitingWorker = worker;
+                document.getElementById("update-toast").hidden = false;
+              }
+            });
+          });
+        });
+        navigator.serviceWorker.addEventListener("controllerchange", () => {
+          if (!reloadingForUpdate) return;
+          location.reload();
+        });
+      }
+      document.getElementById("reload-button").addEventListener("click", () => {
+        if (!waitingWorker) {
+          location.reload();
+          return;
+        }
+        reloadingForUpdate = true;
+        waitingWorker.postMessage({ type: "SKIP_WAITING" });
+      });
+    </script>
+  </body>
+</html>

@@ -1,0 +1,1216 @@
+use std::net::{IpAddr, Ipv4Addr};
+
+#[derive(Debug, Clone)]
+pub struct InterfaceInfo {
+    pub name: String,
+    pub description: String,
+    pub mac: String,
+    pub ipv4: Vec<String>,
+    pub ipv6: Vec<String>,
+    pub is_up: bool,
+    pub ssid: Option<String>,
+    pub dhcp_enabled: bool,
+    pub is_physical: bool,
+    pub interface_type: String,
+    pub cidr: Option<String>,
+    /// 适配器 GUID（形如 `{XXXXXXXX-....}`），等同于 WMI
+    /// `Win32_NetworkAdapterConfiguration.SettingID`，用于定位待配置的网卡。
+    pub guid: String,
+    /// 协商链路速率（bit/s）；取自 ipconfig 的 TransmitLinkSpeed。非 Windows 为 None。
+    pub link_speed_bps: Option<u64>,
+}
+
+#[cfg(target_os = "windows")]
+pub fn get_interfaces() -> Vec<InterfaceInfo> {
+    let mut result = Vec::new();
+    let ssid_map = get_ssid_map_via_win32();
+    let dhcp_map = get_dhcp_map_via_win32();
+
+    if let Ok(adapters) = ipconfig::get_adapters() {
+        for adapter in adapters {
+            if adapter.if_type() == ipconfig::IfType::SoftwareLoopback
+                || adapter.if_type() == ipconfig::IfType::Tunnel
+            {
+                continue;
+            }
+
+            let is_physical = matches!(
+                adapter.if_type(),
+                ipconfig::IfType::EthernetCsmacd | ipconfig::IfType::Ieee80211
+            );
+
+            let mac = adapter
+                .physical_address()
+                .map(|addr| {
+                    addr.iter()
+                        .map(|b| format!("{:02x}", b))
+                        .collect::<Vec<String>>()
+                        .join(":")
+                })
+                .unwrap_or_default();
+
+            let mut ipv4 = Vec::new();
+            let mut ipv6 = Vec::new();
+            let mut cidr = None;
+
+            for ip in adapter.ip_addresses().iter() {
+                match ip {
+                    IpAddr::V4(v4) => {
+                        ipv4.push(v4.to_string());
+                        if cidr.is_none() {
+                            // 找出该 IPv4 所属的“真实子网”前缀，而非 /32 主机路由。
+                            // prefixes 同时包含子网(如 192.168.1.0/24)、主机路由
+                            // (192.168.1.x/32) 与广播(192.168.1.255/32)；只匹配
+                            // prefix_ip==ip 会错取 /32，导致掩码被算成 255.255.255.255，
+                            // 进而使 EnableStatic 返回错误码 66。取网络地址匹配且
+                            // 0<len<32 中最长（最具体）的一个。
+                            let ip_bits = u32::from(*v4);
+                            let mut best: Option<u32> = None;
+                            for (prefix_ip, len) in adapter.prefixes() {
+                                if let IpAddr::V4(net) = prefix_ip {
+                                    if *len == 0 || *len >= 32 {
+                                        continue;
+                                    }
+                                    let mask = u32::MAX << (32 - *len);
+                                    if ip_bits & mask == u32::from(*net) {
+                                        best = Some(best.map_or(*len, |b| b.max(*len)));
+                                    }
+                                }
+                            }
+                            if let Some(len) = best {
+                                cidr = Some(format!("{}/{}", v4, len));
+                            }
+                        }
+                    }
+                    IpAddr::V6(v6) => ipv6.push(v6.to_string()),
+                }
+            }
+
+            let is_up = matches!(adapter.oper_status(), ipconfig::OperStatus::IfOperStatusUp);
+
+            let mut ssid = None;
+            if let (true, Some(s)) = (is_up, ssid_map.get(adapter.adapter_name())) {
+                ssid = Some(s.clone());
+            }
+
+            let dhcp_enabled = dhcp_map
+                .get(adapter.friendly_name())
+                .copied()
+                .unwrap_or(false);
+
+            result.push(InterfaceInfo {
+                name: adapter.friendly_name().to_string(),
+                description: adapter.description().to_string(),
+                mac,
+                ipv4,
+                ipv6,
+                is_up,
+                ssid,
+                dhcp_enabled,
+                is_physical,
+                interface_type: format!("{:?}", adapter.if_type()),
+                cidr,
+                guid: adapter.adapter_name().to_string(),
+                link_speed_bps: {
+                    let s = adapter.transmit_link_speed();
+                    if s == 0 || s == u64::MAX {
+                        None
+                    } else {
+                        Some(s)
+                    }
+                },
+            });
+        }
+    }
+
+    result.sort_by(|a, b| b.is_up.cmp(&a.is_up).then_with(|| a.name.cmp(&b.name)));
+    result
+}
+
+#[cfg(target_os = "linux")]
+pub fn get_interfaces() -> Vec<InterfaceInfo> {
+    let mut ifs = linux_core_interfaces();
+    // 富化（含子进程，仅 dashboard(手动/初始)、adapter(2s 节流+阻塞池) 等低频路径调用；
+    // 扫描热路径 resolve_mac_address 走 linux_core_interfaces 不富化，避免每个 IP 起子进程）：
+    //   - SSID：无线且 up 时经 `iw` 查询
+    //   - DHCP：经 `nmcli` 查 ipv4.method（auto=DHCP），反映系统改成 DHCP 后的真实状态
+    let dhcp = linux_dhcp_map();
+    for i in ifs.iter_mut() {
+        if let Some(&is_dhcp) = dhcp.get(&i.name) {
+            i.dhcp_enabled = is_dhcp;
+        }
+        if i.interface_type == "Ieee80211" && i.is_up {
+            i.ssid = crate::utils::wlan::ssid_of(&i.name);
+        }
+    }
+    ifs
+}
+
+/// 廉价网卡枚举：仅 `/sys/class/net` + `getifaddrs`，**无任何子进程**。
+/// 供扫描热路径（`resolve_mac_address` 对每个目标 IP 调一次）复用；
+/// SSID(iw)/DHCP(nmcli) 富化由 `get_interfaces` 叠加。
+#[cfg(target_os = "linux")]
+fn linux_core_interfaces() -> Vec<InterfaceInfo> {
+    use nix::ifaddrs::getifaddrs;
+    use std::collections::BTreeMap;
+    use std::fs;
+
+    // 1) 用 getifaddrs 收集每个接口的 IPv4/IPv6 + 前缀。
+    struct Acc {
+        ipv4: Vec<String>,
+        ipv6: Vec<String>,
+        cidr: Option<String>,
+    }
+    let mut accs: BTreeMap<String, Acc> = BTreeMap::new();
+
+    if let Ok(addrs) = getifaddrs() {
+        for ifa in addrs {
+            let name = ifa.interface_name.clone();
+            if name == "lo" {
+                continue;
+            }
+            let entry = accs.entry(name).or_insert(Acc {
+                ipv4: Vec::new(),
+                ipv6: Vec::new(),
+                cidr: None,
+            });
+            if let Some(addr) = ifa.address.as_ref() {
+                if let Some(sin) = addr.as_sockaddr_in() {
+                    let ip = sin.ip(); // 已是 Ipv4Addr
+                    if !ip.is_loopback() {
+                        let prefix = ifa
+                            .netmask
+                            .as_ref()
+                            .and_then(|m| m.as_sockaddr_in())
+                            .map(|m| m.ip())
+                            .and_then(linux::mask_to_prefix);
+                        if entry.cidr.is_none()
+                            && let Some(p) = prefix
+                        {
+                            entry.cidr = Some(format!("{}/{}", ip, p));
+                        }
+                        entry.ipv4.push(ip.to_string());
+                    }
+                } else if let Some(sin6) = addr.as_sockaddr_in6() {
+                    let ip6 = sin6.ip(); // 已是 Ipv6Addr
+                    if !ip6.is_loopback() {
+                        entry.ipv6.push(ip6.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // 2) 遍历 /sys/class/net，合并 sysfs 元数据 + getifaddrs 地址。
+    let mut result = Vec::new();
+    let sys = match fs::read_dir("/sys/class/net") {
+        Ok(d) => d,
+        Err(_) => return result,
+    };
+    for ent in sys.flatten() {
+        let name = ent.file_name().to_string_lossy().to_string();
+        if name == "lo" {
+            continue;
+        }
+        let base = format!("/sys/class/net/{name}");
+        let read = |f: &str| fs::read_to_string(format!("{base}/{f}")).unwrap_or_default();
+
+        let mac = read("address").trim().to_string();
+        let is_up = linux::parse_operstate(&read("operstate"));
+        let link_speed_bps = linux::parse_speed_bps(&read("speed"));
+        let is_physical = fs::symlink_metadata(format!("{base}/device")).is_ok();
+        let is_wireless = fs::metadata(format!("{base}/wireless")).is_ok()
+            || fs::symlink_metadata(format!("{base}/phy80211")).is_ok();
+        let interface_type = if is_wireless {
+            "Ieee80211".to_string()
+        } else if is_physical {
+            "EthernetCsmacd".to_string()
+        } else {
+            "Other".to_string()
+        };
+
+        let acc = accs.remove(&name);
+        let (ipv4, ipv6, cidr) =
+            acc.map(|a| (a.ipv4, a.ipv6, a.cidr))
+                .unwrap_or((Vec::new(), Vec::new(), None));
+
+        // SSID 富化移至 get_interfaces（避免扫描热路径起 iw 子进程）。
+        let ssid: Option<String> = None;
+
+        result.push(InterfaceInfo {
+            name: name.clone(),
+            description: name.clone(),
+            mac,
+            ipv4,
+            ipv6,
+            is_up,
+            ssid,
+            dhcp_enabled: false,
+            is_physical,
+            interface_type,
+            cidr,
+            guid: name.clone(),
+            link_speed_bps,
+        });
+    }
+
+    result.sort_by(|a, b| b.is_up.cmp(&a.is_up).then_with(|| a.name.cmp(&b.name)));
+    result
+}
+
+/// 经 `nmcli` 建立「网卡名 → 是否 DHCP」映射（ipv4.method=auto 视为 DHCP）。
+/// 无 nmcli / 失败时返回空表（各网卡回退为非 DHCP，与改造前一致）。仅 get_interfaces 低频调用。
+#[cfg(target_os = "linux")]
+fn linux_dhcp_map() -> std::collections::HashMap<String, bool> {
+    use std::collections::HashMap;
+    use std::process::Command;
+
+    let mut map = HashMap::new();
+    let out = match Command::new("nmcli")
+        .args(["-t", "-f", "DEVICE,CONNECTION", "device", "status"])
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return map,
+    };
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    for line in text.lines() {
+        let (dev, con) = match line.split_once(':') {
+            Some(p) => p,
+            None => continue,
+        };
+        if dev.is_empty() || con.is_empty() || con == "--" {
+            continue;
+        }
+        let method = Command::new("nmcli")
+            .args(["-t", "-f", "ipv4.method", "connection", "show", con])
+            .output()
+            .ok()
+            .filter(|m| m.status.success())
+            .map(|m| String::from_utf8_lossy(&m.stdout).to_lowercase())
+            .unwrap_or_default();
+        // 输出形如 "auto" 或 "ipv4.method:auto"；auto=DHCP，manual/disabled=静态。
+        map.insert(dev.to_string(), method.contains("auto"));
+    }
+    map
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+pub fn get_interfaces() -> Vec<InterfaceInfo> {
+    Vec::new()
+}
+
+// -----------------------------------------------------------------------------
+// Windows Native API 辅助函数
+// -----------------------------------------------------------------------------
+
+#[cfg(target_os = "windows")]
+fn get_ssid_map_via_win32() -> std::collections::HashMap<String, String> {
+    use std::ptr;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::NetworkManagement::WiFi::{
+        WLAN_CONNECTION_ATTRIBUTES, WLAN_INTERFACE_INFO_LIST, WlanCloseHandle, WlanEnumInterfaces,
+        WlanFreeMemory, WlanOpenHandle, WlanQueryInterface, wlan_intf_opcode_current_connection,
+    };
+
+    let mut map = std::collections::HashMap::new();
+
+    unsafe {
+        let mut negotiated_version = 0;
+        let mut client_handle = HANDLE::default();
+
+        if WlanOpenHandle(2, None, &mut negotiated_version, &mut client_handle) != 0 {
+            return map;
+        }
+
+        let mut interface_list: *mut WLAN_INTERFACE_INFO_LIST = ptr::null_mut();
+
+        if WlanEnumInterfaces(client_handle, None, &mut interface_list) == 0
+            && !interface_list.is_null()
+        {
+            let list = &*interface_list;
+
+            for i in 0..list.dwNumberOfItems {
+                let info = list.InterfaceInfo.as_ptr().offset(i as isize);
+                let guid = (*info).InterfaceGuid;
+
+                let guid_str = format!("{{{:?}}}", guid).to_uppercase();
+
+                let mut data_ptr: *mut std::ffi::c_void = ptr::null_mut();
+                let mut data_size = 0;
+
+                let query_res = WlanQueryInterface(
+                    client_handle,
+                    &guid,
+                    wlan_intf_opcode_current_connection,
+                    None,
+                    &mut data_size,
+                    &mut data_ptr,
+                    None,
+                );
+
+                if query_res == 0 && !data_ptr.is_null() {
+                    let stats = &*(data_ptr as *const WLAN_CONNECTION_ATTRIBUTES);
+
+                    let len = stats.wlanAssociationAttributes.dot11Ssid.uSSIDLength as usize;
+                    if len > 0 && len <= 32 {
+                        let ssid_bytes = &stats.wlanAssociationAttributes.dot11Ssid.ucSSID[..len];
+                        let ssid_str = String::from_utf8_lossy(ssid_bytes).to_string();
+                        map.insert(guid_str, ssid_str);
+                    }
+
+                    WlanFreeMemory(data_ptr);
+                }
+            }
+
+            WlanFreeMemory(interface_list as *mut std::ffi::c_void);
+        }
+
+        WlanCloseHandle(client_handle, None);
+    }
+
+    map
+}
+
+#[cfg(target_os = "windows")]
+fn get_dhcp_map_via_win32() -> std::collections::HashMap<String, bool> {
+    use windows::Win32::Foundation::ERROR_BUFFER_OVERFLOW;
+    use windows::Win32::NetworkManagement::IpHelper::{
+        GAA_FLAG_INCLUDE_PREFIX, GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH,
+        IP_ADAPTER_DHCP_ENABLED,
+    };
+    use windows::Win32::Networking::WinSock::AF_UNSPEC;
+
+    let mut map = std::collections::HashMap::new();
+
+    unsafe {
+        let mut out_buf_len: u32 = 15000;
+        let mut buffer: Vec<u8> = vec![0; out_buf_len as usize];
+
+        let mut ret = GetAdaptersAddresses(
+            AF_UNSPEC.0 as u32,
+            GAA_FLAG_INCLUDE_PREFIX,
+            None,
+            Some(buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH),
+            &mut out_buf_len,
+        );
+
+        if ret == ERROR_BUFFER_OVERFLOW.0 {
+            buffer.resize(out_buf_len as usize, 0);
+            ret = GetAdaptersAddresses(
+                AF_UNSPEC.0 as u32,
+                GAA_FLAG_INCLUDE_PREFIX,
+                None,
+                Some(buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH),
+                &mut out_buf_len,
+            );
+        }
+
+        if ret == 0 {
+            let mut p_curr = buffer.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
+
+            while !p_curr.is_null() {
+                let adapter = &*p_curr;
+
+                let name = if !adapter.FriendlyName.is_null() {
+                    adapter.FriendlyName.to_string().unwrap_or_default()
+                } else {
+                    String::new()
+                };
+
+                let is_dhcp = (adapter.Anonymous2.Flags & IP_ADAPTER_DHCP_ENABLED) != 0;
+
+                if !name.is_empty() {
+                    map.insert(name, is_dhcp);
+                }
+
+                p_curr = adapter.Next;
+            }
+        }
+    }
+
+    map
+}
+
+/// 查询指定 GUID 网卡当前的发送链路速率（bit/s）。
+///
+/// 用于链路质量测试期间**实时刷新**有线协商速率：协商速率通常恒定，但链路
+/// 重协商 / 降速（如网线劣化使 1Gbps 退回 100Mbps）/ 断开时会变化或消失，
+/// 实时读取可如实反映，而非显示开始时的快照。未找到 / 无效值 / 失败返回 `None`。
+/// 比 `get_interfaces` 轻量：仅 `GetAdaptersAddresses`，不查 WLAN / DHCP。
+#[cfg(target_os = "windows")]
+pub fn link_speed_for_guid(guid: &str) -> Option<u64> {
+    use windows::Win32::Foundation::ERROR_BUFFER_OVERFLOW;
+    use windows::Win32::NetworkManagement::IpHelper::{
+        GAA_FLAG_INCLUDE_PREFIX, GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH,
+    };
+    use windows::Win32::Networking::WinSock::AF_UNSPEC;
+
+    unsafe {
+        let mut out_buf_len: u32 = 15000;
+        let mut buffer: Vec<u8> = vec![0; out_buf_len as usize];
+
+        let mut ret = GetAdaptersAddresses(
+            AF_UNSPEC.0 as u32,
+            GAA_FLAG_INCLUDE_PREFIX,
+            None,
+            Some(buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH),
+            &mut out_buf_len,
+        );
+
+        if ret == ERROR_BUFFER_OVERFLOW.0 {
+            buffer.resize(out_buf_len as usize, 0);
+            ret = GetAdaptersAddresses(
+                AF_UNSPEC.0 as u32,
+                GAA_FLAG_INCLUDE_PREFIX,
+                None,
+                Some(buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH),
+                &mut out_buf_len,
+            );
+        }
+
+        if ret != 0 {
+            return None;
+        }
+
+        let mut p_curr = buffer.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
+        while !p_curr.is_null() {
+            let adapter = &*p_curr;
+            if !adapter.AdapterName.is_null() {
+                let name = adapter.AdapterName.to_string().unwrap_or_default();
+                if name.eq_ignore_ascii_case(guid) {
+                    let s = adapter.TransmitLinkSpeed;
+                    return if s == 0 || s == u64::MAX {
+                        None
+                    } else {
+                        Some(s)
+                    };
+                }
+            }
+            p_curr = adapter.Next;
+        }
+    }
+    None
+}
+
+/// Linux：guid 即接口名，读 /sys/class/net/<if>/speed（Mbps→bps）。
+#[cfg(target_os = "linux")]
+pub fn link_speed_for_guid(guid: &str) -> Option<u64> {
+    // 防路径穿越：接口名不含 '/'。
+    if guid.is_empty() || guid.contains('/') {
+        return None;
+    }
+    let s = std::fs::read_to_string(format!("/sys/class/net/{guid}/speed")).ok()?;
+    linux::parse_speed_bps(&s)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+pub fn link_speed_for_guid(_guid: &str) -> Option<u64> {
+    None
+}
+
+/// Windows：扫描热路径取 MAC（兼作存活探测）。
+///
+/// 不再用 `SendARP`——它对**离线**主机无超时参数、内部重试 1-3s 且受内核 ARP 解析节流，
+/// 整个 /24 扫描极慢。改为两步、纯原生 IP Helper：
+/// 1) 发一个**短超时 ICMP echo** 触发协议栈对目标的 ARP 解析（离线主机 ~200ms 封顶）。
+///    即使主机被防火墙挡 ICMP，只要它应答 ARP，邻居缓存就会被填充。
+/// 2) 读**邻居表**（`GetIpNetTable2`，即 ARP 缓存）取该 IP 的 MAC。
+///
+/// 仍按 L2/ARP 发现（稳，能找到挡 ICMP 的主机），但每主机封顶 200ms 且真并发。
+#[cfg(target_os = "windows")]
+pub fn resolve_mac_address(ip: Ipv4Addr) -> Option<String> {
+    win_trigger_arp(ip, 200);
+    win_neighbor_mac(ip)
+}
+
+/// 发一个短超时 ICMP echo，仅为触发协议栈解析目标 MAC、填充邻居缓存（回包结果不关心）。
+#[cfg(target_os = "windows")]
+fn win_trigger_arp(ip: Ipv4Addr, timeout_ms: u32) {
+    use std::ffi::c_void;
+    use windows::Win32::NetworkManagement::IpHelper::{
+        IcmpCloseHandle, IcmpCreateFile, IcmpSendEcho,
+    };
+    unsafe {
+        let handle = match IcmpCreateFile() {
+            Ok(h) => h,
+            Err(_) => return,
+        };
+        let dest = u32::from_le_bytes(ip.octets());
+        let payload = [0u8; 1];
+        let mut reply = vec![0u8; 256];
+        let _ = IcmpSendEcho(
+            handle,
+            dest,
+            payload.as_ptr() as *const c_void,
+            payload.len() as u16,
+            None,
+            reply.as_mut_ptr() as *mut c_void,
+            reply.len() as u32,
+            timeout_ms,
+        );
+        let _ = IcmpCloseHandle(handle);
+    }
+}
+
+/// 读邻居表（ARP 缓存），取 `ip` 对应、含 6 字节非全零 MAC 的项；无则 None。
+#[cfg(target_os = "windows")]
+fn win_neighbor_mac(ip: Ipv4Addr) -> Option<String> {
+    use std::ffi::c_void;
+    use windows::Win32::NetworkManagement::IpHelper::{
+        FreeMibTable, GetIpNetTable2, MIB_IPNET_TABLE2,
+    };
+    use windows::Win32::Networking::WinSock::AF_INET;
+    unsafe {
+        let mut table: *mut MIB_IPNET_TABLE2 = std::ptr::null_mut();
+        if GetIpNetTable2(AF_INET, &mut table).0 != 0 || table.is_null() {
+            return None;
+        }
+        let t = &*table;
+        let want = u32::from_ne_bytes(ip.octets());
+        let rows = std::slice::from_raw_parts(t.Table.as_ptr(), t.NumEntries as usize);
+        let mut found = None;
+        for row in rows {
+            if row.Address.Ipv4.sin_addr.S_un.S_addr == want && row.PhysicalAddressLength == 6 {
+                let mac = &row.PhysicalAddress[..6];
+                if mac.iter().any(|&b| b != 0) {
+                    found = Some(
+                        mac.iter()
+                            .map(|b| format!("{:02x}", b))
+                            .collect::<Vec<_>>()
+                            .join(":"),
+                    );
+                    break;
+                }
+            }
+        }
+        FreeMibTable(table as *const c_void);
+        found
+    }
+}
+
+/// Linux：主动发 ARP request 并等 reply（语义等价 Windows SendARP）。
+/// 自动选出口网卡（按目标 IP 落在哪个本机子网）。需 CAP_NET_RAW，无权限/超时返回 None。
+#[cfg(target_os = "linux")]
+pub fn resolve_mac_address(ip: Ipv4Addr) -> Option<String> {
+    use nix::net::if_::if_nametoindex;
+    use std::time::{Duration, Instant};
+
+    // 1) 选出口网卡：目标 IP 与某网卡 ipv4 同子网。用廉价 core（不起 iw/nmcli 子进程）。
+    let ifaces = linux_core_interfaces();
+    let (if_name, src_ip, src_mac) = ifaces.iter().find_map(|i| {
+        if !i.is_up {
+            return None;
+        }
+        let cidr = i.cidr.as_ref()?;
+        let net: ipnetwork::Ipv4Network = cidr.parse().ok()?;
+        if !net.contains(ip) {
+            return None;
+        }
+        let src_ip: Ipv4Addr = i.ipv4.first()?.parse().ok()?;
+        let mut mac = [0u8; 6];
+        for (k, part) in i.mac.split(':').enumerate() {
+            if k >= 6 {
+                break;
+            }
+            mac[k] = u8::from_str_radix(part, 16).ok()?;
+        }
+        Some((i.name.clone(), src_ip, mac))
+    })?;
+
+    let ifindex = if_nametoindex(if_name.as_str()).ok()? as i32;
+    let frame = linux::build_arp_request(src_mac, src_ip, ip);
+
+    // 2) AF_PACKET 原始套接字收发（unsafe libc）。
+    unsafe {
+        let fd = libc::socket(
+            libc::AF_PACKET,
+            libc::SOCK_RAW,
+            (libc::ETH_P_ARP as u16).to_be() as i32,
+        );
+        if fd < 0 {
+            return None;
+        }
+        // 每轮 recv 最多 ~90ms；共 3 轮（重发），总窗口 ~270ms，与原 250ms 单次相当。
+        let tv = libc::timeval {
+            tv_sec: 0,
+            tv_usec: 90_000,
+        };
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_RCVTIMEO,
+            &tv as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+        );
+
+        let mut sll: libc::sockaddr_ll = std::mem::zeroed();
+        sll.sll_family = libc::AF_PACKET as u16;
+        sll.sll_protocol = (libc::ETH_P_ARP as u16).to_be();
+        sll.sll_ifindex = ifindex;
+        sll.sll_halen = 6;
+        sll.sll_addr[..6].copy_from_slice(&[0xff; 6]);
+
+        // 重试 3 轮：每轮重发一次 ARP request + 持续收最多 ~90ms。某台繁忙主机若丢了
+        // 某一轮的请求，下一轮还能命中——比「只发一次」更稳，总耗时几乎不变。任一轮
+        // 收到目标的 reply 即返回。
+        let mut result = None;
+        let mut buf = [0u8; 1500];
+        'rounds: for _round in 0..3 {
+            let sent = libc::sendto(
+                fd,
+                frame.as_ptr() as *const libc::c_void,
+                frame.len(),
+                0,
+                &sll as *const _ as *const libc::sockaddr,
+                std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t,
+            );
+            if sent < 0 {
+                break;
+            }
+            let round_deadline = Instant::now() + Duration::from_millis(90);
+            loop {
+                if Instant::now() >= round_deadline {
+                    break; // 本轮超时 → 进入下一轮重发
+                }
+                let n = libc::recv(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0);
+                if n <= 0 {
+                    break; // recv 超时（SO_RCVTIMEO）→ 下一轮
+                }
+                if let Some(mac) = linux::parse_arp_reply(&buf[..n as usize], ip) {
+                    result = Some(mac);
+                    break 'rounds;
+                }
+                // 非目标的 ARP 包 → 继续本轮接收
+            }
+        }
+        libc::close(fd);
+        result
+    }
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+pub fn resolve_mac_address(_ip: Ipv4Addr) -> Option<String> {
+    None
+}
+
+/// 探测当前进程是否具备 `CAP_NET_RAW`（创建原始套接字的能力）。
+/// 缺它则局域网扫描 / Ping / Trace / 链路质量都不可用——退出时据此给用户友好提示。
+/// 直接尝试创建一个原始 ICMP 套接字：成功即有能力。
+#[cfg(target_os = "linux")]
+pub fn has_cap_net_raw() -> bool {
+    unsafe {
+        let fd = libc::socket(libc::AF_INET, libc::SOCK_RAW, libc::IPPROTO_ICMP);
+        if fd < 0 {
+            false
+        } else {
+            libc::close(fd);
+            true
+        }
+    }
+}
+
+/// 解析设备主机名，多路回退以适配「系统 DNS 不可用/被 VPN 接管」的局域网场景：
+///
+/// 1. **反向 DNS**（`getnameinfo`）：走系统当前 DNS 解析器。最快，但若无 PTR 记录
+///    常直接回填数字 IP；且 TUN/VPN 接管 DNS 时对内网设备多半失败。
+/// 2. **NetBIOS 节点状态**（UDP/137，等价 `nbtstat -A`）：直接问设备本身要它的
+///    NetBIOS 名称表，**不经系统 DNS**。Windows 主机、部分设备会响应。
+/// 3. **mDNS 反向**（组播 224.0.0.251:5353 查 in-addr.arpa 的 PTR）：拿设备的
+///    `xxx.local` 名，同样**绕开系统 DNS**。Apple/打印机/部分安卓会响应。
+///
+/// 三步均 best-effort、各带短超时；任一步拿到「看起来像名字」（非 IP 文本）的结果即返回。
+pub fn resolve_hostname(ip: IpAddr) -> Option<String> {
+    // 1. 反向 DNS：过滤掉「无 PTR 时回填的数字 IP」，否则会出现「名字栏显示 IP」。
+    if let Some(name) = dns_lookup::lookup_addr(&ip)
+        .ok()
+        .filter(|n| looks_like_hostname(n))
+    {
+        return Some(name);
+    }
+
+    // 2 & 3. 仅 IPv4 局域网设备适用 NetBIOS / mDNS。
+    if let IpAddr::V4(v4) = ip {
+        if let Some(name) = resolve_netbios(v4).filter(|n| looks_like_hostname(n)) {
+            return Some(name);
+        }
+        if let Some(name) = resolve_mdns(v4).filter(|n| looks_like_hostname(n)) {
+            return Some(name);
+        }
+    }
+    None
+}
+
+/// 是否「看起来是主机名」：非空且不是纯 IP 文本（反向 DNS 无记录时常回填数字 IP）。
+fn looks_like_hostname(s: &str) -> bool {
+    let s = s.trim();
+    !s.is_empty() && s.parse::<IpAddr>().is_err()
+}
+
+// -----------------------------------------------------------------------------
+// NetBIOS 节点状态查询（UDP/137）—— 不依赖系统 DNS，直接问设备本身。
+// -----------------------------------------------------------------------------
+
+/// 向 `<ip>:137` 发 NetBIOS 节点状态请求，取回名称表里的「工作站名」(后缀 0x00、非组名)。
+fn resolve_netbios(ip: Ipv4Addr) -> Option<String> {
+    use std::net::UdpSocket;
+    use std::time::Duration;
+
+    // 节点状态请求报文（固定）：头部 + 问题(查询名 "*" 的首级编码 + Type NBSTAT + Class IN)。
+    let mut req: Vec<u8> = vec![
+        0x00, 0x00, // Transaction ID
+        0x00, 0x00, // Flags
+        0x00, 0x01, // Questions = 1
+        0x00, 0x00, // Answer RRs
+        0x00, 0x00, // Authority RRs
+        0x00, 0x00, // Additional RRs
+        0x20, // 名称长度 = 32（首级编码后）
+    ];
+    // 查询名 "*" 补 0x00 至 16 字节，再做首级编码：每字节高/低半字节各 + 'A'。
+    let mut nb_name = [0u8; 16];
+    nb_name[0] = b'*';
+    for b in nb_name {
+        req.push(b'A' + (b >> 4));
+        req.push(b'A' + (b & 0x0F));
+    }
+    req.push(0x00); // 名称结束（根标签）
+    req.extend_from_slice(&[0x00, 0x21]); // Type = NBSTAT
+    req.extend_from_slice(&[0x00, 0x01]); // Class = IN
+
+    let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.set_read_timeout(Some(Duration::from_millis(250)))
+        .ok()?;
+    sock.send_to(&req, (ip, 137)).ok()?;
+
+    let mut buf = [0u8; 1024];
+    let (n, _) = sock.recv_from(&mut buf).ok()?;
+    parse_netbios_response(&buf[..n])
+}
+
+/// 解析 NetBIOS 节点状态响应的名称表，返回首个「工作站名」(后缀 0x00、非组)，
+/// 否则退回首个非组唯一名。纯函数，便于单测。
+fn parse_netbios_response(buf: &[u8]) -> Option<String> {
+    if buf.len() < 13 {
+        return None;
+    }
+    // 应答记录名长度：压缩指针(高2位=11)占 2 字节；否则 0x20 + 32 + 0x00 = 34 字节。
+    let name_len = if buf[12] & 0xC0 == 0xC0 { 2 } else { 34 };
+    // RDATA 偏移 = 头(12) + 应答名 + Type(2)+Class(2)+TTL(4)+RDLEN(2)
+    let rdata = 12 + name_len + 10;
+    if buf.len() <= rdata {
+        return None;
+    }
+    let num = buf[rdata] as usize;
+    let mut off = rdata + 1;
+    let mut fallback: Option<String> = None;
+    for _ in 0..num {
+        if off + 18 > buf.len() {
+            break;
+        }
+        let name = String::from_utf8_lossy(&buf[off..off + 15])
+            .trim_end()
+            .trim_end_matches('\u{0}')
+            .trim_end()
+            .to_string();
+        let suffix = buf[off + 15];
+        let flags = u16::from_be_bytes([buf[off + 16], buf[off + 17]]);
+        let is_group = flags & 0x8000 != 0;
+        off += 18;
+        if name.is_empty() || is_group {
+            continue;
+        }
+        if suffix == 0x00 {
+            return Some(name); // 工作站名，最优
+        }
+        if fallback.is_none() {
+            fallback = Some(name);
+        }
+    }
+    fallback
+}
+
+// -----------------------------------------------------------------------------
+// mDNS 反向解析（组播 224.0.0.251:5353）—— 拿设备的 xxx.local 名。
+// -----------------------------------------------------------------------------
+
+/// 组播查询 `d.c.b.a.in-addr.arpa` 的 PTR，解析出设备 `.local` 名。
+fn resolve_mdns(ip: Ipv4Addr) -> Option<String> {
+    use std::net::{SocketAddrV4, UdpSocket};
+    use std::time::Duration;
+
+    let o = ip.octets();
+    let qname = format!("{}.{}.{}.{}.in-addr.arpa", o[3], o[2], o[1], o[0]);
+
+    let mut req: Vec<u8> = vec![
+        0x00, 0x00, // ID
+        0x00, 0x00, // Flags
+        0x00, 0x01, // Questions = 1
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 其余计数 = 0
+    ];
+    for label in qname.split('.') {
+        req.push(label.len() as u8);
+        req.extend_from_slice(label.as_bytes());
+    }
+    req.push(0x00); // 名称结束
+    req.extend_from_slice(&[0x00, 0x0C]); // Type = PTR
+    req.extend_from_slice(&[0x80, 0x01]); // Class = IN + QU(请求单播应答)位
+
+    let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.set_read_timeout(Some(Duration::from_millis(250)))
+        .ok()?;
+    let mdns = SocketAddrV4::new(Ipv4Addr::new(224, 0, 0, 251), 5353);
+    sock.send_to(&req, mdns).ok()?;
+
+    let mut buf = [0u8; 1500];
+    let (n, _) = sock.recv_from(&mut buf).ok()?;
+    parse_mdns_ptr(&buf[..n])
+}
+
+/// 从 DNS 响应中找首个 PTR 应答并解码其目标名（去掉尾部 `.local`）。纯函数，便于单测。
+fn parse_mdns_ptr(buf: &[u8]) -> Option<String> {
+    if buf.len() < 12 {
+        return None;
+    }
+    let qd = u16::from_be_bytes([buf[4], buf[5]]) as usize;
+    let an = u16::from_be_bytes([buf[6], buf[7]]) as usize;
+    if an == 0 {
+        return None;
+    }
+    let mut off = 12;
+    // 跳过问题区：每问 = 名称 + Type(2) + Class(2)。
+    for _ in 0..qd {
+        off = skip_dns_name(buf, off)?;
+        off += 4;
+    }
+    // 遍历应答区找 PTR。
+    for _ in 0..an {
+        let after_name = skip_dns_name(buf, off)?;
+        if after_name + 10 > buf.len() {
+            return None;
+        }
+        let rtype = u16::from_be_bytes([buf[after_name], buf[after_name + 1]]);
+        let rdlen = u16::from_be_bytes([buf[after_name + 8], buf[after_name + 9]]) as usize;
+        let rdata = after_name + 10;
+        if rdata + rdlen > buf.len() {
+            return None;
+        }
+        if rtype == 0x000C {
+            let (name, _) = decode_dns_name(buf, rdata)?;
+            let name = name
+                .trim_end_matches('.')
+                .trim_end_matches(".local")
+                .trim_end_matches('.')
+                .to_string();
+            if !name.is_empty() {
+                return Some(name);
+            }
+        }
+        off = rdata + rdlen;
+    }
+    None
+}
+
+/// 跳过一个 DNS 名称（处理压缩指针），返回其后的偏移。
+fn skip_dns_name(buf: &[u8], mut off: usize) -> Option<usize> {
+    loop {
+        if off >= buf.len() {
+            return None;
+        }
+        let len = buf[off];
+        if len == 0 {
+            return Some(off + 1);
+        }
+        if len & 0xC0 == 0xC0 {
+            return Some(off + 2); // 压缩指针占 2 字节，名称到此结束
+        }
+        off += 1 + len as usize;
+    }
+}
+
+/// 解析一个 DNS 名称为点分字符串（支持压缩指针）。返回 (名称, 名称之后的偏移)。
+fn decode_dns_name(buf: &[u8], start: usize) -> Option<(String, usize)> {
+    let mut labels: Vec<String> = Vec::new();
+    let mut off = start;
+    let mut next: Option<usize> = None; // 跟随指针前记录「真正下一个偏移」
+    let mut hops = 0;
+    loop {
+        if off >= buf.len() {
+            return None;
+        }
+        let len = buf[off];
+        if len == 0 {
+            if next.is_none() {
+                next = Some(off + 1);
+            }
+            break;
+        }
+        if len & 0xC0 == 0xC0 {
+            if off + 1 >= buf.len() {
+                return None;
+            }
+            let ptr = (((len & 0x3F) as usize) << 8) | buf[off + 1] as usize;
+            if next.is_none() {
+                next = Some(off + 2);
+            }
+            hops += 1;
+            if hops > 16 {
+                return None; // 防止指针成环
+            }
+            off = ptr;
+            continue;
+        }
+        let s = off + 1;
+        let e = s + len as usize;
+        if e > buf.len() {
+            return None;
+        }
+        labels.push(String::from_utf8_lossy(&buf[s..e]).to_string());
+        off = e;
+    }
+    Some((labels.join("."), next.unwrap_or(off)))
+}
+
+/// Linux 专属辅助：sysfs 文本解析、掩码换算。纯函数，便于单测。
+/// 平台无关，始终编译；Windows 上不调用，故 allow(dead_code)。
+pub(crate) mod linux {
+    #![allow(dead_code)]
+    use std::net::Ipv4Addr;
+
+    /// `/sys/class/net/<if>/operstate` == "up" 视为启用。
+    pub fn parse_operstate(s: &str) -> bool {
+        s.trim() == "up"
+    }
+
+    /// `/sys/class/net/<if>/speed`（Mbps）→ bit/s。负值/非数字/空 → None。
+    pub fn parse_speed_bps(s: &str) -> Option<u64> {
+        let mbps = s.trim().parse::<i64>().ok()?;
+        if mbps <= 0 {
+            None
+        } else {
+            Some(mbps as u64 * 1_000_000)
+        }
+    }
+
+    /// 点分十进制子网掩码 → 前缀长度；要求是连续 1。非连续返回 None。
+    pub fn mask_to_prefix(mask: Ipv4Addr) -> Option<u8> {
+        let bits = u32::from(mask);
+        let ones = bits.leading_ones();
+        let expected = if ones == 0 {
+            0
+        } else {
+            u32::MAX << (32 - ones)
+        };
+        if bits == expected {
+            Some(ones as u8)
+        } else {
+            None
+        }
+    }
+
+    /// 前缀长度 → 点分十进制掩码。
+    pub fn prefix_to_mask(prefix: u8) -> Ipv4Addr {
+        let p = prefix.min(32);
+        let bits = if p == 0 { 0 } else { u32::MAX << (32 - p) };
+        Ipv4Addr::from(bits)
+    }
+
+    /// 构造以太网广播帧 + ARP request（who-has dst_ip，tell src_ip）。42 字节。
+    pub fn build_arp_request(src_mac: [u8; 6], src_ip: Ipv4Addr, dst_ip: Ipv4Addr) -> Vec<u8> {
+        let mut f = Vec::with_capacity(42);
+        f.extend_from_slice(&[0xff; 6]);
+        f.extend_from_slice(&src_mac);
+        f.extend_from_slice(&[0x08, 0x06]);
+        f.extend_from_slice(&[0x00, 0x01]);
+        f.extend_from_slice(&[0x08, 0x00]);
+        f.push(6);
+        f.push(4);
+        f.extend_from_slice(&[0x00, 0x01]);
+        f.extend_from_slice(&src_mac);
+        f.extend_from_slice(&src_ip.octets());
+        f.extend_from_slice(&[0u8; 6]);
+        f.extend_from_slice(&dst_ip.octets());
+        f
+    }
+
+    /// 从收到的帧解析 ARP reply 的 sender MAC（要求 sender IP == want_ip 且 opcode=reply）。
+    pub fn parse_arp_reply(frame: &[u8], want_ip: Ipv4Addr) -> Option<String> {
+        if frame.len() < 42 {
+            return None;
+        }
+        if frame[12..14] != [0x08, 0x06] {
+            return None;
+        }
+        if frame[20..22] != [0x00, 0x02] {
+            return None;
+        }
+        let sender_mac = &frame[22..28];
+        let sender_ip = Ipv4Addr::new(frame[28], frame[29], frame[30], frame[31]);
+        if sender_ip != want_ip {
+            return None;
+        }
+        Some(
+            sender_mac
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<Vec<_>>()
+                .join(":"),
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hostname_filter_rejects_ip_text() {
+        assert!(looks_like_hostname("vivo"));
+        assert!(looks_like_hostname("MyPC.local"));
+        assert!(!looks_like_hostname("192.168.1.5"));
+        assert!(!looks_like_hostname(""));
+        assert!(!looks_like_hostname("  "));
+        assert!(!looks_like_hostname("fe80::1"));
+    }
+
+    #[test]
+    fn netbios_parses_workstation_name() {
+        // 构造一个最小节点状态响应：头(12) + 非压缩应答名(34) + 固定 RR 头 + RDATA。
+        let mut buf = vec![0u8; 12];
+        // 应答名：0x20 + 32 字节(随便填) + 0x00
+        buf.push(0x20);
+        buf.extend([b'A'; 32]);
+        buf.push(0x00);
+        // Type(2) Class(2) TTL(4) RDLEN(2)
+        buf.extend_from_slice(&[0x00, 0x21, 0x00, 0x01, 0, 0, 0, 0, 0x00, 0x00]);
+        // RDATA：名称数 = 2
+        buf.push(2);
+        // 名1：组名(后缀 0x00 但是 group) → 应跳过
+        let mut name1 = b"WORKGROUP      ".to_vec(); // 15 字节
+        assert_eq!(name1.len(), 15);
+        buf.append(&mut name1);
+        buf.push(0x00); // 后缀
+        buf.extend_from_slice(&[0x80, 0x00]); // flags：group 位
+        // 名2：工作站唯一名（后缀 0x00、非组）
+        let mut name2 = b"VIVO-PHONE     ".to_vec(); // 15 字节
+        assert_eq!(name2.len(), 15);
+        buf.append(&mut name2);
+        buf.push(0x00); // 后缀 = 工作站
+        buf.extend_from_slice(&[0x00, 0x00]); // flags：unique
+
+        assert_eq!(parse_netbios_response(&buf).as_deref(), Some("VIVO-PHONE"));
+    }
+
+    #[test]
+    fn parse_operstate_up() {
+        assert!(super::linux::parse_operstate("up\n"));
+        assert!(!super::linux::parse_operstate("down"));
+        assert!(!super::linux::parse_operstate("unknown"));
+    }
+
+    #[test]
+    fn parse_speed_valid_and_invalid() {
+        assert_eq!(super::linux::parse_speed_bps("1000\n"), Some(1_000_000_000));
+        assert_eq!(super::linux::parse_speed_bps("100"), Some(100_000_000));
+        assert_eq!(super::linux::parse_speed_bps("-1"), None);
+        assert_eq!(super::linux::parse_speed_bps("oops"), None);
+    }
+
+    #[test]
+    fn mask_prefix_roundtrip() {
+        use std::net::Ipv4Addr;
+        assert_eq!(
+            super::linux::mask_to_prefix(Ipv4Addr::new(255, 255, 255, 0)),
+            Some(24)
+        );
+        assert_eq!(
+            super::linux::mask_to_prefix(Ipv4Addr::new(255, 255, 0, 0)),
+            Some(16)
+        );
+        assert_eq!(
+            super::linux::mask_to_prefix(Ipv4Addr::new(255, 255, 255, 255)),
+            Some(32)
+        );
+        assert_eq!(
+            super::linux::mask_to_prefix(Ipv4Addr::new(0, 0, 0, 0)),
+            Some(0)
+        );
+        assert_eq!(
+            super::linux::mask_to_prefix(Ipv4Addr::new(255, 0, 255, 0)),
+            None
+        );
+        assert_eq!(
+            super::linux::prefix_to_mask(24),
+            Ipv4Addr::new(255, 255, 255, 0)
+        );
+    }
+
+    #[test]
+    fn arp_request_frame_layout() {
+        use std::net::Ipv4Addr;
+        let src_mac = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
+        let frame = super::linux::build_arp_request(
+            src_mac,
+            Ipv4Addr::new(192, 168, 1, 10),
+            Ipv4Addr::new(192, 168, 1, 1),
+        );
+        assert_eq!(frame.len(), 42);
+        assert_eq!(&frame[0..6], &[0xff; 6]);
+        assert_eq!(&frame[6..12], &src_mac);
+        assert_eq!(&frame[12..14], &[0x08, 0x06]);
+        assert_eq!(&frame[20..22], &[0x00, 0x01]);
+        assert_eq!(&frame[38..42], &[192, 168, 1, 1]);
+    }
+
+    #[test]
+    fn arp_reply_extracts_sender_mac() {
+        use std::net::Ipv4Addr;
+        let mut frame = vec![0u8; 14];
+        frame[12..14].copy_from_slice(&[0x08, 0x06]);
+        frame.extend_from_slice(&[0x00, 0x01, 0x08, 0x00, 0x06, 0x04, 0x00, 0x02]);
+        let sender_mac = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
+        frame.extend_from_slice(&sender_mac);
+        frame.extend_from_slice(&[192, 168, 1, 1]);
+        frame.extend_from_slice(&[0u8; 6]);
+        frame.extend_from_slice(&[192, 168, 1, 10]);
+        assert_eq!(
+            super::linux::parse_arp_reply(&frame, Ipv4Addr::new(192, 168, 1, 1)),
+            Some("aa:bb:cc:dd:ee:ff".to_string())
+        );
+        assert_eq!(
+            super::linux::parse_arp_reply(&frame, Ipv4Addr::new(192, 168, 1, 2)),
+            None
+        );
+    }
+
+    #[test]
+    fn mdns_decodes_ptr_target() {
+        // 头：ID(2) Flags(2) QD=1 AN=1 NS=0 AR=0
+        let mut buf = vec![
+            0x00, 0x00, 0x84, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+        ];
+        // 问题名：5.1.168.192.in-addr.arpa（这里简化用单标签也可，关键测 PTR 解码）
+        for label in ["5", "1", "168", "192", "in-addr", "arpa"] {
+            buf.push(label.len() as u8);
+            buf.extend_from_slice(label.as_bytes());
+        }
+        buf.push(0x00);
+        buf.extend_from_slice(&[0x00, 0x0C, 0x00, 0x01]); // Type PTR, Class IN
+        // 应答：名称用压缩指针指回问题名(偏移 12)
+        buf.extend_from_slice(&[0xC0, 0x0C]);
+        buf.extend_from_slice(&[0x00, 0x0C, 0x00, 0x01]); // Type PTR, Class IN
+        buf.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // TTL
+        // RDATA：vivo-phone.local
+        let rdata_start = buf.len() + 2;
+        let mut rdata = Vec::new();
+        for label in ["vivo-phone", "local"] {
+            rdata.push(label.len() as u8);
+            rdata.extend_from_slice(label.as_bytes());
+        }
+        rdata.push(0x00);
+        buf.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+        buf.extend_from_slice(&rdata);
+        let _ = rdata_start;
+
+        assert_eq!(parse_mdns_ptr(&buf).as_deref(), Some("vivo-phone"));
+    }
+}
