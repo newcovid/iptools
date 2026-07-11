@@ -10,10 +10,13 @@ use iptools_ui::UiState;
 use ratatui::{Terminal, backend::CrosstermBackend};
 use std::io;
 
+use crate::config::Config;
 use crate::event::{Event, EventHandler};
 
-pub async fn run(scenario: ScenarioId) -> Result<()> {
+pub async fn run(scenario: ScenarioId, config_path: Option<String>) -> Result<()> {
+    let mut config = Config::load(config_path.as_deref());
     let mut model = AppModel::default();
+    model.apply_config(&config);
     let mut runtime = DemoRuntime::new(scenario)?;
     for event in runtime.bootstrap() {
         model.update(Message::Runtime(event));
@@ -51,7 +54,7 @@ pub async fn run(scenario: ScenarioId) -> Result<()> {
             }
             Event::Resize => Vec::new(),
         };
-        dispatch_effects(&mut model, &mut runtime, effects);
+        dispatch_effects(&mut model, &mut runtime, &mut config, effects);
     }
 
     events.shutdown().await;
@@ -59,10 +62,24 @@ pub async fn run(scenario: ScenarioId) -> Result<()> {
     Ok(())
 }
 
-fn dispatch_effects(model: &mut AppModel, runtime: &mut DemoRuntime, effects: Vec<Effect>) {
+fn dispatch_effects(
+    model: &mut AppModel,
+    runtime: &mut DemoRuntime,
+    config: &mut Config,
+    effects: Vec<Effect>,
+) {
     for effect in effects {
-        for event in runtime.dispatch(effect) {
-            model.update(Message::Runtime(event));
+        match effect {
+            Effect::PersistPreferences(preferences) => {
+                config.language = preferences.language;
+                config.scan_concurrency = preferences.scan_concurrency;
+                config.save();
+            }
+            effect => {
+                for event in runtime.dispatch(effect) {
+                    model.update(Message::Runtime(event));
+                }
+            }
         }
     }
 }
@@ -124,4 +141,41 @@ where
     )?;
     disable_raw_mode()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use iptools_core::{Language, Preferences};
+
+    use super::*;
+
+    #[test]
+    fn native_demo_persists_shared_preference_effects() {
+        let path = std::env::temp_dir().join(format!(
+            "iptools-demo-settings-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut config = Config::load(Some(path.to_str().unwrap()));
+        let mut model = AppModel::default();
+        let mut runtime = DemoRuntime::new(ScenarioId::HomeNetwork).unwrap();
+        dispatch_effects(
+            &mut model,
+            &mut runtime,
+            &mut config,
+            vec![Effect::PersistPreferences(Preferences {
+                language: Language::Zh,
+                scan_concurrency: 120,
+            })],
+        );
+
+        let saved: iptools_core::ConfigData =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved.language, Language::Zh);
+        assert_eq!(saved.scan_concurrency, 120);
+        std::fs::remove_file(path).unwrap();
+    }
 }

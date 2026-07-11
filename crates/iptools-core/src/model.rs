@@ -345,6 +345,18 @@ impl Default for AppModel {
 }
 
 impl AppModel {
+    pub fn apply_config(&mut self, config: &crate::ConfigData) {
+        self.language = config.language;
+        self.scan_concurrency = config.scan_concurrency.clamp(10, 500);
+    }
+
+    pub const fn preferences(&self) -> crate::Preferences {
+        crate::Preferences {
+            language: self.language,
+            scan_concurrency: self.scan_concurrency,
+        }
+    }
+
     pub fn update(&mut self, message: Message) -> Vec<Effect> {
         match message {
             Input(input) => self.handle_input(input),
@@ -396,13 +408,19 @@ impl AppModel {
         use Action::*;
         match action {
             Quit => self.running = false,
-            ToggleLanguage => self.language = self.language.toggle(),
+            ToggleLanguage => {
+                self.language = self.language.toggle();
+                return vec![Effect::PersistPreferences(self.preferences())];
+            }
             NextPage => self.page = self.page.next(),
             PreviousPage => self.page = self.page.previous(),
             SelectPage(index) => self.page = Page::from_index(index),
             Help => self.show_help = !self.show_help,
             Back => self.show_help = false,
-            ResetDemo => *self = Self::default(),
+            ResetDemo => {
+                *self = Self::default();
+                return vec![Effect::PersistPreferences(self.preferences())];
+            }
             Refresh => {
                 return match self.page {
                     Page::Dashboard => vec![Effect::RefreshDashboard],
@@ -419,10 +437,12 @@ impl AppModel {
             Up => self.navigate(-1),
             Down => self.navigate(1),
             Left if self.page == Page::Settings => {
-                self.scan_concurrency = self.scan_concurrency.saturating_sub(10).max(10)
+                self.scan_concurrency = self.scan_concurrency.saturating_sub(10).max(10);
+                return vec![Effect::PersistPreferences(self.preferences())];
             }
             Right if self.page == Page::Settings => {
-                self.scan_concurrency = (self.scan_concurrency + 10).min(500)
+                self.scan_concurrency = (self.scan_concurrency + 10).min(500);
+                return vec![Effect::PersistPreferences(self.preferences())];
             }
             Left | Right | Edit | Confirm | Toggle => {}
         }
@@ -996,5 +1016,42 @@ mod tests {
         assert_eq!(request.start_port, 20);
         assert_eq!(request.end_port, 443);
         assert_eq!(request.concurrency, 64);
+    }
+
+    #[test]
+    fn settings_emit_explicit_persistence_effects() {
+        let mut app = AppModel {
+            page: Page::Settings,
+            ..AppModel::default()
+        };
+        assert_eq!(
+            app.update(Input(InputEvent::Action(Action::Right))),
+            [Effect::PersistPreferences(crate::Preferences {
+                language: Language::En,
+                scan_concurrency: 60,
+            })]
+        );
+        assert_eq!(app.scan_concurrency, 60);
+
+        assert_eq!(
+            app.update(Input(InputEvent::Action(Action::ToggleLanguage))),
+            [Effect::PersistPreferences(crate::Preferences {
+                language: Language::Zh,
+                scan_concurrency: 60,
+            })]
+        );
+    }
+
+    #[test]
+    fn shared_model_loads_preferences_from_v031_config_data() {
+        let config = crate::ConfigData {
+            language: Language::Zh,
+            scan_concurrency: 120,
+            ..crate::ConfigData::default()
+        };
+        let mut app = AppModel::default();
+        app.apply_config(&config);
+        assert_eq!(app.language, Language::Zh);
+        assert_eq!(app.scan_concurrency, 120);
     }
 }

@@ -2,6 +2,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::{AdapterConfig, AdapterInfo, DiagnosticTool, ScanHost, TrafficRow};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Preferences {
+    pub language: crate::Language,
+    pub scan_concurrency: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct JobId {
     pub tool: ToolKind,
@@ -184,6 +190,7 @@ impl Default for LanSpeedRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
+    PersistPreferences(Preferences),
     RefreshDashboard,
     RefreshAdapters,
     ApplyAdapterConfig(AdapterConfig),

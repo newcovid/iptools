@@ -61,7 +61,11 @@ async fn main() -> Result<()> {
     init_tracing();
     let args = Args::parse();
     if args.demo {
-        return demo::run(args.scenario.unwrap_or(ScenarioArg::HomeNetwork).into()).await;
+        return demo::run(
+            args.scenario.unwrap_or(ScenarioArg::HomeNetwork).into(),
+            args.config,
+        )
+        .await;
     }
     let mut app = App::new(args.config);
 

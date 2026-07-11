@@ -186,6 +186,7 @@ impl NativeRuntime {
 
 fn effect_name(effect: &Effect) -> &'static str {
     match effect {
+        Effect::PersistPreferences(_) => "persist-preferences",
         Effect::RefreshDashboard => "refresh-dashboard",
         Effect::RefreshAdapters => "refresh-adapters",
         Effect::ApplyAdapterConfig(_) => "apply-adapter-config",
