@@ -421,11 +421,7 @@ impl LinkQualityTool {
         } else {
             0.0
         };
-        let avg = if recv > 0 {
-            lat.iter().sum::<u64>() / recv
-        } else {
-            0
-        };
+        let avg = lat.iter().sum::<u64>().checked_div(recv).unwrap_or(0);
         let min = lat.iter().copied().min().unwrap_or(0);
         let max = lat.iter().copied().max().unwrap_or(0);
         let jitter = if lat.len() > 1 {

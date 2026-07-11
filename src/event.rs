@@ -46,8 +46,10 @@ impl EventHandler {
                             CrosstermEvent::Mouse(mouse) => {
                                 if tx.send(Event::Mouse(mouse)).is_err() { break; }
                             }
-                            CrosstermEvent::Resize(_, _) => {
-                                if tx.send(Event::Resize).is_err() { break; }
+                            CrosstermEvent::Resize(_, _)
+                                if tx.send(Event::Resize).is_err() =>
+                            {
+                                break;
                             }
                             _ => {}
                         }
