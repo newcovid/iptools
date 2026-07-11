@@ -8,7 +8,7 @@ use crate::utils::textinput::{TextInput, filter_cidr};
 use crate::utils::{net, oui};
 use crossterm::event::{KeyCode, KeyEvent};
 use ipnetwork::Ipv4Network;
-use iptools_core::{JobId, RuntimeEvent, ScanHost, ToolKind};
+use iptools_core::{Effect, JobId, RuntimeEvent, ScanRequest, ToolKind};
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Table, TableState},
@@ -16,9 +16,6 @@ use ratatui::{
 use std::cell::RefCell;
 use std::net::Ipv4Addr;
 use std::rc::Rc;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::time::Duration;
 use unicode_width::UnicodeWidthStr;
 
 use crate::runtime::NativeRuntime;
@@ -148,8 +145,10 @@ impl ScannerModule {
             // 扫描中则停止——与诊断页各工具的开始/停止交互一致，无需独立 S 键。
             Some(Action::Confirm) | Some(Action::Toggle) => {
                 if self.status == ScanStatus::Scanning {
-                    if let Some(job) = self.job {
-                        runtime.cancel(job);
+                    if let Some(job) = self.job
+                        && let Err(error) = runtime.dispatch(Effect::CancelScan(job))
+                    {
+                        tracing::warn!(%error, "failed to dispatch scanner cancellation");
                     }
                 } else {
                     self.start_scan(concurrency, runtime);
@@ -189,100 +188,18 @@ impl ScannerModule {
             generation: self.generation,
         };
         self.job = Some(job);
-        let total = self.total_scan_count;
-
-        runtime.spawn(job, move |token, events| async move {
-            let _ = events.send(RuntimeEvent::ScanStarted { job, total }).await;
-            if let Ok(network) = cidr_str.parse::<Ipv4Network>() {
-                let ips: Vec<Ipv4Addr> = if network.prefix() < 31 {
-                    network
-                        .iter()
-                        .skip(1)
-                        .take(network.size().saturating_sub(2) as usize)
-                        .collect()
-                } else {
-                    network.iter().collect()
-                };
-                let completed = Arc::new(AtomicU64::new(0));
-                let worker_completed = Arc::clone(&completed);
-                let worker_token = token.clone();
-                let worker_events = events.clone();
-                let worker_count = concurrency.max(1).min(ips.len().max(1));
-                let workers = tokio::task::spawn_blocking(move || {
-                    let ips = Arc::new(ips);
-                    let next = Arc::new(AtomicUsize::new(0));
-                    std::thread::scope(|scope| {
-                        for _ in 0..worker_count {
-                            let ips = Arc::clone(&ips);
-                            let next = Arc::clone(&next);
-                            let completed = Arc::clone(&worker_completed);
-                            let token = worker_token.clone();
-                            let events = worker_events.clone();
-                            scope.spawn(move || {
-                                loop {
-                                    if token.is_cancelled() {
-                                        break;
-                                    }
-                                    let index = next.fetch_add(1, Ordering::Relaxed);
-                                    let Some(&ip) = ips.get(index) else {
-                                        break;
-                                    };
-
-                                    // Each worker owns its blocking resolver calls. The parent
-                                    // job awaits this scoped pool, so shutdown cannot orphan them.
-                                    if let Some(mac) = net::resolve_mac_address(ip)
-                                        && !token.is_cancelled()
-                                    {
-                                        let hostname = net::resolve_hostname(
-                                            std::net::IpAddr::V4(ip),
-                                        )
-                                        .unwrap_or_default();
-                                        if !token.is_cancelled() {
-                                            let _ = events.blocking_send(
-                                                RuntimeEvent::ScanHostFound {
-                                                    job,
-                                                    host: ScanHost {
-                                                        ip: ip.to_string(),
-                                                        mac,
-                                                        hostname,
-                                                    },
-                                                },
-                                            );
-                                        }
-                                    }
-                                    completed.fetch_add(1, Ordering::Relaxed);
-                                }
-                            });
-                        }
-                    });
-                });
-                tokio::pin!(workers);
-                let mut ticker = tokio::time::interval(Duration::from_millis(250));
-                loop {
-                    tokio::select! {
-                        _ = ticker.tick() => {
-                            let current = completed.load(Ordering::Relaxed);
-                            let _ = events.send(RuntimeEvent::ScanProgress { job, current, total }).await;
-                        }
-                        result = &mut workers => {
-                            if let Err(error) = result {
-                                tracing::warn!(%error, "scanner worker pool failed to join");
-                            }
-                            break;
-                        }
-                    }
-                }
-                let current = completed.load(Ordering::Relaxed);
-                let _ = events.send(RuntimeEvent::ScanProgress { job, current, total }).await;
-            }
-            let terminal_event = if token.is_cancelled() {
-                RuntimeEvent::ScanCancelled { job }
-            } else {
-                RuntimeEvent::ScanFinished { job }
-            };
-            let _ = events.send(terminal_event).await;
-            Ok(())
-        });
+        let effect = Effect::StartScan {
+            job,
+            request: ScanRequest {
+                cidr: cidr_str,
+                concurrency,
+            },
+        };
+        if let Err(error) = runtime.dispatch(effect) {
+            tracing::warn!(%error, "failed to dispatch scanner start");
+            self.status = ScanStatus::Done;
+            self.job = None;
+        }
     }
 
     pub fn handle_runtime(&mut self, event: &RuntimeEvent) {

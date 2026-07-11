@@ -551,4 +551,36 @@ mod tests {
         assert!(text.contains("DEMO"));
         assert_eq!(ui.hit_test(2, 1), Some(Action::SelectPage(0)));
     }
+
+    #[test]
+    fn scanner_states_render_in_both_languages_and_compact_sizes() {
+        for (width, height) in [(80, 24), (120, 36)] {
+            for language in [Language::En, Language::Zh] {
+                for status in [TaskStatus::Idle, TaskStatus::Running, TaskStatus::Done] {
+                    let backend = TestBackend::new(width, height);
+                    let mut terminal = Terminal::new(backend).unwrap();
+                    let mut model = AppModel::default();
+                    model.page = Page::Scanner;
+                    model.language = language;
+                    model.scanner.status = status;
+                    model.scanner.current = 42;
+                    model.scanner.total = 254;
+                    model.scanner.results = vec![iptools_core::ScanHost {
+                        ip: "192.168.1.1".into(),
+                        mac: "00:11:22:33:44:55".into(),
+                        hostname: "gateway".into(),
+                    }];
+                    let mut ui = UiState::default();
+
+                    terminal
+                        .draw(|frame| render(frame, &model, &mut ui))
+                        .unwrap();
+                    let text = terminal.backend().to_string();
+                    assert!(text.contains("192.168.1.0/24"));
+                    assert!(text.contains("192.168.1.1"));
+                    assert!(ui.scanner_action.is_some());
+                }
+            }
+        }
+    }
 }
