@@ -326,17 +326,16 @@ fn unix_send(
             rtt_ms: None,
         };
     }
-    if let Some(s) = src {
-        if sock
+    if let Some(s) = src
+        && sock
             .bind(&SockAddr::from(SocketAddr::new(s.into(), 0)))
             .is_err()
-        {
-            return EchoResult {
-                status: u32::MAX,
-                addr: None,
-                rtt_ms: None,
-            };
-        }
+    {
+        return EchoResult {
+            status: u32::MAX,
+            addr: None,
+            rtt_ms: None,
+        };
     }
 
     let id = (std::process::id() & 0xFFFF) as u16;

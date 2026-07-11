@@ -184,10 +184,10 @@ fn linux_core_interfaces() -> Vec<InterfaceInfo> {
                             .and_then(|m| m.as_sockaddr_in())
                             .map(|m| m.ip())
                             .and_then(linux::mask_to_prefix);
-                        if entry.cidr.is_none() {
-                            if let Some(p) = prefix {
-                                entry.cidr = Some(format!("{}/{}", ip, p));
-                            }
+                        if entry.cidr.is_none()
+                            && let Some(p) = prefix
+                        {
+                            entry.cidr = Some(format!("{}/{}", ip, p));
                         }
                         entry.ipv4.push(ip.to_string());
                     }
