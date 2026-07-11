@@ -1,8 +1,10 @@
 //! Structured lifecycle management for native background jobs.
 
+mod scanner;
+
 use std::{collections::HashMap, future::Future};
 
-use iptools_core::{JobId, RuntimeEvent};
+use iptools_core::{Effect, JobId, RuntimeEvent};
 use tokio::{sync::mpsc, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
@@ -19,6 +21,12 @@ pub enum TaskPhase {
 pub enum RuntimeTaskError {
     #[error("{0}")]
     Operation(String),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RuntimeDispatchError {
+    #[error("native effect handler is not migrated yet: {0}")]
+    UnsupportedEffect(&'static str),
 }
 
 #[derive(Debug)]
@@ -50,6 +58,24 @@ impl NativeRuntime {
             cancellations: HashMap::new(),
             event_tx,
             event_rx,
+        }
+    }
+
+    /// Execute a shared effect through the native runtime boundary.
+    ///
+    /// During vertical migration this deliberately accepts only effects whose
+    /// native handlers have moved out of legacy page objects.
+    pub fn dispatch(&mut self, effect: Effect) -> Result<(), RuntimeDispatchError> {
+        match effect {
+            Effect::StartScan { job, request } => {
+                self.spawn_scan(job, request);
+                Ok(())
+            }
+            Effect::CancelScan(job) => {
+                self.cancel(job);
+                Ok(())
+            }
+            other => Err(RuntimeDispatchError::UnsupportedEffect(effect_name(&other))),
         }
     }
 
@@ -146,6 +172,28 @@ impl NativeRuntime {
                 }
             }
         }
+    }
+}
+
+fn effect_name(effect: &Effect) -> &'static str {
+    match effect {
+        Effect::RefreshDashboard => "refresh-dashboard",
+        Effect::RefreshAdapters => "refresh-adapters",
+        Effect::ApplyAdapterConfig(_) => "apply-adapter-config",
+        Effect::StartScan { .. } => "start-scan",
+        Effect::CancelScan(_) => "cancel-scan",
+        Effect::StartPing { .. } => "start-ping",
+        Effect::StopPing(_) => "stop-ping",
+        Effect::StartTrace { .. } => "start-trace",
+        Effect::StopTrace(_) => "stop-trace",
+        Effect::StartPortScan { .. } => "start-port-scan",
+        Effect::StopPortScan(_) => "stop-port-scan",
+        Effect::StartPublicSpeed { .. } => "start-public-speed",
+        Effect::StopPublicSpeed(_) => "stop-public-speed",
+        Effect::StartLinkQuality { .. } => "start-link-quality",
+        Effect::StopLinkQuality(_) => "stop-link-quality",
+        Effect::StartLanSpeed { .. } => "start-lan-speed",
+        Effect::StopLanSpeed(_) => "stop-lan-speed",
     }
 }
 
