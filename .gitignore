@@ -1,8 +1,20 @@
-# Rust
-target/
+# Rust build output
+/target/
 
-# 本地运行时配置（首次运行自动生成；参见 config.example.json）
-config.json
+# Local runtime state
+/config.json
+*.log
 
-# Superpowers 工作流文档（设计/计划草稿），不纳入版本库
-docs/superpowers/
+# Editors and operating systems
+/.idea/
+/.vscode/
+.DS_Store
+Thumbs.db
+
+# Local AI assistant instructions and workspace state
+/.claude/
+/.codex/
+/AGENT.md
+/AGENTS.md
+/CLAUDE.md
+/docs/superpowers/

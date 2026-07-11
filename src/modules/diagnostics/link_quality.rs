@@ -1,7 +1,7 @@
 //! 链路质量评测（有线/无线）。
 //!
-//! 可选定具体网卡，探测从该网卡源 IP 发出（IcmpSendEcho2Ex）；测试期间持续采样
-//! 延迟与无线射频状态（RSSI/信号质量/速率），按多维加权模型给出评级。
+//! 可选定具体网卡，探测从该网卡源 IP 发出；测试期间持续采样延迟与无线射频状态
+//! （RSSI/信号质量/速率），按多维加权模型给出评级。
 
 use super::{config_field_item, FocusArea};
 use crate::history::HistoryStore;
@@ -215,11 +215,7 @@ impl LinkQualityTool {
         let key = self.ifaces.get(self.iface_idx).map(iface_key);
         self.current_key = key.clone();
         if let Some(k) = key {
-            let params = self
-                .saved_adapters
-                .get(&k)
-                .cloned()
-                .unwrap_or_default();
+            let params = self.saved_adapters.get(&k).cloned().unwrap_or_default();
             self.set_live_params(&params);
         }
     }
@@ -255,10 +251,7 @@ impl LinkQualityTool {
             if !(i.is_up && i.is_physical && !i.ipv4.is_empty()) {
                 continue;
             }
-            let ipv4 = i
-                .ipv4
-                .iter()
-                .find_map(|s| s.parse::<Ipv4Addr>().ok());
+            let ipv4 = i.ipv4.iter().find_map(|s| s.parse::<Ipv4Addr>().ok());
             let ipv4 = match ipv4 {
                 Some(v) => v,
                 None => continue,
@@ -353,17 +346,17 @@ impl LinkQualityTool {
 
         // MRU 历史下拉 / 行尾灰字采纳 / Ctrl+R 开下拉，仅对目标字段（idx==1）启用。
         let on_target = idx == 1;
-        if self.mru.open || (on_target && !self.running) {
-            if crate::ui::mru::handle_mru_key(
+        if (self.mru.open || (on_target && !self.running))
+            && crate::ui::mru::handle_mru_key(
                 &mut self.config.target,
                 &mut self.mru,
                 &self.history.borrow().targets,
                 key,
                 action,
                 self.running,
-            ) {
-                return;
-            }
+            )
+        {
+            return;
         }
 
         // 文本字段（idx 1..=5）：带光标编辑
@@ -546,7 +539,13 @@ impl LinkQualityTool {
             }
         };
 
-        let count: u64 = self.config.count.value().parse().unwrap_or(20).clamp(5, 100);
+        let count: u64 = self
+            .config
+            .count
+            .value()
+            .parse()
+            .unwrap_or(20)
+            .clamp(5, 100);
         let interval_ms: u64 = self
             .config
             .interval_ms
@@ -737,13 +736,13 @@ impl LinkQualityTool {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),                 // header
-                Constraint::Length(1),                 // overall gauge
-                Constraint::Length(n_dims as u16),     // dim bars
+                Constraint::Length(1),                   // header
+                Constraint::Length(1),                   // overall gauge
+                Constraint::Length(n_dims as u16),       // dim bars
                 Constraint::Length(metrics_rows as u16), // metrics grid
-                Constraint::Min(3),                    // latency sparkline
-                Constraint::Length(rssi_rows as u16),  // rssi sparkline (wifi)
-                Constraint::Length(1),                 // status
+                Constraint::Min(3),                      // latency sparkline
+                Constraint::Length(rssi_rows as u16),    // rssi sparkline (wifi)
+                Constraint::Length(1),                   // status
             ])
             .split(inner);
 
@@ -754,7 +753,11 @@ impl LinkQualityTool {
 
         let data: Vec<u64> = self.lat_history.iter().cloned().collect();
         let spark = Sparkline::default()
-            .block(Block::default().borders(Borders::TOP).title(i18n.t("diag_link_history")))
+            .block(
+                Block::default()
+                    .borders(Borders::TOP)
+                    .title(i18n.t("diag_link_history")),
+            )
             .data(&data)
             .style(Style::default().fg(theme::COLOR_PRIMARY));
         f.render_widget(spark, chunks[4]);
@@ -762,7 +765,11 @@ impl LinkQualityTool {
         if is_wifi {
             let rdata: Vec<u64> = self.rssi_history.iter().cloned().collect();
             let rspark = Sparkline::default()
-                .block(Block::default().borders(Borders::TOP).title(i18n.t("diag_link_rssi_history")))
+                .block(
+                    Block::default()
+                        .borders(Borders::TOP)
+                        .title(i18n.t("diag_link_rssi_history")),
+                )
                 .data(&rdata)
                 .style(Style::default().fg(Color::Magenta));
             f.render_widget(rspark, chunks[5]);
@@ -811,7 +818,10 @@ impl LinkQualityTool {
                     .get(self.iface_idx)
                     .map(|c| c.name.clone())
                     .unwrap_or_else(|| i18n.t("diag_link_no_iface"));
-                spans.push(Span::styled(name, Style::default().fg(theme::COLOR_SECONDARY)));
+                spans.push(Span::styled(
+                    name,
+                    Style::default().fg(theme::COLOR_SECONDARY),
+                ));
             }
         }
         f.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -820,11 +830,20 @@ impl LinkQualityTool {
     fn draw_overall(&self, f: &mut Frame, area: Rect, i18n: &I18n) {
         let (label, ratio, gcolor) = match self.overall_grade() {
             Some((sc, g, _)) => (
-                format!("{}: {} ({:.0})", i18n.t("diag_link_grade"), i18n.t(g.i18n_key()), sc),
+                format!(
+                    "{}: {} ({:.0})",
+                    i18n.t("diag_link_grade"),
+                    i18n.t(g.i18n_key()),
+                    sc
+                ),
                 (sc / 100.0).clamp(0.0, 1.0),
                 g.color(),
             ),
-            None => (format!("{}: -", i18n.t("diag_link_grade")), 0.0, Color::DarkGray),
+            None => (
+                format!("{}: -", i18n.t("diag_link_grade")),
+                0.0,
+                Color::DarkGray,
+            ),
         };
         let gauge = Gauge::default()
             .gauge_style(Style::default().fg(gcolor).bg(Color::DarkGray))
@@ -844,7 +863,10 @@ impl LinkQualityTool {
                 let c = bar_color(*sc);
                 let mark = if Some(i) == weakest { " ◀" } else { "" };
                 Line::from(vec![
-                    Span::styled(format!("{:<8}", i18n.t(key)), Style::default().fg(Color::Gray)),
+                    Span::styled(
+                        format!("{:<8}", i18n.t(key)),
+                        Style::default().fg(Color::Gray),
+                    ),
                     Span::styled(bar, Style::default().fg(c)),
                     Span::styled(format!(" {:>3.0}{}", sc, mark), Style::default().fg(c)),
                 ])
@@ -858,21 +880,33 @@ impl LinkQualityTool {
         let g = |k: &str| -> String { i18n.t(k) };
         let mut lines = vec![
             Line::from(vec![
-                Span::styled(format!("{}: ", g("diag_link_avg")), Style::default().fg(Color::Gray)),
+                Span::styled(
+                    format!("{}: ", g("diag_link_avg")),
+                    Style::default().fg(Color::Gray),
+                ),
                 Span::styled(
                     format!("{}/{}/{} ms  ", min, avg, max),
                     Style::default().fg(Color::White),
                 ),
-                Span::styled(format!("{}: ", g("diag_link_jitter")), Style::default().fg(Color::Gray)),
+                Span::styled(
+                    format!("{}: ", g("diag_link_jitter")),
+                    Style::default().fg(Color::Gray),
+                ),
                 Span::styled(format!("{} ms", jitter), Style::default().fg(Color::White)),
             ]),
             Line::from(vec![
-                Span::styled(format!("{}: ", g("diag_link_loss")), Style::default().fg(Color::Gray)),
+                Span::styled(
+                    format!("{}: ", g("diag_link_loss")),
+                    Style::default().fg(Color::Gray),
+                ),
                 Span::styled(
                     format!("{:.1}%  ", loss),
                     Style::default().fg(if loss > 5.0 { Color::Red } else { Color::Green }),
                 ),
-                Span::styled(format!("{}: ", g("diag_link_sent")), Style::default().fg(Color::Gray)),
+                Span::styled(
+                    format!("{}: ", g("diag_link_sent")),
+                    Style::default().fg(Color::Gray),
+                ),
                 Span::styled(
                     format!("{}/{}", sent, self.total),
                     Style::default().fg(theme::COLOR_SECONDARY),
@@ -890,9 +924,15 @@ impl LinkQualityTool {
             };
             // 行1：RSSI(min/avg/max) + 信道(频段, 频率)
             lines.push(Line::from(vec![
-                Span::styled(format!("{}: ", g("diag_link_rssi")), Style::default().fg(Color::Gray)),
+                Span::styled(
+                    format!("{}: ", g("diag_link_rssi")),
+                    Style::default().fg(Color::Gray),
+                ),
                 Span::styled(format!("{}  ", rssi_txt), Style::default().fg(Color::White)),
-                Span::styled(format!("{}: ", g("diag_link_channel")), Style::default().fg(Color::Gray)),
+                Span::styled(
+                    format!("{}: ", g("diag_link_channel")),
+                    Style::default().fg(Color::Gray),
+                ),
                 Span::styled(
                     w.map(|w| format!("{} ({}, {} MHz)", w.channel, w.band, w.freq_mhz))
                         .unwrap_or_else(|| "-".into()),
@@ -907,9 +947,15 @@ impl LinkQualityTool {
                     .unwrap_or_else(|| "-".into()),
             };
             lines.push(Line::from(vec![
-                Span::styled(format!("{}: ", g("diag_link_signal_q")), Style::default().fg(Color::Gray)),
+                Span::styled(
+                    format!("{}: ", g("diag_link_signal_q")),
+                    Style::default().fg(Color::Gray),
+                ),
                 Span::styled(format!("{}  ", q_txt), Style::default().fg(Color::White)),
-                Span::styled(format!("{}: ", g("diag_link_phy")), Style::default().fg(Color::Gray)),
+                Span::styled(
+                    format!("{}: ", g("diag_link_phy")),
+                    Style::default().fg(Color::Gray),
+                ),
                 Span::styled(
                     w.map(|w| w.phy_type.clone()).unwrap_or_else(|| "-".into()),
                     Style::default().fg(Color::White),
@@ -929,12 +975,18 @@ impl LinkQualityTool {
             ]));
             // 行4：BSSID + 加密(认证 / 加密算法)
             lines.push(Line::from(vec![
-                Span::styled(format!("{}: ", g("diag_link_bssid")), Style::default().fg(Color::Gray)),
+                Span::styled(
+                    format!("{}: ", g("diag_link_bssid")),
+                    Style::default().fg(Color::Gray),
+                ),
                 Span::styled(
                     w.map(|w| w.bssid.clone()).unwrap_or_else(|| "-".into()),
                     Style::default().fg(Color::White),
                 ),
-                Span::styled(format!("  {}: ", g("diag_link_auth")), Style::default().fg(Color::Gray)),
+                Span::styled(
+                    format!("  {}: ", g("diag_link_auth")),
+                    Style::default().fg(Color::Gray),
+                ),
                 Span::styled(
                     w.map(|w| format!("{} / {}", w.auth, w.cipher))
                         .unwrap_or_else(|| "-".into()),
@@ -950,14 +1002,20 @@ impl LinkQualityTool {
                 self.live_link_speed
             };
             lines.push(Line::from(vec![
-                Span::styled(format!("{}: ", g("diag_link_speed")), Style::default().fg(Color::Gray)),
+                Span::styled(
+                    format!("{}: ", g("diag_link_speed")),
+                    Style::default().fg(Color::Gray),
+                ),
                 Span::styled(
                     speed_bps
                         .map(|sp| format::format_speed(sp / 8))
                         .unwrap_or_else(|| "-".into()),
                     Style::default().fg(Color::White),
                 ),
-                Span::styled(format!("  {}: ", g("diag_link_media")), Style::default().fg(Color::Gray)),
+                Span::styled(
+                    format!("  {}: ", g("diag_link_media")),
+                    Style::default().fg(Color::Gray),
+                ),
                 Span::styled(g("diag_link_media_up"), Style::default().fg(Color::Green)),
             ]));
             lines.push(Line::from(vec![
@@ -982,12 +1040,20 @@ impl LinkQualityTool {
             (i18n.t(key), Style::default().fg(theme::COLOR_ERROR))
         } else if self.running {
             (
-                format!("{} | {}", i18n.t("diag_status_running"), i18n.t("diag_msg_stop")),
+                format!(
+                    "{} | {}",
+                    i18n.t("diag_status_running"),
+                    i18n.t("diag_msg_stop")
+                ),
                 Style::default().fg(Color::Green),
             )
         } else {
             (
-                format!("{} | {}", i18n.t("diag_status_stopped"), i18n.t("diag_msg_start")),
+                format!(
+                    "{} | {}",
+                    i18n.t("diag_status_stopped"),
+                    i18n.t("diag_msg_start")
+                ),
                 Style::default().fg(Color::Red),
             )
         };
@@ -1044,7 +1110,14 @@ impl LinkQualityTool {
                 } else {
                     None
                 };
-                items.push(config_field_item(&labels[0], is_sel, is_active, &iface_input, false, hint));
+                items.push(config_field_item(
+                    &labels[0],
+                    is_sel,
+                    is_active,
+                    &iface_input,
+                    false,
+                    hint,
+                ));
             } else if i == 1 {
                 // 目标字段：带 MRU 灰字补全，手动拼装（不走 config_field_item）。
                 let val_base = if is_sel && is_active {
@@ -1085,7 +1158,9 @@ impl LinkQualityTool {
                 } else {
                     None
                 };
-                items.push(config_field_item(&labels[i], is_sel, is_active, input, active, hint));
+                items.push(config_field_item(
+                    &labels[i], is_sel, is_active, input, active, hint,
+                ));
             }
         }
 

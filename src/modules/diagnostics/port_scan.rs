@@ -140,7 +140,13 @@ impl PortScanTool {
         }
     }
 
-    pub fn on_key(&mut self, key: KeyEvent, action: Option<Action>, focus: FocusArea, concurrency: usize) {
+    pub fn on_key(
+        &mut self,
+        key: KeyEvent,
+        action: Option<Action>,
+        focus: FocusArea,
+        concurrency: usize,
+    ) {
         match focus {
             FocusArea::Main => {
                 if action == Some(Action::Toggle) {
@@ -165,17 +171,17 @@ impl PortScanTool {
     fn handle_config_key(&mut self, key: KeyEvent, action: Option<Action>) {
         // 运行中不允许改配置。带光标编辑：目标接受主机名字符，端口/超时仅数字。
         let on_target = self.config_state.selected() == Some(0);
-        if self.mru.open || (on_target && !self.running) {
-            if crate::ui::mru::handle_mru_key(
+        if (self.mru.open || (on_target && !self.running))
+            && crate::ui::mru::handle_mru_key(
                 &mut self.config.target,
                 &mut self.mru,
                 &self.history.borrow().targets,
                 key,
                 action,
                 self.running,
-            ) {
-                return;
-            }
+            )
+        {
+            return;
         }
         if !self.running {
             if let Some(idx) = self.config_state.selected() {
@@ -185,7 +191,8 @@ impl PortScanTool {
                     let consumed = if idx == 0 {
                         self.field_mut(idx).handle_key(key.code, filter_host)
                     } else {
-                        self.field_mut(idx).handle_key(key.code, |c| c.is_ascii_digit())
+                        self.field_mut(idx)
+                            .handle_key(key.code, |c| c.is_ascii_digit())
                     };
                     if consumed {
                         return;
@@ -211,7 +218,11 @@ impl PortScanTool {
     }
 
     fn next_config(&mut self) {
-        let i = self.config_state.selected().map(|i| (i + 1) % 4).unwrap_or(0);
+        let i = self
+            .config_state
+            .selected()
+            .map(|i| (i + 1) % 4)
+            .unwrap_or(0);
         self.config_state.select(Some(i));
     }
 
@@ -464,7 +475,11 @@ impl PortScanTool {
             0.0
         };
         let gauge = Gauge::default()
-            .gauge_style(Style::default().fg(theme::COLOR_SECONDARY).bg(Color::DarkGray))
+            .gauge_style(
+                Style::default()
+                    .fg(theme::COLOR_SECONDARY)
+                    .bg(Color::DarkGray),
+            )
             .ratio(ratio)
             .label(format!("{:.0}%", ratio * 100.0));
         f.render_widget(gauge, chunks[2]);
@@ -474,19 +489,24 @@ impl PortScanTool {
             (i18n.t(key), Style::default().fg(theme::COLOR_ERROR))
         } else if self.running {
             (
-                format!("{} | {}", i18n.t("scan_status_scanning"), i18n.t("diag_msg_stop")),
+                format!(
+                    "{} | {}",
+                    i18n.t("scan_status_scanning"),
+                    i18n.t("diag_msg_stop")
+                ),
                 Style::default().fg(Color::Green),
             )
         } else {
             (
-                format!("{} | {}", i18n.t("diag_status_stopped"), i18n.t("diag_msg_start")),
+                format!(
+                    "{} | {}",
+                    i18n.t("diag_status_stopped"),
+                    i18n.t("diag_msg_start")
+                ),
                 Style::default().fg(Color::Red),
             )
         };
-        f.render_widget(
-            Paragraph::new(status_text).style(status_style),
-            chunks[3],
-        );
+        f.render_widget(Paragraph::new(status_text).style(status_style), chunks[3]);
     }
 
     fn draw_config(
@@ -519,10 +539,10 @@ impl PortScanTool {
         let selected = self.config_state.selected();
 
         let mut list_items: Vec<ListItem> = Vec::with_capacity(4);
-        for i in 0..4 {
+        for (i, label) in labels.iter().enumerate() {
             let is_sel = selected == Some(i);
             let label_line = Line::from(Span::styled(
-                format!("{}:", labels[i]),
+                format!("{}:", label),
                 Style::default().fg(if is_sel { Color::Yellow } else { Color::Gray }),
             ));
             let val_base = if is_sel && is_active {

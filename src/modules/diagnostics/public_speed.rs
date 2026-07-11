@@ -323,7 +323,10 @@ impl PublicSpeedTool {
                 format!("{}: ", i18n.t("diag_speed_peak")),
                 Style::default().fg(Color::Gray),
             ),
-            Span::styled(format_speed_dual(self.peak_bps), Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format_speed_dual(self.peak_bps),
+                Style::default().fg(Color::Yellow),
+            ),
         ]);
         f.render_widget(Paragraph::new(avg_peak), chunks[1]);
 
@@ -365,12 +368,20 @@ impl PublicSpeedTool {
             (i18n.t(key), Style::default().fg(theme::COLOR_ERROR))
         } else if self.running {
             (
-                format!("{} | {}", i18n.t("diag_status_running"), i18n.t("diag_msg_stop")),
+                format!(
+                    "{} | {}",
+                    i18n.t("diag_status_running"),
+                    i18n.t("diag_msg_stop")
+                ),
                 Style::default().fg(Color::Green),
             )
         } else {
             (
-                format!("{} | {}", i18n.t("diag_status_stopped"), i18n.t("diag_msg_start")),
+                format!(
+                    "{} | {}",
+                    i18n.t("diag_status_stopped"),
+                    i18n.t("diag_msg_start")
+                ),
                 Style::default().fg(Color::Red),
             )
         };

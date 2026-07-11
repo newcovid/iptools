@@ -61,9 +61,6 @@ mod tests {
     #[test]
     fn speed_dual_shows_both_units() {
         // 12.5 MB/s = 100 Mbps（12.5 * 1024 * 1024 字节/秒）
-        assert_eq!(
-            format_speed_dual(12_500_000),
-            "11.92 MB/s (100.0 Mbps)"
-        );
+        assert_eq!(format_speed_dual(12_500_000), "11.92 MB/s (100.0 Mbps)");
     }
 }

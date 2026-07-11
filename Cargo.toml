@@ -1,9 +1,14 @@
 [package]
 name = "iptools"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
-authors = ["Your Name <you@example.com>"]
-description = "A modular, cross-platform IP management and testing CLI tool."
+authors = ["newcovid"]
+description = "A cross-platform TUI for IP management and network diagnostics."
+license = "MIT"
+repository = "https://github.com/newcovid/iptools"
+readme = "README.md"
+keywords = ["network", "tui", "ip", "diagnostics", "ratatui"]
+categories = ["command-line-utilities", "network-programming"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -24,22 +29,17 @@ dns-lookup = "2.0"
 unicode-width = "0.1"
 rand = "0.8"
 
-# 非 Windows（unix）平台依赖：
-#   surge-ping —— ping.rs 持续发包（已工作，保留）
-#   socket2    —— icmp.rs raw ICMP（设 TTL、绑定源、收 Time-Exceeded）
-#   nix        —— getifaddrs / if_nametoindex（网卡枚举、出口网卡定位）
-#   libc       —— AF_PACKET 原始套接字（主动 ARP）
+# Unix networking backends.
 [target.'cfg(unix)'.dependencies]
 surge-ping = "0.8"
-# features=["all"]：启用 Type::RAW / Protocol::ICMPV4 等（默认 feature 不含）
 socket2 = { version = "0.5", features = ["all"] }
 nix = { version = "0.29", features = ["net"] }
 libc = "0.2"
 
-# Windows 平台专用依赖
+# Windows networking backends.
 [target.'cfg(windows)'.dependencies]
 ipconfig = "0.3"
-encoding_rs = "0.8" 
+encoding_rs = "0.8"
 winreg = "0.52"
 windows = { version = "0.58", features = [
     "Win32_Foundation",
@@ -50,5 +50,4 @@ windows = { version = "0.58", features = [
     "Win32_NetworkManagement_WiFi",
     "Win32_System_IO",
 ] }
-# IP 配置写入：用 wmi 封装 COM/WMI，避免手写 VARIANT/SAFEARRAY FFI
 wmi = "0.18.4"

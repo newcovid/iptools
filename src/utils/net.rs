@@ -26,106 +26,101 @@ pub fn get_interfaces() -> Vec<InterfaceInfo> {
     let ssid_map = get_ssid_map_via_win32();
     let dhcp_map = get_dhcp_map_via_win32();
 
-    match ipconfig::get_adapters() {
-        Ok(adapters) => {
-            for adapter in adapters {
-                if adapter.if_type() == ipconfig::IfType::SoftwareLoopback
-                    || adapter.if_type() == ipconfig::IfType::Tunnel
-                {
-                    continue;
-                }
+    if let Ok(adapters) = ipconfig::get_adapters() {
+        for adapter in adapters {
+            if adapter.if_type() == ipconfig::IfType::SoftwareLoopback
+                || adapter.if_type() == ipconfig::IfType::Tunnel
+            {
+                continue;
+            }
 
-                let is_physical = matches!(
-                    adapter.if_type(),
-                    ipconfig::IfType::EthernetCsmacd | ipconfig::IfType::Ieee80211
-                );
+            let is_physical = matches!(
+                adapter.if_type(),
+                ipconfig::IfType::EthernetCsmacd | ipconfig::IfType::Ieee80211
+            );
 
-                let mac = adapter
-                    .physical_address()
-                    .map(|addr| {
-                        addr.iter()
-                            .map(|b| format!("{:02x}", b))
-                            .collect::<Vec<String>>()
-                            .join(":")
-                    })
-                    .unwrap_or_default();
+            let mac = adapter
+                .physical_address()
+                .map(|addr| {
+                    addr.iter()
+                        .map(|b| format!("{:02x}", b))
+                        .collect::<Vec<String>>()
+                        .join(":")
+                })
+                .unwrap_or_default();
 
-                let mut ipv4 = Vec::new();
-                let mut ipv6 = Vec::new();
-                let mut cidr = None;
+            let mut ipv4 = Vec::new();
+            let mut ipv6 = Vec::new();
+            let mut cidr = None;
 
-                for ip in adapter.ip_addresses().iter() {
-                    match ip {
-                        IpAddr::V4(v4) => {
-                            ipv4.push(v4.to_string());
-                            if cidr.is_none() {
-                                // 找出该 IPv4 所属的“真实子网”前缀，而非 /32 主机路由。
-                                // prefixes 同时包含子网(如 192.168.1.0/24)、主机路由
-                                // (192.168.1.x/32) 与广播(192.168.1.255/32)；只匹配
-                                // prefix_ip==ip 会错取 /32，导致掩码被算成 255.255.255.255，
-                                // 进而使 EnableStatic 返回错误码 66。取网络地址匹配且
-                                // 0<len<32 中最长（最具体）的一个。
-                                let ip_bits = u32::from(*v4);
-                                let mut best: Option<u32> = None;
-                                for (prefix_ip, len) in adapter.prefixes() {
-                                    if let IpAddr::V4(net) = prefix_ip {
-                                        if *len == 0 || *len >= 32 {
-                                            continue;
-                                        }
-                                        let mask = u32::MAX << (32 - *len);
-                                        if ip_bits & mask == u32::from(*net) {
-                                            best =
-                                                Some(best.map_or(*len, |b| b.max(*len)));
-                                        }
+            for ip in adapter.ip_addresses().iter() {
+                match ip {
+                    IpAddr::V4(v4) => {
+                        ipv4.push(v4.to_string());
+                        if cidr.is_none() {
+                            // 找出该 IPv4 所属的“真实子网”前缀，而非 /32 主机路由。
+                            // prefixes 同时包含子网(如 192.168.1.0/24)、主机路由
+                            // (192.168.1.x/32) 与广播(192.168.1.255/32)；只匹配
+                            // prefix_ip==ip 会错取 /32，导致掩码被算成 255.255.255.255，
+                            // 进而使 EnableStatic 返回错误码 66。取网络地址匹配且
+                            // 0<len<32 中最长（最具体）的一个。
+                            let ip_bits = u32::from(*v4);
+                            let mut best: Option<u32> = None;
+                            for (prefix_ip, len) in adapter.prefixes() {
+                                if let IpAddr::V4(net) = prefix_ip {
+                                    if *len == 0 || *len >= 32 {
+                                        continue;
+                                    }
+                                    let mask = u32::MAX << (32 - *len);
+                                    if ip_bits & mask == u32::from(*net) {
+                                        best = Some(best.map_or(*len, |b| b.max(*len)));
                                     }
                                 }
-                                if let Some(len) = best {
-                                    cidr = Some(format!("{}/{}", v4, len));
-                                }
+                            }
+                            if let Some(len) = best {
+                                cidr = Some(format!("{}/{}", v4, len));
                             }
                         }
-                        IpAddr::V6(v6) => ipv6.push(v6.to_string()),
                     }
+                    IpAddr::V6(v6) => ipv6.push(v6.to_string()),
                 }
-
-                let is_up = match adapter.oper_status() {
-                    ipconfig::OperStatus::IfOperStatusUp => true,
-                    _ => false,
-                };
-
-                let mut ssid = None;
-                if is_up {
-                    if let Some(s) = ssid_map.get(adapter.adapter_name()) {
-                        ssid = Some(s.clone());
-                    }
-                }
-
-                let dhcp_enabled = dhcp_map
-                    .get(adapter.friendly_name())
-                    .copied()
-                    .unwrap_or(false);
-
-                result.push(InterfaceInfo {
-                    name: adapter.friendly_name().to_string(),
-                    description: adapter.description().to_string(),
-                    mac,
-                    ipv4,
-                    ipv6,
-                    is_up,
-                    ssid,
-                    dhcp_enabled,
-                    is_physical,
-                    interface_type: format!("{:?}", adapter.if_type()),
-                    cidr,
-                    guid: adapter.adapter_name().to_string(),
-                    link_speed_bps: {
-                        let s = adapter.transmit_link_speed();
-                        if s == 0 || s == u64::MAX { None } else { Some(s) }
-                    },
-                });
             }
+
+            let is_up = matches!(adapter.oper_status(), ipconfig::OperStatus::IfOperStatusUp);
+
+            let mut ssid = None;
+            if let (true, Some(s)) = (is_up, ssid_map.get(adapter.adapter_name())) {
+                ssid = Some(s.clone());
+            }
+
+            let dhcp_enabled = dhcp_map
+                .get(adapter.friendly_name())
+                .copied()
+                .unwrap_or(false);
+
+            result.push(InterfaceInfo {
+                name: adapter.friendly_name().to_string(),
+                description: adapter.description().to_string(),
+                mac,
+                ipv4,
+                ipv6,
+                is_up,
+                ssid,
+                dhcp_enabled,
+                is_physical,
+                interface_type: format!("{:?}", adapter.if_type()),
+                cidr,
+                guid: adapter.adapter_name().to_string(),
+                link_speed_bps: {
+                    let s = adapter.transmit_link_speed();
+                    if s == 0 || s == u64::MAX {
+                        None
+                    } else {
+                        Some(s)
+                    }
+                },
+            });
         }
-        Err(_) => {}
     }
 
     result.sort_by(|a, b| b.is_up.cmp(&a.is_up).then_with(|| a.name.cmp(&b.name)));
@@ -235,9 +230,9 @@ fn linux_core_interfaces() -> Vec<InterfaceInfo> {
         };
 
         let acc = accs.remove(&name);
-        let (ipv4, ipv6, cidr) = acc
-            .map(|a| (a.ipv4, a.ipv6, a.cidr))
-            .unwrap_or((Vec::new(), Vec::new(), None));
+        let (ipv4, ipv6, cidr) =
+            acc.map(|a| (a.ipv4, a.ipv6, a.cidr))
+                .unwrap_or((Vec::new(), Vec::new(), None));
 
         // SSID 富化移至 get_interfaces（避免扫描热路径起 iw 子进程）。
         let ssid: Option<String> = None;
@@ -330,46 +325,45 @@ fn get_ssid_map_via_win32() -> std::collections::HashMap<String, String> {
 
         let mut interface_list: *mut WLAN_INTERFACE_INFO_LIST = ptr::null_mut();
 
-        if WlanEnumInterfaces(client_handle, None, &mut interface_list) == 0 {
-            if !interface_list.is_null() {
-                let list = &*interface_list;
+        if WlanEnumInterfaces(client_handle, None, &mut interface_list) == 0
+            && !interface_list.is_null()
+        {
+            let list = &*interface_list;
 
-                for i in 0..list.dwNumberOfItems {
-                    let info = list.InterfaceInfo.as_ptr().offset(i as isize);
-                    let guid = (*info).InterfaceGuid;
+            for i in 0..list.dwNumberOfItems {
+                let info = list.InterfaceInfo.as_ptr().offset(i as isize);
+                let guid = (*info).InterfaceGuid;
 
-                    let guid_str = format!("{{{:?}}}", guid).to_uppercase();
+                let guid_str = format!("{{{:?}}}", guid).to_uppercase();
 
-                    let mut data_ptr: *mut std::ffi::c_void = ptr::null_mut();
-                    let mut data_size = 0;
+                let mut data_ptr: *mut std::ffi::c_void = ptr::null_mut();
+                let mut data_size = 0;
 
-                    let query_res = WlanQueryInterface(
-                        client_handle,
-                        &guid,
-                        wlan_intf_opcode_current_connection,
-                        None,
-                        &mut data_size,
-                        &mut data_ptr,
-                        None,
-                    );
+                let query_res = WlanQueryInterface(
+                    client_handle,
+                    &guid,
+                    wlan_intf_opcode_current_connection,
+                    None,
+                    &mut data_size,
+                    &mut data_ptr,
+                    None,
+                );
 
-                    if query_res == 0 && !data_ptr.is_null() {
-                        let stats = &*(data_ptr as *const WLAN_CONNECTION_ATTRIBUTES);
+                if query_res == 0 && !data_ptr.is_null() {
+                    let stats = &*(data_ptr as *const WLAN_CONNECTION_ATTRIBUTES);
 
-                        let len = stats.wlanAssociationAttributes.dot11Ssid.uSSIDLength as usize;
-                        if len > 0 && len <= 32 {
-                            let ssid_bytes =
-                                &stats.wlanAssociationAttributes.dot11Ssid.ucSSID[..len];
-                            let ssid_str = String::from_utf8_lossy(ssid_bytes).to_string();
-                            map.insert(guid_str, ssid_str);
-                        }
-
-                        WlanFreeMemory(data_ptr);
+                    let len = stats.wlanAssociationAttributes.dot11Ssid.uSSIDLength as usize;
+                    if len > 0 && len <= 32 {
+                        let ssid_bytes = &stats.wlanAssociationAttributes.dot11Ssid.ucSSID[..len];
+                        let ssid_str = String::from_utf8_lossy(ssid_bytes).to_string();
+                        map.insert(guid_str, ssid_str);
                     }
-                }
 
-                WlanFreeMemory(interface_list as *mut std::ffi::c_void);
+                    WlanFreeMemory(data_ptr);
+                }
             }
+
+            WlanFreeMemory(interface_list as *mut std::ffi::c_void);
         }
 
         WlanCloseHandle(client_handle, None);
@@ -486,7 +480,11 @@ pub fn link_speed_for_guid(guid: &str) -> Option<u64> {
                 let name = adapter.AdapterName.to_string().unwrap_or_default();
                 if name.eq_ignore_ascii_case(guid) {
                     let s = adapter.TransmitLinkSpeed;
-                    return if s == 0 || s == u64::MAX { None } else { Some(s) };
+                    return if s == 0 || s == u64::MAX {
+                        None
+                    } else {
+                        Some(s)
+                    };
                 }
             }
             p_curr = adapter.Next;
@@ -634,7 +632,10 @@ pub fn resolve_mac_address(ip: Ipv4Addr) -> Option<String> {
             return None;
         }
         // 每轮 recv 最多 ~90ms；共 3 轮（重发），总窗口 ~270ms，与原 250ms 单次相当。
-        let tv = libc::timeval { tv_sec: 0, tv_usec: 90_000 };
+        let tv = libc::timeval {
+            tv_sec: 0,
+            tv_usec: 90_000,
+        };
         libc::setsockopt(
             fd,
             libc::SOL_SOCKET,
@@ -721,7 +722,10 @@ pub fn has_cap_net_raw() -> bool {
 /// 三步均 best-effort、各带短超时；任一步拿到「看起来像名字」（非 IP 文本）的结果即返回。
 pub fn resolve_hostname(ip: IpAddr) -> Option<String> {
     // 1. 反向 DNS：过滤掉「无 PTR 时回填的数字 IP」，否则会出现「名字栏显示 IP」。
-    if let Some(name) = dns_lookup::lookup_addr(&ip).ok().filter(|n| looks_like_hostname(n)) {
+    if let Some(name) = dns_lookup::lookup_addr(&ip)
+        .ok()
+        .filter(|n| looks_like_hostname(n))
+    {
         return Some(name);
     }
 
@@ -774,7 +778,8 @@ fn resolve_netbios(ip: Ipv4Addr) -> Option<String> {
     req.extend_from_slice(&[0x00, 0x01]); // Class = IN
 
     let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
-    sock.set_read_timeout(Some(Duration::from_millis(250))).ok()?;
+    sock.set_read_timeout(Some(Duration::from_millis(250)))
+        .ok()?;
     sock.send_to(&req, (ip, 137)).ok()?;
 
     let mut buf = [0u8; 1024];
@@ -851,7 +856,8 @@ fn resolve_mdns(ip: Ipv4Addr) -> Option<String> {
     req.extend_from_slice(&[0x80, 0x01]); // Class = IN + QU(请求单播应答)位
 
     let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
-    sock.set_read_timeout(Some(Duration::from_millis(250))).ok()?;
+    sock.set_read_timeout(Some(Duration::from_millis(250)))
+        .ok()?;
     let mdns = SocketAddrV4::new(Ipv4Addr::new(224, 0, 0, 251), 5353);
     sock.send_to(&req, mdns).ok()?;
 
@@ -978,15 +984,27 @@ pub(crate) mod linux {
     /// `/sys/class/net/<if>/speed`（Mbps）→ bit/s。负值/非数字/空 → None。
     pub fn parse_speed_bps(s: &str) -> Option<u64> {
         let mbps = s.trim().parse::<i64>().ok()?;
-        if mbps <= 0 { None } else { Some(mbps as u64 * 1_000_000) }
+        if mbps <= 0 {
+            None
+        } else {
+            Some(mbps as u64 * 1_000_000)
+        }
     }
 
     /// 点分十进制子网掩码 → 前缀长度；要求是连续 1。非连续返回 None。
     pub fn mask_to_prefix(mask: Ipv4Addr) -> Option<u8> {
         let bits = u32::from(mask);
         let ones = bits.leading_ones();
-        let expected = if ones == 0 { 0 } else { u32::MAX << (32 - ones) };
-        if bits == expected { Some(ones as u8) } else { None }
+        let expected = if ones == 0 {
+            0
+        } else {
+            u32::MAX << (32 - ones)
+        };
+        if bits == expected {
+            Some(ones as u8)
+        } else {
+            None
+        }
     }
 
     /// 前缀长度 → 点分十进制掩码。
@@ -1060,7 +1078,7 @@ mod tests {
         let mut buf = vec![0u8; 12];
         // 应答名：0x20 + 32 字节(随便填) + 0x00
         buf.push(0x20);
-        buf.extend(std::iter::repeat(b'A').take(32));
+        buf.extend([b'A'; 32]);
         buf.push(0x00);
         // Type(2) Class(2) TTL(4) RDLEN(2)
         buf.extend_from_slice(&[0x00, 0x21, 0x00, 0x01, 0, 0, 0, 0, 0x00, 0x00]);
@@ -1100,12 +1118,30 @@ mod tests {
     #[test]
     fn mask_prefix_roundtrip() {
         use std::net::Ipv4Addr;
-        assert_eq!(super::linux::mask_to_prefix(Ipv4Addr::new(255,255,255,0)), Some(24));
-        assert_eq!(super::linux::mask_to_prefix(Ipv4Addr::new(255,255,0,0)), Some(16));
-        assert_eq!(super::linux::mask_to_prefix(Ipv4Addr::new(255,255,255,255)), Some(32));
-        assert_eq!(super::linux::mask_to_prefix(Ipv4Addr::new(0,0,0,0)), Some(0));
-        assert_eq!(super::linux::mask_to_prefix(Ipv4Addr::new(255,0,255,0)), None);
-        assert_eq!(super::linux::prefix_to_mask(24), Ipv4Addr::new(255,255,255,0));
+        assert_eq!(
+            super::linux::mask_to_prefix(Ipv4Addr::new(255, 255, 255, 0)),
+            Some(24)
+        );
+        assert_eq!(
+            super::linux::mask_to_prefix(Ipv4Addr::new(255, 255, 0, 0)),
+            Some(16)
+        );
+        assert_eq!(
+            super::linux::mask_to_prefix(Ipv4Addr::new(255, 255, 255, 255)),
+            Some(32)
+        );
+        assert_eq!(
+            super::linux::mask_to_prefix(Ipv4Addr::new(0, 0, 0, 0)),
+            Some(0)
+        );
+        assert_eq!(
+            super::linux::mask_to_prefix(Ipv4Addr::new(255, 0, 255, 0)),
+            None
+        );
+        assert_eq!(
+            super::linux::prefix_to_mask(24),
+            Ipv4Addr::new(255, 255, 255, 0)
+        );
     }
 
     #[test]
@@ -1149,7 +1185,9 @@ mod tests {
     #[test]
     fn mdns_decodes_ptr_target() {
         // 头：ID(2) Flags(2) QD=1 AN=1 NS=0 AR=0
-        let mut buf = vec![0x00, 0x00, 0x84, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00];
+        let mut buf = vec![
+            0x00, 0x00, 0x84, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+        ];
         // 问题名：5.1.168.192.in-addr.arpa（这里简化用单标签也可，关键测 PTR 解码）
         for label in ["5", "1", "168", "192", "in-addr", "arpa"] {
             buf.push(label.len() as u8);
@@ -1157,11 +1195,11 @@ mod tests {
         }
         buf.push(0x00);
         buf.extend_from_slice(&[0x00, 0x0C, 0x00, 0x01]); // Type PTR, Class IN
-        // 应答：名称用压缩指针指回问题名(偏移 12)
+                                                          // 应答：名称用压缩指针指回问题名(偏移 12)
         buf.extend_from_slice(&[0xC0, 0x0C]);
         buf.extend_from_slice(&[0x00, 0x0C, 0x00, 0x01]); // Type PTR, Class IN
         buf.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // TTL
-        // RDATA：vivo-phone.local
+                                                          // RDATA：vivo-phone.local
         let rdata_start = buf.len() + 2;
         let mut rdata = Vec::new();
         for label in ["vivo-phone", "local"] {

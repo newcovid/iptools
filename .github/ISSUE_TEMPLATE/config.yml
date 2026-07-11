@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全漏洞
+    url: https://github.com/newcovid/iptools/security/advisories/new
+    about: 请使用私有安全公告报告漏洞，不要创建公开 Issue。

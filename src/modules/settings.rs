@@ -126,12 +126,7 @@ impl SettingsModule {
                 SettingItem::Concurrency => {
                     let mut current = config.scan_concurrency as i32;
                     current += dir * 10;
-                    if current < 10 {
-                        current = 10;
-                    }
-                    if current > 500 {
-                        current = 500;
-                    }
+                    current = current.clamp(10, 500);
 
                     config.scan_concurrency = current as usize;
                     config.save();

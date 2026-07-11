@@ -200,12 +200,12 @@ impl KeyCombo {
         Some(KeyCombo { code, mods })
     }
 
-    pub fn to_label(&self) -> String {
+    pub fn to_label(self) -> String {
         self.to_label_i18n("en-US")
     }
 
     /// 返回本地化的组合键标签。zh-CN 下 Enter→回车。
-    pub fn to_label_i18n(&self, locale: &str) -> String {
+    pub fn to_label_i18n(self, locale: &str) -> String {
         let mut out = String::new();
         if self.mods.contains(KeyModifiers::CONTROL) {
             out.push_str("Ctrl+");
@@ -375,9 +375,11 @@ impl KeyMap {
     /// 某动作的全部组合键标签，以 " / " 连接（用于帮助浮层）；无绑定返回 "-"。
     pub fn all_labels(&self, action: Action) -> String {
         match self.map.get(&action) {
-            Some(v) if !v.is_empty() => {
-                v.iter().map(|c| c.to_label()).collect::<Vec<_>>().join(" / ")
-            }
+            Some(v) if !v.is_empty() => v
+                .iter()
+                .map(|c| c.to_label())
+                .collect::<Vec<_>>()
+                .join(" / "),
             _ => "-".to_string(),
         }
     }

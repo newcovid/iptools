@@ -4,12 +4,12 @@ use crate::keymap::Action;
 use crate::session::SessionState;
 use crate::utils::textinput::TextInput;
 use crossterm::event::KeyEvent;
-use std::cell::RefCell;
-use std::rc::Rc;
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, List, ListItem, ListState},
 };
+use std::cell::RefCell;
+use std::rc::Rc;
 
 /// 诊断各工具「参数配置」栏的统一字段渲染：标签行 + 取值行（带光标块）。
 /// 选中且可编辑时在右侧追加提示（直接输入 / 仅数字 / ←→ 调整 等），
@@ -194,11 +194,10 @@ impl DiagnosticsModule {
                             .on_key(key, action, self.active_focus, concurrency)
                     }
                     DiagnosticTool::NetSpeed => self.public_speed_tool.on_key(action),
-                    DiagnosticTool::Trace => {
-                        self.trace_tool.on_key(key, action, self.active_focus)
-                    }
+                    DiagnosticTool::Trace => self.trace_tool.on_key(key, action, self.active_focus),
                     DiagnosticTool::LinkQuality => {
-                        self.link_quality_tool.on_key(key, action, self.active_focus)
+                        self.link_quality_tool
+                            .on_key(key, action, self.active_focus)
                     }
                     DiagnosticTool::LanSpeed => {
                         self.lan_speed_tool.on_key(key, action, self.active_focus)
@@ -329,16 +328,28 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App, is_focused: bool) {
                 .draw(f, chunks[1], chunks[2], i18n, is_focused, diag.active_focus);
         }
         DiagnosticTool::NetSpeed => {
-            diag.public_speed_tool
-                .draw(f, chunks[1], chunks[2], i18n, is_focused, diag.active_focus);
+            diag.public_speed_tool.draw(
+                f,
+                chunks[1],
+                chunks[2],
+                i18n,
+                is_focused,
+                diag.active_focus,
+            );
         }
         DiagnosticTool::Trace => {
             diag.trace_tool
                 .draw(f, chunks[1], chunks[2], i18n, is_focused, diag.active_focus);
         }
         DiagnosticTool::LinkQuality => {
-            diag.link_quality_tool
-                .draw(f, chunks[1], chunks[2], i18n, is_focused, diag.active_focus);
+            diag.link_quality_tool.draw(
+                f,
+                chunks[1],
+                chunks[2],
+                i18n,
+                is_focused,
+                diag.active_focus,
+            );
         }
         DiagnosticTool::LanSpeed => {
             diag.lan_speed_tool

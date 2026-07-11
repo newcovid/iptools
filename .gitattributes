@@ -1,2 +1,13 @@
-# Shell 脚本必须用 LF 行尾——否则 shebang 带 \r 会让 Linux 无法执行（install.sh）。
+* text=auto
+
+# Keep source and documentation line endings consistent across platforms.
+*.rs text eol=lf
+*.toml text eol=lf
+*.lock text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Shell scripts require LF so their shebang works on Linux.
 *.sh text eol=lf

@@ -195,8 +195,16 @@ impl LanSpeedTool {
 
     /// 回灌持久化参数。
     pub fn apply_persist(&mut self, p: &LanSpeedPersist) {
-        self.mode = if p.mode == "client" { Mode::Client } else { Mode::Server };
-        self.proto = if p.proto == "udp" { Proto::Udp } else { Proto::Tcp };
+        self.mode = if p.mode == "client" {
+            Mode::Client
+        } else {
+            Mode::Server
+        };
+        self.proto = if p.proto == "udp" {
+            Proto::Udp
+        } else {
+            Proto::Tcp
+        };
         self.direction = match p.direction.as_str() {
             "down" => Direction::Down,
             "bidir" => Direction::Bidir,
@@ -276,7 +284,11 @@ impl LanSpeedTool {
             return;
         }
         let fields = self.active_fields();
-        let idx = self.config_state.selected().unwrap_or(0).min(fields.len() - 1);
+        let idx = self
+            .config_state
+            .selected()
+            .unwrap_or(0)
+            .min(fields.len() - 1);
         let field = fields[idx];
 
         match field {
@@ -330,8 +342,7 @@ impl LanSpeedTool {
                 ) {
                     return;
                 }
-                let too_long =
-                    matches!(key.code, KeyCode::Char(_)) && self.config.peer.len() >= 64;
+                let too_long = matches!(key.code, KeyCode::Char(_)) && self.config.peer.len() >= 64;
                 if !too_long && self.config.peer.handle_key(key.code, filter_host) {
                     return;
                 }
@@ -355,7 +366,11 @@ impl LanSpeedTool {
 
     fn next_config(&mut self) {
         let n = self.active_fields().len();
-        let i = self.config_state.selected().map(|i| (i + 1) % n).unwrap_or(0);
+        let i = self
+            .config_state
+            .selected()
+            .map(|i| (i + 1) % n)
+            .unwrap_or(0);
         self.config_state.select(Some(i));
     }
 
@@ -426,14 +441,27 @@ impl LanSpeedTool {
                     .parse::<u16>()
                     .unwrap_or(1)
                     .clamp(1, 32);
-                let rate_mbps = self.config.rate.value().parse::<u32>().unwrap_or(0).min(100_000);
+                let rate_mbps = self
+                    .config
+                    .rate
+                    .value()
+                    .parse::<u32>()
+                    .unwrap_or(0)
+                    .min(100_000);
                 let payload_size = self
                     .config
                     .payload
                     .value()
                     .parse::<u32>()
                     .unwrap_or(65536)
-                    .clamp(64, if self.proto == Proto::Udp { 65507 } else { 1_048_576 });
+                    .clamp(
+                        64,
+                        if self.proto == Proto::Udp {
+                            65507
+                        } else {
+                            1_048_576
+                        },
+                    );
 
                 let spec = TestSpec {
                     proto: self.proto,
@@ -522,10 +550,19 @@ impl LanSpeedTool {
 
         let port_str = self.config.port.value();
         let endpoint = match self.mode {
-            Mode::Server => format!("{}: {}:{}", i18n.t("diag_lan_localip"), self.local_ip, port_str),
+            Mode::Server => format!(
+                "{}: {}:{}",
+                i18n.t("diag_lan_localip"),
+                self.local_ip,
+                port_str
+            ),
             Mode::Client => {
                 let peer = self.config.peer.value();
-                let peer_disp = if peer.is_empty() { "-".to_string() } else { peer };
+                let peer_disp = if peer.is_empty() {
+                    "-".to_string()
+                } else {
+                    peer
+                };
                 format!("{}: {}:{}", i18n.t("diag_lan_peer"), peer_disp, port_str)
             }
         };
@@ -539,14 +576,30 @@ impl LanSpeedTool {
         let mut tput_lines = Vec::new();
         if bidir || has_tx {
             tput_lines.push(Line::from(vec![
-                Span::styled(format!("{} ", i18n.t("diag_lan_tx")), Style::default().fg(Color::Gray)),
-                Span::styled(format_speed_dual(self.tx_bps), Style::default().fg(theme::COLOR_PRIMARY).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!("{} ", i18n.t("diag_lan_tx")),
+                    Style::default().fg(Color::Gray),
+                ),
+                Span::styled(
+                    format_speed_dual(self.tx_bps),
+                    Style::default()
+                        .fg(theme::COLOR_PRIMARY)
+                        .add_modifier(Modifier::BOLD),
+                ),
             ]));
         }
         if bidir || (!has_tx && has_rx) || (self.mode == Mode::Server) {
             tput_lines.push(Line::from(vec![
-                Span::styled(format!("{} ", i18n.t("diag_lan_rx")), Style::default().fg(Color::Gray)),
-                Span::styled(format_speed_dual(self.rx_bps), Style::default().fg(theme::COLOR_PRIMARY).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!("{} ", i18n.t("diag_lan_rx")),
+                    Style::default().fg(Color::Gray),
+                ),
+                Span::styled(
+                    format_speed_dual(self.rx_bps),
+                    Style::default()
+                        .fg(theme::COLOR_PRIMARY)
+                        .add_modifier(Modifier::BOLD),
+                ),
             ]));
         }
         if tput_lines.is_empty() {
@@ -563,7 +616,11 @@ impl LanSpeedTool {
             self.rx_history.iter().cloned().collect()
         };
         let sparkline = Sparkline::default()
-            .block(Block::default().borders(Borders::TOP).title(i18n.t("diag_lan_history")))
+            .block(
+                Block::default()
+                    .borders(Borders::TOP)
+                    .title(i18n.t("diag_lan_history")),
+            )
             .data(&data)
             .style(Style::default().fg(theme::COLOR_PRIMARY));
         f.render_widget(sparkline, chunks[2]);
@@ -573,12 +630,29 @@ impl LanSpeedTool {
         let (text, style) = if let Some(key) = &self.error_key {
             (i18n.t(key), Style::default().fg(theme::COLOR_ERROR))
         } else if self.running {
-            let st = self.status_key.as_ref().map(|k| i18n.t(k)).unwrap_or_else(|| i18n.t("diag_status_running"));
-            (format!("{} | {}", st, i18n.t("diag_msg_stop")), Style::default().fg(Color::Green))
+            let st = self
+                .status_key
+                .as_ref()
+                .map(|k| i18n.t(k))
+                .unwrap_or_else(|| i18n.t("diag_status_running"));
+            (
+                format!("{} | {}", st, i18n.t("diag_msg_stop")),
+                Style::default().fg(Color::Green),
+            )
         } else if self.summary.is_some() {
-            (i18n.t("diag_lan_done"), Style::default().fg(theme::COLOR_SECONDARY))
+            (
+                i18n.t("diag_lan_done"),
+                Style::default().fg(theme::COLOR_SECONDARY),
+            )
         } else {
-            (format!("{} | {}", i18n.t("diag_status_stopped"), i18n.t("diag_msg_start")), Style::default().fg(Color::Red))
+            (
+                format!(
+                    "{} | {}",
+                    i18n.t("diag_status_stopped"),
+                    i18n.t("diag_msg_start")
+                ),
+                Style::default().fg(Color::Red),
+            )
         };
         f.render_widget(Paragraph::new(text).style(style), chunks[4]);
     }
@@ -601,7 +675,13 @@ impl LanSpeedTool {
         let mk = |label: String, bytes: u64, peak: u64| -> Line {
             Line::from(vec![
                 Span::styled(label, gray),
-                Span::styled(format!("{} ", format_speed_dual(avg_bytes_per_sec(bytes, s.elapsed_ms))), white),
+                Span::styled(
+                    format!(
+                        "{} ",
+                        format_speed_dual(avg_bytes_per_sec(bytes, s.elapsed_ms))
+                    ),
+                    white,
+                ),
                 Span::styled(format!("{}: ", i18n.t("diag_lan_peak")), gray),
                 Span::styled(format!("{} ", format_speed_dual(peak)), white),
                 Span::styled(format!("{}: ", i18n.t("diag_lan_total")), gray),
@@ -609,10 +689,18 @@ impl LanSpeedTool {
             ])
         };
         if s.tx_bytes > 0 {
-            lines.push(mk(format!("{} ", i18n.t("diag_lan_tx_avg")), s.tx_bytes, self.peak_tx));
+            lines.push(mk(
+                format!("{} ", i18n.t("diag_lan_tx_avg")),
+                s.tx_bytes,
+                self.peak_tx,
+            ));
         }
         if s.rx_bytes > 0 {
-            lines.push(mk(format!("{} ", i18n.t("diag_lan_rx_avg")), s.rx_bytes, self.peak_rx));
+            lines.push(mk(
+                format!("{} ", i18n.t("diag_lan_rx_avg")),
+                s.rx_bytes,
+                self.peak_rx,
+            ));
         }
         lines.push(Line::from(vec![
             Span::styled(format!("{}: ", i18n.t("diag_lan_elapsed")), gray),
@@ -623,7 +711,11 @@ impl LanSpeedTool {
                 Span::styled(format!("{}: ", i18n.t("diag_lan_loss")), gray),
                 Span::styled(
                     format!("{:.2}%  ", u.loss_pct()),
-                    Style::default().fg(if u.loss_pct() > 1.0 { Color::Red } else { Color::Green }),
+                    Style::default().fg(if u.loss_pct() > 1.0 {
+                        Color::Red
+                    } else {
+                        Color::Green
+                    }),
                 ),
                 Span::styled(format!("{}: ", i18n.t("diag_lan_ooo")), gray),
                 Span::styled(format!("{}  ", u.out_of_order), white),
@@ -656,7 +748,11 @@ impl LanSpeedTool {
 
         let is_active = is_focused && active_focus == FocusArea::Config;
         let fields = self.active_fields();
-        let sel = self.config_state.selected().unwrap_or(0).min(fields.len() - 1);
+        let sel = self
+            .config_state
+            .selected()
+            .unwrap_or(0)
+            .min(fields.len() - 1);
 
         let layout = Layout::default()
             .direction(ratatui::layout::Direction::Vertical)
@@ -673,7 +769,13 @@ impl LanSpeedTool {
                         Mode::Server => i18n.t("diag_lan_server"),
                         Mode::Client => i18n.t("diag_lan_client"),
                     };
-                    items.push(self.toggle_item(&i18n.t("diag_lan_mode"), &val, is_sel, is_active, i18n));
+                    items.push(self.toggle_item(
+                        &i18n.t("diag_lan_mode"),
+                        &val,
+                        is_sel,
+                        is_active,
+                        i18n,
+                    ));
                 }
                 Field::Direction => {
                     let val = match self.direction {
@@ -681,11 +783,19 @@ impl LanSpeedTool {
                         Direction::Down => i18n.t("diag_lan_dir_down"),
                         Direction::Bidir => i18n.t("diag_lan_dir_bidir"),
                     };
-                    items.push(self.toggle_item(&i18n.t("diag_lan_direction"), &val, is_sel, is_active, i18n));
+                    items.push(self.toggle_item(
+                        &i18n.t("diag_lan_direction"),
+                        &val,
+                        is_sel,
+                        is_active,
+                        i18n,
+                    ));
                 }
                 Field::Peer => {
                     let val_base = if is_sel && is_active {
-                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().fg(Color::White)
                     };
@@ -714,7 +824,13 @@ impl LanSpeedTool {
                         Proto::Tcp => i18n.t("diag_lan_proto_tcp"),
                         Proto::Udp => i18n.t("diag_lan_proto_udp"),
                     };
-                    items.push(self.toggle_item(&i18n.t("diag_lan_proto"), &val, is_sel, is_active, i18n));
+                    items.push(self.toggle_item(
+                        &i18n.t("diag_lan_proto"),
+                        &val,
+                        is_sel,
+                        is_active,
+                        i18n,
+                    ));
                 }
                 _ => {
                     let (label, input) = match field {
@@ -725,8 +841,14 @@ impl LanSpeedTool {
                         Field::Rate => (i18n.t("diag_lan_rate"), &self.config.rate),
                         _ => unreachable!(),
                     };
-                    let hint = if active { Some(i18n.t("diag_hint_digits")) } else { None };
-                    items.push(config_field_item(&label, is_sel, is_active, input, active, hint));
+                    let hint = if active {
+                        Some(i18n.t("diag_hint_digits"))
+                    } else {
+                        None
+                    };
+                    items.push(config_field_item(
+                        &label, is_sel, is_active, input, active, hint,
+                    ));
                 }
             }
         }
@@ -748,7 +870,9 @@ impl LanSpeedTool {
         i18n: &I18n,
     ) -> ListItem<'static> {
         let base = if is_sel && is_active {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::White)
         };

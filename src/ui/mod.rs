@@ -192,12 +192,3 @@ fn render_tabs(f: &mut Frame, area: Rect, app: &mut App) {
         }
     }
 }
-
-#[allow(dead_code)]
-fn render_placeholder(f: &mut Frame, area: Rect, app: &App) {
-    let text = format!("\n\n  {} {:?}  ", app.t("label_loading"), app.current_tab);
-    let p = Paragraph::new(text)
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center);
-    f.render_widget(p, area);
-}

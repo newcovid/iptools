@@ -142,11 +142,7 @@ impl Dashboard {
 
     /// 多端点 HTTPS 回退 + 尊重系统代理 + 8s 超时版本。
     /// 按 `endpoints` 顺序尝试，首个成功即用；全部失败后回传最后一次错误。
-    pub fn fetch_public_ip_with(
-        &mut self,
-        endpoints: Vec<Endpoint>,
-        use_system_proxy: bool,
-    ) {
+    pub fn fetch_public_ip_with(&mut self, endpoints: Vec<Endpoint>, use_system_proxy: bool) {
         self.public_info = PublicInfoState::Loading;
         let tx = self.tx.clone();
 
@@ -240,8 +236,10 @@ impl Dashboard {
                     let duration = now.duration_since(stats.last_update).as_secs_f64();
                     if duration > 0.5 {
                         // saturating_sub：网卡切换 / 计数器回绕时 rx < total_rx 不会 panic
-                        stats.rx_speed = (rx.saturating_sub(stats.total_rx) as f64 / duration) as u64;
-                        stats.tx_speed = (tx.saturating_sub(stats.total_tx) as f64 / duration) as u64;
+                        stats.rx_speed =
+                            (rx.saturating_sub(stats.total_rx) as f64 / duration) as u64;
+                        stats.tx_speed =
+                            (tx.saturating_sub(stats.total_tx) as f64 / duration) as u64;
                         stats.total_rx = rx;
                         stats.total_tx = tx;
                         stats.last_update = now;

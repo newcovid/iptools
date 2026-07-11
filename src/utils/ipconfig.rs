@@ -228,8 +228,16 @@ pub(crate) mod linux {
         let ip: std::net::Ipv4Addr = mask.parse().ok()?;
         let bits = u32::from(ip);
         let ones = bits.leading_ones();
-        let expected = if ones == 0 { 0 } else { u32::MAX << (32 - ones) };
-        if bits == expected { Some(ones as u8) } else { None }
+        let expected = if ones == 0 {
+            0
+        } else {
+            u32::MAX << (32 - ones)
+        };
+        if bits == expected {
+            Some(ones as u8)
+        } else {
+            None
+        }
     }
 
     /// 生成受管 netplan YAML。`static_cfg = Some((ip, prefix, gw, dns))` 为静态；None 为 DHCP。
@@ -237,7 +245,9 @@ pub(crate) mod linux {
         iface: &str,
         static_cfg: Option<(&str, u8, Option<&str>, Vec<String>)>,
     ) -> String {
-        let mut s = String::from("# Managed by iptools — do not edit by hand\nnetwork:\n  version: 2\n  ethernets:\n");
+        let mut s = String::from(
+            "# Managed by iptools — do not edit by hand\nnetwork:\n  version: 2\n  ethernets:\n",
+        );
         s.push_str(&format!("    {iface}:\n"));
         match static_cfg {
             None => s.push_str("      dhcp4: true\n"),
@@ -273,17 +283,16 @@ pub(crate) mod linux {
             .args(["is-active", "NetworkManager"])
             .output()
         {
-            if out.status.success()
-                && String::from_utf8_lossy(&out.stdout).trim() == "active"
-            {
+            if out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "active" {
                 return Backend::NetworkManager;
             }
         }
         if std::path::Path::new("/etc/netplan").exists() {
             if let Ok(rd) = std::fs::read_dir("/etc/netplan") {
-                if rd.flatten().any(|e| {
-                    e.path().extension().map_or(false, |x| x == "yaml")
-                }) {
+                if rd
+                    .flatten()
+                    .any(|e| e.path().extension().is_some_and(|x| x == "yaml"))
+                {
                     return Backend::Netplan;
                 }
             }
@@ -342,11 +351,17 @@ pub(crate) mod linux {
                 run(
                     "nmcli",
                     &[
-                        "con", "mod", &con,
-                        "ipv4.method", "manual",
-                        "ipv4.addresses", &addr,
-                        "ipv4.gateway", gateway.unwrap_or(""),
-                        "ipv4.dns", &dns_joined,
+                        "con",
+                        "mod",
+                        &con,
+                        "ipv4.method",
+                        "manual",
+                        "ipv4.addresses",
+                        &addr,
+                        "ipv4.gateway",
+                        gateway.unwrap_or(""),
+                        "ipv4.dns",
+                        &dns_joined,
                     ],
                 )?;
                 run("nmcli", &["con", "up", &con])?;
@@ -357,7 +372,8 @@ pub(crate) mod linux {
                 std::fs::write("/etc/netplan/99-iptools.yaml", yaml)
                     .map_err(|e| format!("写 netplan 文件失败: {e}"))?;
                 let _ = Command::new("chmod")
-                    .args(["600", "/etc/netplan/99-iptools.yaml"]).status();
+                    .args(["600", "/etc/netplan/99-iptools.yaml"])
+                    .status();
                 run("netplan", &["apply"])?;
                 Ok(())
             }
@@ -386,8 +402,20 @@ pub(crate) mod linux {
             Backend::NetworkManager => {
                 let con = nm_connection_for(guid)
                     .ok_or_else(|| format!("未找到接口 {guid} 的 NetworkManager 连接"))?;
-                run("nmcli", &["con", "mod", &con, "ipv4.method", "auto",
-                    "ipv4.gateway", "", "ipv4.dns", ""])?;
+                run(
+                    "nmcli",
+                    &[
+                        "con",
+                        "mod",
+                        &con,
+                        "ipv4.method",
+                        "auto",
+                        "ipv4.gateway",
+                        "",
+                        "ipv4.dns",
+                        "",
+                    ],
+                )?;
                 run("nmcli", &["con", "up", &con])?;
                 Ok(())
             }
@@ -396,7 +424,8 @@ pub(crate) mod linux {
                 std::fs::write("/etc/netplan/99-iptools.yaml", yaml)
                     .map_err(|e| format!("写 netplan 文件失败: {e}"))?;
                 let _ = Command::new("chmod")
-                    .args(["600", "/etc/netplan/99-iptools.yaml"]).status();
+                    .args(["600", "/etc/netplan/99-iptools.yaml"])
+                    .status();
                 run("netplan", &["apply"])?;
                 Ok(())
             }
@@ -425,7 +454,12 @@ mod tests {
     fn netplan_static_yaml_shape() {
         let y = netplan_yaml(
             "eth0",
-            Some(("192.168.1.50", 24, Some("192.168.1.1"), vec!["1.1.1.1".into()])),
+            Some((
+                "192.168.1.50",
+                24,
+                Some("192.168.1.1"),
+                vec!["1.1.1.1".into()],
+            )),
         );
         assert!(y.contains("eth0:"));
         assert!(y.contains("dhcp4: false"));

@@ -9,7 +9,6 @@ use std::net::Ipv4Addr;
 /// ICMP 状态码（IP_STATUS）。
 pub const IP_SUCCESS: u32 = 0;
 pub const IP_TTL_EXPIRED_TRANSIT: u32 = 11013;
-#[allow(dead_code)]
 pub const IP_REQ_TIMED_OUT: u32 = 11010;
 
 /// 单次 echo 的结果。
@@ -148,7 +147,11 @@ pub(crate) mod unix_icmp {
     /// 取 IPv4 头长度（IHL*4）。buf 须以 IP 头开头（IPv4 raw 套接字交付如此）。
     fn ip_header_len(buf: &[u8]) -> Option<usize> {
         let ihl = (buf.first()? & 0x0F) as usize * 4;
-        if ihl >= 20 && ihl <= buf.len() { Some(ihl) } else { None }
+        if ihl >= 20 && ihl <= buf.len() {
+            Some(ihl)
+        } else {
+            None
+        }
     }
 
     /// 解析内核交付的 raw 套接字缓冲，匹配我们发出的 (id, seq)。不匹配/非关心类型 → None。
@@ -160,7 +163,11 @@ pub(crate) mod unix_icmp {
             0 => {
                 let id = u16::from_be_bytes([*icmp.get(4)?, *icmp.get(5)?]);
                 let seq = u16::from_be_bytes([*icmp.get(6)?, *icmp.get(7)?]);
-                if id == want_id && seq == want_seq { Some(ReplyKind::EchoReply) } else { None }
+                if id == want_id && seq == want_seq {
+                    Some(ReplyKind::EchoReply)
+                } else {
+                    None
+                }
             }
             11 => {
                 let inner = icmp.get(8..)?;
@@ -168,7 +175,11 @@ pub(crate) mod unix_icmp {
                 let orig_icmp = inner.get(inner_ihl..)?;
                 let id = u16::from_be_bytes([*orig_icmp.get(4)?, *orig_icmp.get(5)?]);
                 let seq = u16::from_be_bytes([*orig_icmp.get(6)?, *orig_icmp.get(7)?]);
-                if id == want_id && seq == want_seq { Some(ReplyKind::TimeExceeded) } else { None }
+                if id == want_id && seq == want_seq {
+                    Some(ReplyKind::TimeExceeded)
+                } else {
+                    None
+                }
             }
             _ => None,
         }
@@ -296,18 +307,35 @@ fn unix_send(
 
     let sock = match Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4)) {
         Ok(s) => s,
-        Err(_) => return EchoResult { status: u32::MAX, addr: None, rtt_ms: None },
+        Err(_) => {
+            return EchoResult {
+                status: u32::MAX,
+                addr: None,
+                rtt_ms: None,
+            }
+        }
     };
     if sock.set_ttl(ttl as u32).is_err()
         || sock
             .set_read_timeout(Some(Duration::from_millis(timeout_ms.max(1) as u64)))
             .is_err()
     {
-        return EchoResult { status: u32::MAX, addr: None, rtt_ms: None };
+        return EchoResult {
+            status: u32::MAX,
+            addr: None,
+            rtt_ms: None,
+        };
     }
     if let Some(s) = src {
-        if sock.bind(&SockAddr::from(SocketAddr::new(s.into(), 0))).is_err() {
-            return EchoResult { status: u32::MAX, addr: None, rtt_ms: None };
+        if sock
+            .bind(&SockAddr::from(SocketAddr::new(s.into(), 0)))
+            .is_err()
+        {
+            return EchoResult {
+                status: u32::MAX,
+                addr: None,
+                rtt_ms: None,
+            };
         }
     }
 
@@ -320,14 +348,22 @@ fn unix_send(
     let to = SockAddr::from(SocketAddr::new(dest.into(), 0));
     let start = Instant::now();
     if sock.send_to(&pkt, &to).is_err() {
-        return EchoResult { status: u32::MAX, addr: None, rtt_ms: None };
+        return EchoResult {
+            status: u32::MAX,
+            addr: None,
+            rtt_ms: None,
+        };
     }
 
     let deadline = start + Duration::from_millis(timeout_ms.max(1) as u64);
     let mut buf = [MaybeUninit::<u8>::uninit(); 1500];
     loop {
         if Instant::now() >= deadline {
-            return EchoResult { status: IP_REQ_TIMED_OUT, addr: None, rtt_ms: None };
+            return EchoResult {
+                status: IP_REQ_TIMED_OUT,
+                addr: None,
+                rtt_ms: None,
+            };
         }
         match sock.recv_from(&mut buf) {
             Ok((n, from)) => {
@@ -335,31 +371,57 @@ fn unix_send(
                 match unix_icmp::parse_reply(data, id, seq) {
                     Some(unix_icmp::ReplyKind::EchoReply) => {
                         let rtt = start.elapsed().as_millis() as u64;
-                        return EchoResult { status: IP_SUCCESS, addr: Some(dest), rtt_ms: Some(rtt) };
+                        return EchoResult {
+                            status: IP_SUCCESS,
+                            addr: Some(dest),
+                            rtt_ms: Some(rtt),
+                        };
                     }
                     Some(unix_icmp::ReplyKind::TimeExceeded) => {
                         let rtt = start.elapsed().as_millis() as u64;
                         let router = from.as_socket_ipv4().map(|s| *s.ip()).unwrap_or(dest);
-                        return EchoResult { status: IP_TTL_EXPIRED_TRANSIT, addr: Some(router), rtt_ms: Some(rtt) };
+                        return EchoResult {
+                            status: IP_TTL_EXPIRED_TRANSIT,
+                            addr: Some(router),
+                            rtt_ms: Some(rtt),
+                        };
                     }
                     None => continue,
                 }
             }
-            Err(_) => return EchoResult { status: IP_REQ_TIMED_OUT, addr: None, rtt_ms: None },
+            Err(_) => {
+                return EchoResult {
+                    status: IP_REQ_TIMED_OUT,
+                    addr: None,
+                    rtt_ms: None,
+                }
+            }
         }
     }
 }
 
-/// 非 unix 且非 windows（罕见）—— 保持 stub 防编译断裂。
+/// 其它平台暂不提供 ICMP 后端。
 #[cfg(all(not(unix), not(target_os = "windows")))]
 pub fn echo_once(_dest: Ipv4Addr, _ttl: u8, _timeout_ms: u32) -> EchoResult {
-    EchoResult { status: u32::MAX, addr: None, rtt_ms: None }
+    EchoResult {
+        status: u32::MAX,
+        addr: None,
+        rtt_ms: None,
+    }
 }
 #[cfg(all(not(unix), not(target_os = "windows")))]
 pub fn echo_once_from(
-    _src: Ipv4Addr, _dest: Ipv4Addr, _ttl: u8, _timeout_ms: u32, _payload_len: usize,
+    _src: Ipv4Addr,
+    _dest: Ipv4Addr,
+    _ttl: u8,
+    _timeout_ms: u32,
+    _payload_len: usize,
 ) -> EchoResult {
-    EchoResult { status: u32::MAX, addr: None, rtt_ms: None }
+    EchoResult {
+        status: u32::MAX,
+        addr: None,
+        rtt_ms: None,
+    }
 }
 
 #[cfg(test)]
@@ -389,7 +451,10 @@ mod tests {
         buf.extend_from_slice(&[0u8, 0, 0, 0, 0, 0, 0, 0]);
         buf[24..26].copy_from_slice(&0xABCDu16.to_be_bytes());
         buf[26..28].copy_from_slice(&5u16.to_be_bytes());
-        assert!(matches!(parse_reply(&buf, 0xABCD, 5), Some(ReplyKind::EchoReply)));
+        assert!(matches!(
+            parse_reply(&buf, 0xABCD, 5),
+            Some(ReplyKind::EchoReply)
+        ));
         assert!(parse_reply(&buf, 0x1111, 5).is_none());
     }
 
@@ -404,6 +469,9 @@ mod tests {
         buf.extend_from_slice(&[8u8, 0, 0, 0]);
         buf.extend_from_slice(&0x77AAu16.to_be_bytes());
         buf.extend_from_slice(&9u16.to_be_bytes());
-        assert!(matches!(parse_reply(&buf, 0x77AA, 9), Some(ReplyKind::TimeExceeded)));
+        assert!(matches!(
+            parse_reply(&buf, 0x77AA, 9),
+            Some(ReplyKind::TimeExceeded)
+        ));
     }
 }
