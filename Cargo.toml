@@ -1,53 +1,46 @@
-[package]
-name = "iptools"
-version = "0.3.1"
-edition = "2021"
+[workspace]
+resolver = "2"
+members = [
+    "crates/iptools-core",
+    "crates/iptools-ui",
+    "crates/iptools-demo",
+    "crates/iptools-native",
+    "crates/iptools-web",
+]
+default-members = ["crates/iptools-native"]
+
+[workspace.package]
+version = "0.4.0-alpha.1"
+edition = "2024"
+rust-version = "1.97"
 authors = ["newcovid"]
-description = "A cross-platform TUI for IP management and network diagnostics."
 license = "MIT"
 repository = "https://github.com/newcovid/iptools"
-readme = "README.md"
-keywords = ["network", "tui", "ip", "diagnostics", "ratatui"]
-categories = ["command-line-utilities", "network-programming"]
 
-[dependencies]
-tokio = { version = "1", features = ["full"] }
-ratatui = "0.28"
-crossterm = { version = "0.28", features = ["event-stream"] }
+[workspace.dependencies]
 anyhow = "1.0"
-sysinfo = "0.33"
+atomic-write-file = "0.3.0"
+chrono = "0.4"
+clap = { version = "4.0", features = ["derive"] }
+crossterm = { version = "0.29.0", features = ["event-stream"] }
+futures = "0.3"
+ipnetwork = "0.21.1"
+ratatui = { version = "0.30.2", default-features = false, features = ["all-widgets", "layout-cache", "std"] }
+reqwest = { version = "0.13.4", features = ["json"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-clap = { version = "4.0", features = ["derive"] }
+sysinfo = "0.39.6"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
-tracing-subscriber = "0.3"
-futures = "0.3"
-chrono = "0.4"
-reqwest = { version = "0.12", features = ["json"] }
-ipnetwork = "0.20"
-dns-lookup = "2.0"
-unicode-width = "0.1"
-rand = "0.8"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+unicode-width = "0.2.2"
+iptools-core = { path = "crates/iptools-core" }
+iptools-ui = { path = "crates/iptools-ui" }
+iptools-demo = { path = "crates/iptools-demo" }
 
-# Unix networking backends.
-[target.'cfg(unix)'.dependencies]
-surge-ping = "0.8"
-socket2 = { version = "0.5", features = ["all"] }
-nix = { version = "0.29", features = ["net"] }
-libc = "0.2"
-
-# Windows networking backends.
-[target.'cfg(windows)'.dependencies]
-ipconfig = "0.3"
-encoding_rs = "0.8"
-winreg = "0.52"
-windows = { version = "0.58", features = [
-    "Win32_Foundation",
-    "Win32_Globalization",
-    "Win32_NetworkManagement_IpHelper",
-    "Win32_Networking_WinSock",
-    "Win32_NetworkManagement_Ndis",
-    "Win32_NetworkManagement_WiFi",
-    "Win32_System_IO",
-] }
-wmi = "0.18.4"
+[patch.crates-io]
+# Ratzilla 0.3.1 clips every non-ASCII Canvas glyph to one cell and can resize
+# its DOM cell vector mid-frame. Keep the pin, with two narrow upstream fixes.
+ratzilla = { path = "vendor/ratzilla" }

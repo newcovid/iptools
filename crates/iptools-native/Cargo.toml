@@ -1,0 +1,54 @@
+[package]
+name = "iptools"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "A cross-platform TUI for IP management and network diagnostics."
+license.workspace = true
+repository.workspace = true
+keywords = ["network", "tui", "ip", "diagnostics", "ratatui"]
+categories = ["command-line-utilities", "network-programming"]
+
+[dependencies]
+anyhow.workspace = true
+atomic-write-file.workspace = true
+chrono.workspace = true
+clap.workspace = true
+crossterm.workspace = true
+futures.workspace = true
+ipnetwork.workspace = true
+iptools-core.workspace = true
+iptools-demo.workspace = true
+iptools-ui.workspace = true
+ratatui = { workspace = true, features = ["crossterm_0_29"] }
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sysinfo.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+unicode-width.workspace = true
+dns-lookup = "2.0"
+
+[target.'cfg(unix)'.dependencies]
+surge-ping = "0.8"
+socket2 = { version = "0.5", features = ["all"] }
+nix = { version = "0.29", features = ["net"] }
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+ipconfig = "0.3"
+encoding_rs = "0.8"
+winreg = "0.52"
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Networking_WinSock",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_NetworkManagement_WiFi",
+    "Win32_System_IO",
+] }
+wmi = "0.18.4"
