@@ -181,6 +181,9 @@ try {
   await settingsPage.waitForFunction(
     () => localStorage.getItem("iptools.web.v1.scan_concurrency") === "60",
   );
+  await settingsPage.waitForFunction(() =>
+    /Scan concurrency\s+60/.test(document.getElementById("terminal")?.textContent ?? ""),
+  );
   assert.match(await settingsPage.locator("#terminal").textContent(), /Scan concurrency\s+60/);
   await settingsPage.close();
 
