@@ -38,6 +38,7 @@ pub fn band_and_channel(freq_khz: u32) -> (String, u32) {
 
 /// DOT11_PHY_TYPE 原始值 → (友好标签, Wi-Fi 代际)。`band6` 用于区分 Wi-Fi 6/6E。
 /// Windows `query` 与单测使用；Linux 的 `iw` 输出不提供对应枚举值。
+#[cfg(any(target_os = "windows", test))]
 pub fn phy_label(phy: i32, band6: bool) -> (String, u8) {
     match phy {
         11 => ("802.11be · Wi-Fi 7".to_string(), 7),
@@ -59,6 +60,7 @@ pub fn phy_label(phy: i32, band6: bool) -> (String, u8) {
 }
 
 /// DOT11_AUTH_ALGORITHM 原始值 → 友好标签。
+#[cfg(any(target_os = "windows", test))]
 pub fn auth_label(a: i32) -> String {
     match a {
         1 => "Open",
@@ -78,6 +80,7 @@ pub fn auth_label(a: i32) -> String {
 }
 
 /// DOT11_CIPHER_ALGORITHM 原始值 → 友好标签。
+#[cfg(any(target_os = "windows", test))]
 pub fn cipher_label(c: i32) -> String {
     match c {
         0 => "None",
@@ -237,7 +240,7 @@ pub fn query(guid: &str) -> Option<WirelessInfo> {
     let (band, channel) = band_and_channel(freq_mhz * 1000); // 纯函数吃 kHz
     let signal_quality = link
         .signal_dbm
-        .map(|d| (((d + 100).max(0).min(50)) as u32) * 2) // -100..-50dBm → 0..100%
+        .map(|d| ((d + 100).clamp(0, 50) as u32) * 2) // -100..-50dBm → 0..100%
         .unwrap_or(0);
     Some(WirelessInfo {
         ssid: link.ssid.unwrap_or_default(),

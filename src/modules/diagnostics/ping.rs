@@ -497,11 +497,7 @@ impl PingTool {
 
         // 1. Stats Grid
         let stats = &self.stats;
-        let avg = if stats.recv > 0 {
-            stats.total_latency / stats.recv
-        } else {
-            0
-        };
+        let avg = stats.total_latency.checked_div(stats.recv).unwrap_or(0);
         let loss = if stats.sent > 0 {
             ((stats.sent - stats.recv) as f64 / stats.sent as f64) * 100.0
         } else {

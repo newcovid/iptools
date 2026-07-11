@@ -252,7 +252,7 @@ impl ScannerModule {
         }
 
         if new_items_count > 0 {
-            self.results.sort_by(|a, b| a.ip.cmp(&b.ip));
+            self.results.sort_by_key(|result| result.ip);
             if self.table_state.selected().is_none() && !self.results.is_empty() {
                 self.table_state.select(Some(0));
             }
