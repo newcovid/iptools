@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 use unicode_width::UnicodeWidthStr;
 
-use crate::runtime::RuntimeSupervisor;
+use crate::runtime::NativeRuntime;
 
 #[derive(Debug, Clone)]
 pub struct ScanResult {
@@ -64,7 +64,6 @@ pub struct ScannerModule {
     current_scan_count: u64,
     generation: u64,
     job: Option<JobId>,
-    runtime: RuntimeSupervisor,
 
     history: Rc<RefCell<HistoryStore>>,
     mru: MruState,
@@ -82,7 +81,6 @@ impl ScannerModule {
             current_scan_count: 0,
             generation: 0,
             job: None,
-            runtime: RuntimeSupervisor::new(),
             history,
             mru: MruState::default(),
         }
@@ -109,7 +107,13 @@ impl ScannerModule {
         self.cidr_input = TextInput::with_text(&detect_default_cidr());
     }
 
-    pub fn on_key(&mut self, key: KeyEvent, action: Option<Action>, concurrency: usize) {
+    pub fn on_key(
+        &mut self,
+        key: KeyEvent,
+        action: Option<Action>,
+        concurrency: usize,
+        runtime: &mut NativeRuntime,
+    ) {
         // 编辑 CIDR 时需要原始按键做文本输入，不走语义动作。
         // 带光标：左右移动、Home/End、中间插入删除；Enter/Esc 退出编辑。
         if self.input_mode {
@@ -145,10 +149,10 @@ impl ScannerModule {
             Some(Action::Confirm) | Some(Action::Toggle) => {
                 if self.status == ScanStatus::Scanning {
                     if let Some(job) = self.job {
-                        self.runtime.cancel(job);
+                        runtime.cancel(job);
                     }
                 } else {
-                    self.start_scan(concurrency);
+                    self.start_scan(concurrency, runtime);
                 }
             }
             Some(Action::Down) => self.next(),
@@ -157,7 +161,7 @@ impl ScannerModule {
         }
     }
 
-    fn start_scan(&mut self, concurrency: usize) {
+    fn start_scan(&mut self, concurrency: usize, runtime: &mut NativeRuntime) {
         self.results.clear();
         self.status = ScanStatus::Scanning;
         self.table_state.select(None);
@@ -187,7 +191,7 @@ impl ScannerModule {
         self.job = Some(job);
         let total = self.total_scan_count;
 
-        self.runtime.spawn(job, move |token, events| async move {
+        runtime.spawn(job, move |token, events| async move {
             let _ = events.send(RuntimeEvent::ScanStarted { job, total }).await;
             if let Ok(network) = cidr_str.parse::<Ipv4Network>() {
                 let ips: Vec<Ipv4Addr> = if network.prefix() < 31 {
@@ -277,52 +281,45 @@ impl ScannerModule {
                 RuntimeEvent::ScanFinished { job }
             };
             let _ = events.send(terminal_event).await;
+            Ok(())
         });
     }
 
-    pub fn update(&mut self) {
-        self.runtime.reap_finished();
-        while let Some(event) = self.runtime.try_recv() {
-            match event {
-                RuntimeEvent::ScanStarted { job, total } if self.job == Some(job) => {
-                    self.total_scan_count = total;
-                    self.status = ScanStatus::Scanning;
-                }
-                RuntimeEvent::ScanProgress {
-                    job,
-                    current,
-                    total,
-                } if self.job == Some(job) => {
-                    self.current_scan_count = current;
-                    self.total_scan_count = total;
-                }
-                RuntimeEvent::ScanHostFound { job, host } if self.job == Some(job) => {
-                    if let Ok(ip) = host.ip.parse() {
-                        self.results.push(ScanResult {
-                            ip,
-                            mac: host.mac,
-                            hostname: host.hostname,
-                        });
-                        self.results.sort_by_key(|result| result.ip);
-                        if self.table_state.selected().is_none() {
-                            self.table_state.select(Some(0));
-                        }
+    pub fn handle_runtime(&mut self, event: &RuntimeEvent) {
+        match event {
+            RuntimeEvent::ScanStarted { job, total } if self.job == Some(*job) => {
+                self.total_scan_count = *total;
+                self.status = ScanStatus::Scanning;
+            }
+            RuntimeEvent::ScanProgress {
+                job,
+                current,
+                total,
+            } if self.job == Some(*job) => {
+                self.current_scan_count = *current;
+                self.total_scan_count = *total;
+            }
+            RuntimeEvent::ScanHostFound { job, host } if self.job == Some(*job) => {
+                if let Ok(ip) = host.ip.parse() {
+                    self.results.push(ScanResult {
+                        ip,
+                        mac: host.mac.clone(),
+                        hostname: host.hostname.clone(),
+                    });
+                    self.results.sort_by_key(|result| result.ip);
+                    if self.table_state.selected().is_none() {
+                        self.table_state.select(Some(0));
                     }
                 }
-                RuntimeEvent::ScanFinished { job } | RuntimeEvent::ScanCancelled { job }
-                    if self.job == Some(job) =>
-                {
-                    self.status = ScanStatus::Done;
-                    self.job = None;
-                }
-                _ => {}
             }
+            RuntimeEvent::ScanFinished { job } | RuntimeEvent::ScanCancelled { job }
+                if self.job == Some(*job) =>
+            {
+                self.status = ScanStatus::Done;
+                self.job = None;
+            }
+            _ => {}
         }
-    }
-
-    pub async fn shutdown(&mut self) {
-        self.runtime.shutdown().await;
-        self.job = None;
     }
 
     fn next(&mut self) {

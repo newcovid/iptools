@@ -301,6 +301,7 @@ fn render_traffic(frame: &mut Frame, area: Rect, model: &AppModel) {
 }
 
 fn render_diagnostics(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut UiState) {
+    let common = model.diagnostics.active_common();
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -335,15 +336,16 @@ fn render_diagnostics(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut 
 
     let mut lines = vec![
         Line::from(Span::styled(
-            model.diagnostics.primary.clone(),
+            common.primary.clone(),
             Style::default().fg(SECONDARY).add_modifier(Modifier::BOLD),
         )),
-        Line::from(model.diagnostics.detail.clone()),
+        Line::from(common.detail.clone()),
         Line::from(""),
     ];
     lines.extend(
         model
             .diagnostics
+            .active_common()
             .log
             .iter()
             .rev()
@@ -368,15 +370,15 @@ fn render_diagnostics(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut 
         ])
         .split(cols[2]);
     frame.render_widget(
-        Paragraph::new(format!("Target\n{}", model.diagnostics.target))
+        Paragraph::new(format!("Target\n{}", model.diagnostics.active_target()))
             .block(Block::bordered().title(" Configuration ")),
         config_rows[0],
     );
     frame.render_widget(
         Gauge::default()
-            .block(Block::bordered().title(task_label(&model.diagnostics.status, model.language)))
+            .block(Block::bordered().title(task_label(&common.status, model.language)))
             .gauge_style(Style::default().fg(SECONDARY))
-            .percent(model.diagnostics.progress.min(100) as u16),
+            .percent(common.progress.min(100) as u16),
         config_rows[1],
     );
     ui.diagnostic_action = Some(config_rows[1]);
@@ -384,8 +386,8 @@ fn render_diagnostics(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut 
 
 fn render_settings(frame: &mut Frame, area: Rect, model: &AppModel) {
     let language = match model.language {
-        Language::Chinese => "简体中文",
-        Language::English => "English",
+        Language::Zh => "简体中文",
+        Language::En => "English",
     };
     let rows = vec![
         Row::new(["Language".to_string(), language.to_string()]),
@@ -459,25 +461,25 @@ fn contains(area: Rect, x: u16, y: u16) -> bool {
 
 fn tr<'a>(language: Language, zh: &'a str, en: &'a str) -> &'a str {
     match language {
-        Language::Chinese => zh,
-        Language::English => en,
+        Language::Zh => zh,
+        Language::En => en,
     }
 }
 
 fn page_label(page: Page, language: Language) -> &'static str {
     match (page, language) {
-        (Page::Dashboard, Language::Chinese) => "概览",
-        (Page::Adapters, Language::Chinese) => "适配器",
-        (Page::Scanner, Language::Chinese) => "扫描",
-        (Page::Traffic, Language::Chinese) => "流量",
-        (Page::Diagnostics, Language::Chinese) => "诊断",
-        (Page::Settings, Language::Chinese) => "设置",
-        (Page::Dashboard, Language::English) => "Dashboard",
-        (Page::Adapters, Language::English) => "Adapters",
-        (Page::Scanner, Language::English) => "Scanner",
-        (Page::Traffic, Language::English) => "Traffic",
-        (Page::Diagnostics, Language::English) => "Diagnostics",
-        (Page::Settings, Language::English) => "Settings",
+        (Page::Dashboard, Language::Zh) => "概览",
+        (Page::Adapters, Language::Zh) => "适配器",
+        (Page::Scanner, Language::Zh) => "扫描",
+        (Page::Traffic, Language::Zh) => "流量",
+        (Page::Diagnostics, Language::Zh) => "诊断",
+        (Page::Settings, Language::Zh) => "设置",
+        (Page::Dashboard, Language::En) => "Dashboard",
+        (Page::Adapters, Language::En) => "Adapters",
+        (Page::Scanner, Language::En) => "Scanner",
+        (Page::Traffic, Language::En) => "Traffic",
+        (Page::Diagnostics, Language::En) => "Diagnostics",
+        (Page::Settings, Language::En) => "Settings",
     }
 }
 

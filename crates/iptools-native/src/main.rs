@@ -84,6 +84,7 @@ async fn main() -> Result<()> {
     }
 
     app.shutdown().await;
+    tui.events.shutdown().await;
     tui.exit()?;
 
     // 终端恢复后再显示权限提示，避免信息被备用屏幕吞掉。

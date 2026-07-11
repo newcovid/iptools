@@ -8,21 +8,41 @@ use tokio_util::sync::CancellationToken;
 
 const EVENT_CAPACITY: usize = 512;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskPhase {
+    Completed,
+    Cancelled,
+    Failed,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RuntimeTaskError {
+    #[error("{0}")]
+    Operation(String),
+}
+
+#[derive(Debug)]
+pub struct TaskResult {
+    pub job: JobId,
+    pub phase: TaskPhase,
+    pub result: Result<(), RuntimeTaskError>,
+}
+
 /// Owns every task started through the modern native runtime.
-pub struct RuntimeSupervisor {
-    tasks: JoinSet<JobId>,
+pub struct NativeRuntime {
+    tasks: JoinSet<TaskResult>,
     cancellations: HashMap<JobId, CancellationToken>,
     event_tx: mpsc::Sender<RuntimeEvent>,
     event_rx: mpsc::Receiver<RuntimeEvent>,
 }
 
-impl Default for RuntimeSupervisor {
+impl Default for NativeRuntime {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl RuntimeSupervisor {
+impl NativeRuntime {
     pub fn new() -> Self {
         let (event_tx, event_rx) = mpsc::channel(EVENT_CAPACITY);
         Self {
@@ -37,7 +57,7 @@ impl RuntimeSupervisor {
     pub fn spawn<F, Fut>(&mut self, job: JobId, task: F)
     where
         F: FnOnce(CancellationToken, mpsc::Sender<RuntimeEvent>) -> Fut + Send + 'static,
-        Fut: Future<Output = ()> + Send + 'static,
+        Fut: Future<Output = Result<(), RuntimeTaskError>> + Send + 'static,
     {
         let previous: Vec<JobId> = self
             .cancellations
@@ -52,6 +72,7 @@ impl RuntimeSupervisor {
         let token = CancellationToken::new();
         self.cancellations.insert(job, token.clone());
         let tx = self.event_tx.clone();
+        let task_token = token.clone();
         self.tasks.spawn(async move {
             let span = tracing::info_span!(
                 "runtime_job",
@@ -59,8 +80,15 @@ impl RuntimeSupervisor {
                 generation = job.generation
             );
             let _guard = span.enter();
-            task(token, tx).await;
-            job
+            let result = task(token, tx).await;
+            let phase = if result.is_err() {
+                TaskPhase::Failed
+            } else if task_token.is_cancelled() {
+                TaskPhase::Cancelled
+            } else {
+                TaskPhase::Completed
+            };
+            TaskResult { job, phase, result }
         });
     }
 
@@ -78,8 +106,23 @@ impl RuntimeSupervisor {
     pub fn reap_finished(&mut self) {
         while let Some(result) = self.tasks.try_join_next() {
             match result {
-                Ok(job) => {
-                    self.cancellations.remove(&job);
+                Ok(task) => {
+                    self.cancellations.remove(&task.job);
+                    match task.result {
+                        Ok(()) => tracing::debug!(
+                            tool = ?task.job.tool,
+                            generation = task.job.generation,
+                            phase = ?task.phase,
+                            "runtime job joined"
+                        ),
+                        Err(error) => tracing::warn!(
+                            tool = ?task.job.tool,
+                            generation = task.job.generation,
+                            phase = ?task.phase,
+                            %error,
+                            "runtime job failed"
+                        ),
+                    }
                 }
                 Err(error) => tracing::warn!(%error, "runtime job failed to join"),
             }
@@ -92,8 +135,15 @@ impl RuntimeSupervisor {
         }
         self.cancellations.clear();
         while let Some(result) = self.tasks.join_next().await {
-            if let Err(error) = result {
-                tracing::warn!(%error, "runtime job failed during shutdown");
+            match result {
+                Ok(task) => {
+                    if let Err(error) = task.result {
+                        tracing::warn!(tool = ?task.job.tool, generation = task.job.generation, %error, "runtime job failed during shutdown");
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "runtime job failed to join during shutdown");
+                }
             }
         }
     }
@@ -106,7 +156,7 @@ mod tests {
 
     #[tokio::test]
     async fn replacement_cancels_previous_generation() {
-        let mut supervisor = RuntimeSupervisor::new();
+        let mut supervisor = NativeRuntime::new();
         let first = JobId {
             tool: ToolKind::Ping,
             generation: 1,
@@ -117,13 +167,54 @@ mod tests {
         };
         supervisor.spawn(first, |token, _| async move {
             token.cancelled().await;
+            Ok(())
         });
         supervisor.spawn(second, |token, _| async move {
             token.cancelled().await;
+            Ok(())
         });
         assert!(!supervisor.cancellations.contains_key(&first));
         assert!(supervisor.cancellations.contains_key(&second));
         supervisor.shutdown().await;
         assert!(supervisor.cancellations.is_empty());
+    }
+
+    #[tokio::test]
+    async fn bounded_event_queue_backpressures_producers() {
+        let mut runtime = NativeRuntime::new();
+        let job = JobId {
+            tool: ToolKind::Scanner,
+            generation: 1,
+        };
+        runtime.spawn(job, move |_, events| async move {
+            for current in 0..=EVENT_CAPACITY as u64 {
+                events
+                    .send(RuntimeEvent::ScanProgress {
+                        job,
+                        current,
+                        total: EVENT_CAPACITY as u64 + 1,
+                    })
+                    .await
+                    .map_err(|error| RuntimeTaskError::Operation(error.to_string()))?;
+            }
+            Ok(())
+        });
+
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(runtime.event_rx.len(), EVENT_CAPACITY);
+        assert_eq!(runtime.tasks.len(), 1, "producer should be backpressured");
+
+        assert!(runtime.try_recv().is_some());
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+            runtime.reap_finished();
+            if runtime.tasks.is_empty() {
+                break;
+            }
+        }
+        assert!(runtime.tasks.is_empty());
+        assert!(!runtime.cancellations.contains_key(&job));
     }
 }

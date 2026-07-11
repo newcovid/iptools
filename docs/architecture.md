@@ -47,7 +47,9 @@ Web 和 native `--demo` 使用 `iptools-demo::DemoRuntime` 的固定 seed 与定
 
 ## 原生 Runtime 与迁移桥
 
-`RuntimeSupervisor` 使用 `JoinSet`、容量 512 的有界 mpsc 与 `CancellationToken` 管理共享架构中的任务。每项任务带 `JobId { tool, generation }`；同一工具的新任务先取消旧任务，core 会忽略旧 generation 的迟到事件。退出时 supervisor 取消并等待所有子任务。
+顶层唯一的 `NativeRuntime` 使用 `JoinSet<TaskResult>`、容量 512 的有界 mpsc 与 `CancellationToken` 管理共享架构中的任务。每项任务带 `JobId { tool, generation }`；同一工具的新任务先取消旧任务，core 会忽略旧 generation 的迟到事件。退出时 runtime 取消并等待所有子任务。终端输入使用独立的容量 128 有界通道，并在恢复终端前 shutdown/join。
+
+跨平台协议当前为 `ARCHITECTURE_VERSION = 2`。Ping、Trace、Port Scan、Public Speed、Link Quality 与 LAN Speed 各自拥有强类型 Request、Sample、Summary 和 Failed RuntimeEvent；禁止用通用字符串进度承载业务数据。
 
 真实原生页面的既有网络算法暂时保留在 `iptools-native/src/modules` 和 `utils` 中，作为兼容迁移桥；新增跨端行为必须进入 core/ui/runtime 边界，不能继续增加 detached spawn 或无界通道。迁移桥删除前，真实网络算法行为不得因 Web 展览而改变。
 
@@ -55,7 +57,7 @@ Web 和 native `--demo` 使用 `iptools-demo::DemoRuntime` 的固定 seed 与定
 
 ## 配置
 
-原生配置保持现有 Serde schema 与默认值。保存通过临时文件、flush 和原子替换完成。Web 只在 `iptools.web.v1.*` LocalStorage 键中保存语言、场景和渲染器，不读写原生配置，也不执行适配器变更。
+可序列化的 `ConfigData`、会话参数、快捷键文本映射和公网端点定义位于 `iptools-core`，保持现有 Serde schema 与默认值。native 只负责路径、首次运行系统语言检测和 `FsConfigStore` 原子保存。Web 只在 `iptools.web.v1.*` LocalStorage 键中保存语言、场景和渲染器，不读写原生配置，也不执行适配器变更。
 
 ## Web、字体与 PWA
 
