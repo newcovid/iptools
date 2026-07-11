@@ -518,6 +518,7 @@ impl AppModel {
                 self.diagnostics.port_scan.scanned = 0;
                 self.diagnostics.port_scan.total = 0;
                 self.diagnostics.port_scan.open_ports.clear();
+                self.diagnostics.port_scan.request.concurrency = self.scan_concurrency;
                 Effect::StartPortScan {
                     job,
                     request: self.diagnostics.port_scan.request.clone(),
@@ -980,6 +981,7 @@ mod tests {
             ..AppModel::default()
         };
         app.diagnostics.tool = DiagnosticTool::PortScan;
+        app.scan_concurrency = 64;
         app.diagnostics.port_scan.request = crate::PortScanRequest {
             target: "192.0.2.10".into(),
             start_port: 20,
