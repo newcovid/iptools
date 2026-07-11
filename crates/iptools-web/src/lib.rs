@@ -50,7 +50,7 @@ mod wasm {
             self.dispatch(effects);
             if self.model.language != previous_language {
                 persist_language(self.model.language);
-                if self.model.language == Language::Chinese && canvas_renderer_active() {
+                if self.model.language == Language::Zh && canvas_renderer_active() {
                     if let Err(error) = reload_with_dom_renderer() {
                         web_sys::console::warn_1(&error);
                     }
@@ -105,8 +105,8 @@ mod wasm {
         let renderer_from_url = params.get("renderer");
         let renderer = renderer_from_url.clone().or_else(load_renderer);
         let force_dom = renderer_from_url.as_deref() == Some("dom")
-            || (language == Language::Chinese && renderer_from_url.as_deref() != Some("canvas"))
-            || (language != Language::Chinese && renderer.as_deref() == Some("dom"));
+            || (language == Language::Zh && renderer_from_url.as_deref() != Some("canvas"))
+            || (language != Language::Zh && renderer.as_deref() == Some("dom"));
         if !force_dom {
             let options = CanvasBackendOptions::new()
                 .grid_id("terminal")
@@ -290,9 +290,9 @@ mod wasm {
 
     fn parse_language(value: &str) -> Language {
         if value.to_ascii_lowercase().starts_with("zh") {
-            Language::Chinese
+            Language::Zh
         } else {
-            Language::English
+            Language::En
         }
     }
 
@@ -338,11 +338,7 @@ mod wasm {
         let _ = storage.set_item("iptools.web.v1.scenario", scenario.as_str());
         let _ = storage.set_item(
             "iptools.web.v1.language",
-            if language == Language::Chinese {
-                "zh"
-            } else {
-                "en"
-            },
+            if language == Language::Zh { "zh" } else { "en" },
         );
     }
 
@@ -350,11 +346,7 @@ mod wasm {
         if let Some(storage) = storage() {
             let _ = storage.set_item(
                 "iptools.web.v1.language",
-                if language == Language::Chinese {
-                    "zh"
-                } else {
-                    "en"
-                },
+                if language == Language::Zh { "zh" } else { "en" },
             );
         }
     }

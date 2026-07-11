@@ -1,7 +1,7 @@
 //! TCP 连接式端口扫描工具。
 //!
 //! 采用纯异步 `TcpStream::connect` + 超时，不依赖任何外部程序，天然跨平台。
-//! 任务由 RuntimeSupervisor 统一拥有，通过有界 RuntimeEvent 通道回传。
+//! 任务由顶层 NativeRuntime 统一拥有，通过有界 RuntimeEvent 通道回传。
 
 use super::FocusArea;
 use crate::history::HistoryStore;
@@ -13,7 +13,7 @@ use crate::utils::i18n::I18n;
 use crate::utils::textinput::{TextInput, filter_host};
 use crossterm::event::{KeyCode, KeyEvent};
 use futures::{StreamExt, stream};
-use iptools_core::{JobId, RuntimeEvent, ToolKind};
+use iptools_core::{JobId, RuntimeError, RuntimeErrorCode, RuntimeEvent, ToolKind};
 use ratatui::{
     prelude::*,
     widgets::{
@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use crate::runtime::RuntimeSupervisor;
+use crate::runtime::NativeRuntime;
 
 #[derive(Debug, Clone)]
 struct PortScanConfig {
@@ -62,7 +62,6 @@ pub struct PortScanTool {
     total: u64,
     generation: u64,
     job: Option<JobId>,
-    runtime: RuntimeSupervisor,
 
     history: Rc<RefCell<HistoryStore>>,
     mru: MruState,
@@ -83,7 +82,6 @@ impl PortScanTool {
             total: 0,
             generation: 0,
             job: None,
-            runtime: RuntimeSupervisor::new(),
             history,
             mru: MruState::default(),
         }
@@ -107,33 +105,41 @@ impl PortScanTool {
         self.config.timeout_ms = TextInput::with_text(&p.timeout_ms);
     }
 
-    pub fn update(&mut self) {
-        self.runtime.reap_finished();
-        while let Some(event) = self.runtime.try_recv() {
-            match event {
-                RuntimeEvent::PortScanOpen { job, port } if self.job == Some(job) => {
-                    if let Err(pos) = self.open_ports.binary_search(&port) {
-                        self.open_ports.insert(pos, port);
-                    }
-                    if self.result_state.selected().is_none() {
-                        self.result_state.select(Some(0));
-                    }
+    pub fn handle_runtime(&mut self, event: &RuntimeEvent) {
+        match event {
+            RuntimeEvent::PortScanOpen { job, port } if self.job == Some(*job) => {
+                if let Err(pos) = self.open_ports.binary_search(port) {
+                    self.open_ports.insert(pos, *port);
                 }
-                RuntimeEvent::DiagnosticProgress { job, progress, .. } if self.job == Some(job) => {
-                    self.scanned = self.total.saturating_mul(progress as u64) / 100;
+                if self.result_state.selected().is_none() {
+                    self.result_state.select(Some(0));
                 }
-                RuntimeEvent::DiagnosticFailed { job, error } if self.job == Some(job) => {
-                    self.error_key = Some(error);
-                    self.running = false;
-                    self.job = None;
-                }
-                RuntimeEvent::DiagnosticFinished { job, .. } if self.job == Some(job) => {
-                    self.scanned = self.total;
-                    self.running = false;
-                    self.job = None;
-                }
-                _ => {}
             }
+            RuntimeEvent::PortScanProgress {
+                job,
+                scanned,
+                total,
+            } if self.job == Some(*job) => {
+                self.scanned = *scanned;
+                self.total = *total;
+            }
+            RuntimeEvent::PortScanFailed { job, error } if self.job == Some(*job) => {
+                self.error_key = Some(error.message.clone());
+                self.running = false;
+                self.job = None;
+            }
+            RuntimeEvent::PortScanFinished {
+                job,
+                scanned,
+                total,
+                ..
+            } if self.job == Some(*job) => {
+                self.scanned = *scanned;
+                self.total = *total;
+                self.running = false;
+                self.job = None;
+            }
+            _ => {}
         }
     }
 
@@ -143,14 +149,15 @@ impl PortScanTool {
         action: Option<Action>,
         focus: FocusArea,
         concurrency: usize,
+        runtime: &mut NativeRuntime,
     ) {
         match focus {
             FocusArea::Main => {
                 if action == Some(Action::Toggle) {
                     if self.running {
-                        self.stop();
+                        self.stop(runtime);
                     } else {
-                        self.start(concurrency);
+                        self.start(concurrency, runtime);
                     }
                 } else if !self.open_ports.is_empty() {
                     match action {
@@ -256,7 +263,7 @@ impl PortScanTool {
         self.result_state.select(Some(i));
     }
 
-    fn start(&mut self, concurrency: usize) {
+    fn start(&mut self, concurrency: usize, runtime: &mut NativeRuntime) {
         // 解析与校验配置
         let start: u32 = self.config.start_port.value().parse().unwrap_or(0);
         let end: u32 = self.config.end_port.value().parse().unwrap_or(0);
@@ -299,8 +306,10 @@ impl PortScanTool {
         self.job = Some(job);
         let total = self.total;
 
-        self.runtime.spawn(job, move |token, events| async move {
-            let _ = events.send(RuntimeEvent::DiagnosticStarted { job }).await;
+        runtime.spawn(job, move |token, events| async move {
+            let _ = events
+                .send(RuntimeEvent::PortScanStarted { job, total })
+                .await;
             // 解析目标为 IP（支持域名异步解析）
             let resolved = async {
                 match target.parse::<IpAddr>() {
@@ -316,12 +325,15 @@ impl PortScanTool {
                 ip = resolved => ip,
             }) else {
                 let _ = events
-                    .send(RuntimeEvent::DiagnosticFailed {
+                    .send(RuntimeEvent::PortScanFailed {
                         job,
-                        error: "diag_port_err_target".into(),
+                        error: RuntimeError::new(
+                            RuntimeErrorCode::ResolveTarget,
+                            "diag_port_err_target",
+                        ),
                     })
                     .await;
-                return;
+                return Ok(());
             };
 
             let ports: Vec<u16> = (start as u16..=end as u16).collect();
@@ -352,45 +364,33 @@ impl PortScanTool {
                     _ = token.cancelled() => break,
                     _ = ticker.tick() => {
                         let current = scanned.load(Ordering::Relaxed);
-                        let progress = current
-                            .saturating_mul(100)
-                            .checked_div(total)
-                            .unwrap_or(0)
-                            .min(100) as u8;
-                        let _ = events.send(RuntimeEvent::DiagnosticProgress {
+                        let _ = events.send(RuntimeEvent::PortScanProgress {
                             job,
-                            progress,
-                            primary: current.to_string(),
-                            detail: total.to_string(),
+                            scanned: current,
+                            total,
                         }).await;
                     }
                     item = scan.next() => if item.is_none() { break },
                 }
             }
+            let current = scanned.load(Ordering::Relaxed);
             let _ = events
-                .send(RuntimeEvent::DiagnosticFinished {
+                .send(RuntimeEvent::PortScanFinished {
                     job,
-                    summary: if token.is_cancelled() {
-                        "cancelled"
-                    } else {
-                        "done"
-                    }
-                    .into(),
+                    scanned: current,
+                    total,
+                    cancelled: token.is_cancelled(),
                 })
                 .await;
+            Ok(())
         });
     }
 
-    fn stop(&mut self) {
+    fn stop(&mut self, runtime: &mut NativeRuntime) {
         self.running = false;
         if let Some(job) = self.job {
-            self.runtime.cancel(job);
+            runtime.cancel(job);
         }
-    }
-
-    pub async fn shutdown(&mut self) {
-        self.runtime.shutdown().await;
-        self.job = None;
     }
 
     // -------------------------------------------------------------------------

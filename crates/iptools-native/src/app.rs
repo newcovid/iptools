@@ -7,6 +7,7 @@ use crate::modules::diagnostics::DiagnosticsModule;
 use crate::modules::scanner::ScannerModule;
 use crate::modules::settings::SettingsModule;
 use crate::modules::traffic::TrafficModule;
+use crate::runtime::NativeRuntime;
 use crate::session::{SessionState, UiPersist};
 use crate::utils::i18n::I18n;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -106,6 +107,7 @@ pub struct App {
     pub settings: SettingsModule,
     pub traffic: TrafficModule,
     pub diagnostics: DiagnosticsModule,
+    runtime: NativeRuntime,
 
     history: Rc<RefCell<HistoryStore>>,
 
@@ -134,6 +136,7 @@ impl App {
             settings: SettingsModule::new(),
             traffic: TrafficModule::new(),
             diagnostics: DiagnosticsModule::new(history.clone()),
+            runtime: NativeRuntime::new(),
             config,
             i18n,
             keymap,
@@ -222,11 +225,16 @@ impl App {
     }
 
     pub fn on_tick(&mut self) {
+        self.runtime.reap_finished();
+        while let Some(event) = self.runtime.try_recv() {
+            self.scanner.handle_runtime(&event);
+            self.diagnostics.handle_runtime(&event);
+        }
         self.diagnostics.update();
         match self.current_tab {
             CurrentTab::Dashboard => self.dashboard.update(),
             CurrentTab::Adapter => self.adapter.update(),
-            CurrentTab::Scanner => self.scanner.update(),
+            CurrentTab::Scanner => {}
             CurrentTab::Traffic => self.traffic.update(),
             CurrentTab::Diagnostics => {}
             _ => {}
@@ -234,8 +242,7 @@ impl App {
     }
 
     pub async fn shutdown(&mut self) {
-        self.scanner.shutdown().await;
-        self.diagnostics.shutdown().await;
+        self.runtime.shutdown().await;
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
@@ -281,8 +288,12 @@ impl App {
                     self.diag_focused = false;
                     return;
                 }
-                self.diagnostics
-                    .on_key(key, action, self.config.scan_concurrency);
+                self.diagnostics.on_key(
+                    key,
+                    action,
+                    self.config.scan_concurrency,
+                    &mut self.runtime,
+                );
                 return;
             } else if action == Some(Action::Confirm) {
                 self.diag_focused = true;
@@ -311,7 +322,7 @@ impl App {
             CurrentTab::Adapter => self.adapter.on_key(key, action),
             CurrentTab::Scanner => {
                 self.scanner
-                    .on_key(key, action, self.config.scan_concurrency);
+                    .on_key(key, action, self.config.scan_concurrency, &mut self.runtime);
             }
             CurrentTab::Traffic => self.traffic.on_key(action),
             CurrentTab::Settings => {
@@ -358,17 +369,23 @@ impl App {
         let dummy = KeyEvent::new(KeyCode::Null, KeyModifiers::NONE);
         if self.current_tab == CurrentTab::Diagnostics {
             if self.diag_focused {
-                self.diagnostics
-                    .on_key(dummy, Some(action), self.config.scan_concurrency);
+                self.diagnostics.on_key(
+                    dummy,
+                    Some(action),
+                    self.config.scan_concurrency,
+                    &mut self.runtime,
+                );
             }
             return;
         }
         match self.current_tab {
             CurrentTab::Adapter => self.adapter.on_key(dummy, Some(action)),
-            CurrentTab::Scanner => {
-                self.scanner
-                    .on_key(dummy, Some(action), self.config.scan_concurrency)
-            }
+            CurrentTab::Scanner => self.scanner.on_key(
+                dummy,
+                Some(action),
+                self.config.scan_concurrency,
+                &mut self.runtime,
+            ),
             CurrentTab::Traffic => self.traffic.on_key(Some(action)),
             CurrentTab::Settings => self.settings.on_key(
                 Some(action),

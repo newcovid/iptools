@@ -1,6 +1,7 @@
 use crate::app::App;
 use crate::history::HistoryStore;
 use crate::keymap::Action;
+use crate::runtime::NativeRuntime;
 use crate::session::SessionState;
 use crate::utils::textinput::TextInput;
 use crossterm::event::KeyEvent;
@@ -167,7 +168,7 @@ impl DiagnosticsModule {
     pub fn update(&mut self) {
         match self.current_tool {
             DiagnosticTool::Ping => self.ping_tool.update(),
-            DiagnosticTool::PortScan => self.port_scan_tool.update(),
+            DiagnosticTool::PortScan => {}
             DiagnosticTool::NetSpeed => self.public_speed_tool.update(),
             DiagnosticTool::Trace => self.trace_tool.update(),
             DiagnosticTool::LinkQuality => self.link_quality_tool.update(),
@@ -175,11 +176,17 @@ impl DiagnosticsModule {
         }
     }
 
-    pub async fn shutdown(&mut self) {
-        self.port_scan_tool.shutdown().await;
+    pub fn handle_runtime(&mut self, event: &iptools_core::RuntimeEvent) {
+        self.port_scan_tool.handle_runtime(event);
     }
 
-    pub fn on_key(&mut self, key: KeyEvent, action: Option<Action>, concurrency: usize) {
+    pub fn on_key(
+        &mut self,
+        key: KeyEvent,
+        action: Option<Action>,
+        concurrency: usize,
+        runtime: &mut NativeRuntime,
+    ) {
         // 1. 诊断页内部用 NextTab(默认 Tab) 在 Menu/Main/Config 三栏间切换焦点
         if action == Some(Action::NextTab) {
             self.active_focus = self.active_focus.next();
@@ -193,10 +200,13 @@ impl DiagnosticsModule {
                 // 将事件传递给当前选中的工具（需原始按键做文本输入的工具同时收到 key）
                 match self.current_tool {
                     DiagnosticTool::Ping => self.ping_tool.on_key(key, action, self.active_focus),
-                    DiagnosticTool::PortScan => {
-                        self.port_scan_tool
-                            .on_key(key, action, self.active_focus, concurrency)
-                    }
+                    DiagnosticTool::PortScan => self.port_scan_tool.on_key(
+                        key,
+                        action,
+                        self.active_focus,
+                        concurrency,
+                        runtime,
+                    ),
                     DiagnosticTool::NetSpeed => self.public_speed_tool.on_key(action),
                     DiagnosticTool::Trace => self.trace_tool.on_key(key, action, self.active_focus),
                     DiagnosticTool::LinkQuality => {
