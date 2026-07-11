@@ -59,7 +59,7 @@ Scanner 与 Port Scan 已进入阶段 3 的垂直切片：ARP/主机名解析以
 
 ## 配置
 
-可序列化的 `ConfigData`、会话参数、快捷键文本映射和公网端点定义位于 `iptools-core`，保持现有 Serde schema 与默认值。native 只负责路径、首次运行系统语言检测和 `FsConfigStore` 原子保存。Web 只在 `iptools.web.v1.*` LocalStorage 键中保存语言、场景和渲染器，不读写原生配置，也不执行适配器变更。
+可序列化的 `ConfigData`、会话参数、快捷键文本映射和公网端点定义位于 `iptools-core`，保持现有 Serde schema 与默认值。native 只负责路径、首次运行系统语言检测和 `FsConfigStore` 原子保存。共享 Settings reducer 通过 `Effect::PersistPreferences` 显式请求保存语言与扫描并发数；native Demo 写入 `ConfigData`，Web 写入 `iptools.web.v1.*` LocalStorage。Web 不读写原生配置，也不执行适配器变更。
 
 ## Web、字体与 PWA
 

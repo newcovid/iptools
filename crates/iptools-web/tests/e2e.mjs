@@ -159,6 +159,34 @@ try {
   assert.deepEqual(chineseCanvasErrors, []);
   await chineseCanvas.close();
 
+  const settingsPage = await browser.newPage({ viewport: { width: 1200, height: 800 } });
+  await settingsPage.goto(`${baseURL}?renderer=dom&lang=en`, {
+    waitUntil: "domcontentloaded",
+  });
+  await settingsPage.waitForSelector("#terminal_ratzilla_grid");
+  await settingsPage.evaluate(() => {
+    localStorage.setItem("iptools.web.v1.scan_concurrency", "50");
+  });
+  await settingsPage.reload({ waitUntil: "domcontentloaded" });
+  await settingsPage.waitForSelector("#terminal_ratzilla_grid");
+  await settingsPage.locator("#terminal").focus();
+  const nextPageButton = settingsPage.getByRole("button", { name: "Tab", exact: true });
+  for (let index = 0; index < 5; index += 1) {
+    await nextPageButton.click();
+  }
+  await settingsPage.waitForFunction(
+    () => document.getElementById("terminal")?.textContent?.includes("Persistence"),
+  );
+  await settingsPage.keyboard.press("ArrowRight");
+  await settingsPage.waitForFunction(
+    () => localStorage.getItem("iptools.web.v1.scan_concurrency") === "60",
+  );
+  await settingsPage.waitForFunction(() =>
+    /Scan concurrency\s+60/.test(document.getElementById("terminal")?.textContent ?? ""),
+  );
+  assert.match(await settingsPage.locator("#terminal").textContent(), /Scan concurrency\s+60/);
+  await settingsPage.close();
+
   const narrowPage = await browser.newPage({ viewport: { width: 390, height: 844 } });
   await narrowPage.goto(`${baseURL}?lang=zh`, { waitUntil: "domcontentloaded" });
   assert.notEqual(
