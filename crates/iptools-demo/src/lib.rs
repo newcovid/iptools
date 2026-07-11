@@ -113,6 +113,7 @@ impl DemoRuntime {
 
     pub fn dispatch(&mut self, effect: Effect) -> Vec<RuntimeEvent> {
         match effect {
+            Effect::PersistPreferences(_) => Vec::new(),
             Effect::RefreshDashboard => vec![self.bootstrap()[0].clone()],
             Effect::RefreshAdapters => vec![RuntimeEvent::AdaptersUpdated(
                 self.scenario.adapters.clone(),

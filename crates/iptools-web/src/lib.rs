@@ -27,10 +27,15 @@ mod wasm {
     }
 
     impl WebApp {
-        fn new(scenario: ScenarioId, language: Language) -> Result<Self, JsValue> {
+        fn new(
+            scenario: ScenarioId,
+            language: Language,
+            scan_concurrency: usize,
+        ) -> Result<Self, JsValue> {
             let runtime = DemoRuntime::new(scenario).map_err(js_error)?;
             let mut model = AppModel::default();
             model.language = language;
+            model.scan_concurrency = scan_concurrency;
             for event in runtime.bootstrap() {
                 model.update(Message::Runtime(event));
             }
@@ -49,7 +54,6 @@ mod wasm {
             let effects = self.model.update(Message::Input(input));
             self.dispatch(effects);
             if self.model.language != previous_language {
-                persist_language(self.model.language);
                 if self.model.language == Language::Zh && canvas_renderer_active() {
                     if let Err(error) = reload_with_dom_renderer() {
                         web_sys::console::warn_1(&error);
@@ -75,8 +79,13 @@ mod wasm {
 
         fn dispatch(&mut self, effects: Vec<Effect>) {
             for effect in effects {
-                for event in self.runtime.dispatch(effect) {
-                    self.model.update(Message::Runtime(event));
+                match effect {
+                    Effect::PersistPreferences(preferences) => persist_settings(preferences),
+                    effect => {
+                        for event in self.runtime.dispatch(effect) {
+                            self.model.update(Message::Runtime(event));
+                        }
+                    }
                 }
             }
         }
@@ -96,9 +105,14 @@ mod wasm {
             .map(|value| parse_language(&value))
             .or_else(load_language)
             .unwrap_or_else(browser_language);
-        persist_preferences(scenario, language);
+        let scan_concurrency = load_scan_concurrency().unwrap_or(50);
+        persist_preferences(scenario, language, scan_concurrency);
 
-        let app = Rc::new(RefCell::new(WebApp::new(scenario, language)?));
+        let app = Rc::new(RefCell::new(WebApp::new(
+            scenario,
+            language,
+            scan_concurrency,
+        )?));
         install_soft_keys(Rc::clone(&app))?;
         install_wheel(Rc::clone(&app))?;
 
@@ -331,7 +345,17 @@ mod wasm {
             .filter(|value| matches!(value.as_str(), "canvas" | "dom"))
     }
 
-    fn persist_preferences(scenario: ScenarioId, language: Language) {
+    fn load_scan_concurrency() -> Option<usize> {
+        storage()?
+            .get_item("iptools.web.v1.scan_concurrency")
+            .ok()
+            .flatten()?
+            .parse::<usize>()
+            .ok()
+            .map(|value| value.clamp(10, 500))
+    }
+
+    fn persist_preferences(scenario: ScenarioId, language: Language, scan_concurrency: usize) {
         let Some(storage) = storage() else {
             return;
         };
@@ -340,13 +364,25 @@ mod wasm {
             "iptools.web.v1.language",
             if language == Language::Zh { "zh" } else { "en" },
         );
+        let _ = storage.set_item(
+            "iptools.web.v1.scan_concurrency",
+            &scan_concurrency.to_string(),
+        );
     }
 
-    fn persist_language(language: Language) {
+    fn persist_settings(preferences: iptools_core::Preferences) {
         if let Some(storage) = storage() {
             let _ = storage.set_item(
                 "iptools.web.v1.language",
-                if language == Language::Zh { "zh" } else { "en" },
+                if preferences.language == Language::Zh {
+                    "zh"
+                } else {
+                    "en"
+                },
+            );
+            let _ = storage.set_item(
+                "iptools.web.v1.scan_concurrency",
+                &preferences.scan_concurrency.to_string(),
             );
         }
     }
