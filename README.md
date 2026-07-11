@@ -11,9 +11,9 @@
 
 ## 在线交互体验
 
-[Pages 预览部署状态](https://github.com/newcovid/iptools/actions/workflows/pages.yml) · [下载最新原生版本](https://github.com/newcovid/iptools/releases/latest)
+[在线体验 iptools v0.4 WebAssembly Preview](https://newcovid.github.io/iptools/) · [下载最新原生版本](https://github.com/newcovid/iptools/releases/latest)
 
-> `v0.4.0-alpha.1` 预览将在 Pages 工作流首次成功部署并确认可离线访问后开放固定体验地址；README 不提前指向尚未上线的 404 页面。
+> Web 版只运行确定性的模拟场景，不读取本机网络信息，也不执行真实扫描或系统配置修改。首次在线加载完成后可离线使用。
 
 Web 展览与原生 `iptools --demo` 使用相同的状态机和确定性场景，可以实际切换页面、编辑、启动和停止任务。它始终显示 **SIMULATED DATA / 模拟数据**，不会扫描浏览器所在设备或局域网；首次在线加载后可离线使用。
 

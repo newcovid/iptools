@@ -18,7 +18,7 @@ try {
   page.on("pageerror", (error) => pageErrors.push(error.message));
 
   await page.goto(`${baseURL}?scenario=wifi-degraded&lang=zh`, {
-    waitUntil: "networkidle",
+    waitUntil: "domcontentloaded",
   });
   await page.waitForSelector("#terminal_ratzilla_grid");
   await page.waitForTimeout(600);
@@ -127,7 +127,7 @@ try {
 
   const canvasPage = await browser.newPage({ viewport: { width: 1200, height: 800 } });
   await canvasPage.goto(`${baseURL}?renderer=canvas&lang=en&scenario=home-network`, {
-    waitUntil: "networkidle",
+    waitUntil: "domcontentloaded",
   });
   await canvasPage.waitForSelector("#terminal canvas");
   await canvasPage.locator("#terminal").focus();
@@ -148,7 +148,7 @@ try {
   const chineseCanvasErrors = [];
   chineseCanvas.on("pageerror", (error) => chineseCanvasErrors.push(error.message));
   await chineseCanvas.goto(`${baseURL}?renderer=canvas&lang=zh&scenario=multi-adapter`, {
-    waitUntil: "networkidle",
+    waitUntil: "domcontentloaded",
   });
   await chineseCanvas.waitForSelector("#terminal canvas");
   await chineseCanvas.evaluate(() => document.fonts.ready);
@@ -160,7 +160,7 @@ try {
   await chineseCanvas.close();
 
   const narrowPage = await browser.newPage({ viewport: { width: 390, height: 844 } });
-  await narrowPage.goto(`${baseURL}?lang=zh`, { waitUntil: "networkidle" });
+  await narrowPage.goto(`${baseURL}?lang=zh`, { waitUntil: "domcontentloaded" });
   assert.notEqual(
     await narrowPage.locator(".rotate").evaluate((element) => getComputedStyle(element).display),
     "none",
