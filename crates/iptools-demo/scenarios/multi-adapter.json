@@ -1,0 +1,20 @@
+{
+  "id": "multi-adapter",
+  "hostname": "dev-workstation.demo",
+  "public_ip": "192.0.2.91",
+  "download_bps": 24117248,
+  "upload_bps": 7340032,
+  "latency_ms": 7,
+  "adapters": [
+    { "name": "Ethernet 2.5G", "kind": "wired", "ipv4": "172.16.10.24", "mac": "02:33:44:55:66:01", "status": "up · 2.5 Gbps" },
+    { "name": "Wi-Fi 6E", "kind": "wireless", "ipv4": "192.168.8.24", "mac": "02:33:44:55:66:02", "status": "up · Lab-6G" },
+    { "name": "WireGuard", "kind": "virtual", "ipv4": "10.13.0.2", "mac": "02:33:44:55:66:03", "status": "up" },
+    { "name": "Hyper-V", "kind": "virtual", "ipv4": "172.28.32.1", "mac": "02:33:44:55:66:04", "status": "internal" }
+  ],
+  "scan_hosts": [
+    { "ip": "172.16.10.1", "mac": "02:CC:00:00:00:01", "hostname": "core-router.demo" },
+    { "ip": "172.16.10.5", "mac": "02:CC:00:00:00:05", "hostname": "build-node.demo" },
+    { "ip": "172.16.10.9", "mac": "02:CC:00:00:00:09", "hostname": "storage.demo" },
+    { "ip": "172.16.10.33", "mac": "02:CC:00:00:00:21", "hostname": "test-rig.demo" }
+  ]
+}

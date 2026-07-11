@@ -1,0 +1,7 @@
+[build]
+target = "index.html"
+dist = "dist"
+filehash = true
+
+[watch]
+watch = ["src", "assets", "../../vendor/ratzilla/src", "../iptools-core/src", "../iptools-ui/src", "../iptools-demo/src"]

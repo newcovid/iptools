@@ -1,0 +1,90 @@
+@font-face {
+  font-family: "Maple Mono CN iptools";
+  src: url("assets/fonts/maple-mono-cn-iptools.woff2") format("woff2");
+  font-display: swap;
+  font-style: normal;
+  font-weight: 400;
+}
+
+:root {
+  color-scheme: dark;
+  font-family: "Maple Mono CN iptools", "Maple Mono NF CN", "LXGW WenKai Mono", "Noto Sans Mono CJK SC", "Cascadia Mono", monospace;
+  background: #081018;
+  color: #dce7ef;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: grid;
+  grid-template-rows: auto auto minmax(420px, 1fr) auto;
+  gap: .5rem;
+  padding: max(.75rem, env(safe-area-inset-top)) max(.75rem, env(safe-area-inset-right)) max(.75rem, env(safe-area-inset-bottom)) max(.75rem, env(safe-area-inset-left));
+  background: radial-gradient(circle at top, #122638 0, #081018 55%);
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+header strong { font-size: 1.35rem; color: #5ee8ff; }
+nav { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+button, select, a {
+  border: 1px solid #31526b;
+  border-radius: .35rem;
+  background: #102333;
+  color: #dce7ef;
+  padding: .45rem .7rem;
+  font: inherit;
+  text-decoration: none;
+}
+button:hover, a:hover, select:hover { border-color: #5ee8ff; }
+.demo-badge { margin-left: .7rem; color: #ffd75e; font-size: .75rem; }
+.notice { margin: 0; color: #91a8b8; font-size: .85rem; }
+
+#terminal {
+  min-width: 0;
+  min-height: 420px;
+  overflow: hidden;
+  border: 1px solid #29465c;
+  border-radius: .55rem;
+  background: #000;
+  box-shadow: 0 1.4rem 3rem #0008;
+  outline: none;
+}
+#terminal:focus-within, #terminal:focus { border-color: #5ee8ff; }
+#terminal canvas, #terminal pre { display: block; margin: 0; }
+#terminal, #terminal pre, #terminal span {
+  font-family: "Maple Mono CN iptools", "Maple Mono NF CN", "LXGW WenKai Mono", "Noto Sans Mono CJK SC", monospace;
+  font-variant-ligatures: none;
+}
+
+.soft-keys { display: flex; flex-wrap: wrap; justify-content: center; gap: .35rem; }
+.soft-keys button { min-width: 3.4rem; touch-action: manipulation; }
+.rotate { display: none; color: #ffd75e; text-align: center; }
+
+#update-toast {
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+  padding: .8rem;
+  border: 1px solid #5ee8ff;
+  background: #102333;
+  border-radius: .4rem;
+  box-shadow: 0 .5rem 2rem #000a;
+}
+
+@media (max-width: 720px) and (orientation: portrait) {
+  .rotate { display: block; }
+  #terminal { min-height: 360px; }
+  header { align-items: flex-start; flex-direction: column; }
+}
+
+@media (pointer: fine) and (min-width: 900px) {
+  .soft-keys { opacity: .7; }
+}

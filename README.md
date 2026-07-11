@@ -9,6 +9,14 @@
 
 `iptools` 将网卡信息、IP 配置、局域网发现、流量监控和常用网络诊断集中在一个 TUI 中。发布包是单文件程序，语言资源已内嵌，无需安装运行时。
 
+## 在线交互体验
+
+[打开 GitHub Pages WebAssembly Demo](https://newcovid.github.io/iptools/) · [下载最新原生版本](https://github.com/newcovid/iptools/releases/latest)
+
+Web 展览与原生 `iptools --demo` 使用相同的状态机和确定性场景，可以实际切换页面、编辑、启动和停止任务。它始终显示 **SIMULATED DATA / 模拟数据**，不会扫描浏览器所在设备或局域网；首次在线加载后可离线使用。
+
+![iptools WebAssembly 交互展览，中文使用 Maple Mono CN 开源等宽字体](docs/assets/web-demo.png)
+
 ## 主要能力
 
 - 六个功能页：概览、适配器、局域网扫描、流量、诊断和设置。
@@ -48,7 +56,7 @@
 
 ### 从源码构建
 
-需要稳定版 [Rust 工具链](https://rustup.rs/)。Linux 还需要 `pkg-config` 和 OpenSSL 开发包。
+需要 Rust 1.97.0；仓库中的 `rust-toolchain.toml` 会为 rustup 自动选择该版本并安装 WASM、rustfmt 与 Clippy 组件。HTTP 客户端使用 rustls，不再要求 OpenSSL 开发包。
 
 ```bash
 git clone https://github.com/newcovid/iptools.git
@@ -63,6 +71,8 @@ cargo build --release
 ```text
 iptools
 iptools --config /path/to/config.json
+iptools --demo
+iptools --demo --scenario wifi-degraded
 ```
 
 默认配置文件是当前目录下的 `config.json`。程序会在需要时创建并更新它；完整的可编辑字段参见 [`config.example.json`](config.example.json)。其中 `session` 由程序维护，用于保存输入参数、最近使用历史和界面位置，通常无需手工修改。
@@ -108,12 +118,24 @@ iptools --config /path/to/config.json
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 cargo build --release
+cargo check -p iptools-web --target wasm32-unknown-unknown
 ```
 
-UI 和真实网络写入仍需要在目标系统上手动验证。新增界面文案时必须同时更新 `assets/locales/en-US.json` 和 `assets/locales/zh-CN.json`，测试会检查两份语言包的键是否一致。
+Web 展览使用 Trunk 0.21.14 构建：
+
+```bash
+rustup target add wasm32-unknown-unknown
+cargo install trunk --version 0.21.14 --locked
+cd crates/iptools-web
+trunk serve
+```
+
+浏览器端以 Ratzilla 0.3.1 为基础。项目携带两个小型可审计补丁：Canvas 按 Unicode 双宽裁剪，DOM 在 resize 交接帧跳过越界单元；中文字体是 OFL-1.1 的 Maple Mono CN 约 103 KiB 字形子集，许可证和生成说明位于 `crates/iptools-web/assets/fonts/`。
+
+UI 和真实网络写入仍需要在目标系统上手动验证。新增界面文案时必须同时更新 `assets/locales/en-US.json` 和 `assets/locales/zh-CN.json`，并重新生成 Web 字体子集；测试会检查语言包和浏览器字体加载。
 
 ## 许可证
 

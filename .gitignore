@@ -1,5 +1,7 @@
 # Rust build output
 /target/
+/crates/iptools-web/dist/
+/crates/iptools-web/node_modules/
 
 # Local runtime state
 /config.json

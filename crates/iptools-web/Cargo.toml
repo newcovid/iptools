@@ -1,0 +1,35 @@
+[package]
+name = "iptools-web"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+iptools-core.workspace = true
+iptools-demo.workspace = true
+iptools-ui.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook = "0.1.7"
+ratzilla = "=0.3.1"
+wasm-bindgen = "0.2"
+web-sys = { version = "0.3", features = [
+    "Document",
+    "Element",
+    "Event",
+    "EventTarget",
+    "HtmlElement",
+    "KeyboardEvent",
+    "Location",
+    "NodeList",
+    "Performance",
+    "Storage",
+    "UrlSearchParams",
+    "WheelEvent",
+    "Window",
+] }

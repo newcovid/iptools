@@ -1,0 +1,20 @@
+{
+  "id": "home-network",
+  "hostname": "home-station.demo",
+  "public_ip": "203.0.113.42",
+  "download_bps": 8388608,
+  "upload_bps": 1572864,
+  "latency_ms": 18,
+  "adapters": [
+    { "name": "Ethernet", "kind": "wired", "ipv4": "192.168.1.20", "mac": "02:11:22:33:44:10", "status": "up · 1 Gbps" },
+    { "name": "Wi-Fi", "kind": "wireless", "ipv4": "192.168.1.21", "mac": "02:11:22:33:44:11", "status": "up · HomeLab" },
+    { "name": "VPN", "kind": "virtual", "ipv4": "10.8.0.2", "mac": "02:11:22:33:44:12", "status": "standby" }
+  ],
+  "scan_hosts": [
+    { "ip": "192.168.1.1", "mac": "02:AA:00:00:00:01", "hostname": "gateway.demo" },
+    { "ip": "192.168.1.8", "mac": "02:AA:00:00:00:08", "hostname": "nas.demo" },
+    { "ip": "192.168.1.18", "mac": "02:AA:00:00:00:12", "hostname": "living-room.demo" },
+    { "ip": "192.168.1.31", "mac": "02:AA:00:00:00:1F", "hostname": "printer.demo" },
+    { "ip": "192.168.1.52", "mac": "02:AA:00:00:00:34", "hostname": "phone.demo" }
+  ]
+}
