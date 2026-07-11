@@ -170,9 +170,13 @@ try {
   await settingsPage.reload({ waitUntil: "domcontentloaded" });
   await settingsPage.waitForSelector("#terminal_ratzilla_grid");
   await settingsPage.locator("#terminal").focus();
+  const nextPageButton = settingsPage.getByRole("button", { name: "Tab", exact: true });
   for (let index = 0; index < 5; index += 1) {
-    await settingsPage.keyboard.press("Tab");
+    await nextPageButton.click();
   }
+  await settingsPage.waitForFunction(
+    () => document.getElementById("terminal")?.textContent?.includes("Persistence"),
+  );
   await settingsPage.keyboard.press("ArrowRight");
   await settingsPage.waitForFunction(
     () => localStorage.getItem("iptools.web.v1.scan_concurrency") === "60",
