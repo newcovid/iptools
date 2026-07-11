@@ -54,6 +54,7 @@ pub async fn run(scenario: ScenarioId) -> Result<()> {
         dispatch_effects(&mut model, &mut runtime, effects);
     }
 
+    events.shutdown().await;
     exit(&mut terminal)?;
     Ok(())
 }

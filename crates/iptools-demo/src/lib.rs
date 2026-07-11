@@ -3,7 +3,10 @@
 use std::{collections::VecDeque, str::FromStr};
 
 use iptools_core::{
-    AdapterInfo, DiagnosticRequest, Effect, JobId, RuntimeEvent, ScanHost, ToolKind, TrafficRow,
+    AdapterInfo, Effect, JobId, LanSpeedRequest, LanSpeedSample, LanSpeedSummary,
+    LinkQualityRequest, LinkQualitySample, LinkQualitySummary, PingRequest, PingSample,
+    PingSummary, PortScanRequest, PublicSpeedRequest, RuntimeEvent, ScanHost, SpeedSample,
+    SpeedSummary, ToolKind, TraceHop, TraceRequest, TrafficRow,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -145,13 +148,28 @@ impl DemoRuntime {
                 self.cancel_job(job);
                 vec![RuntimeEvent::ScanCancelled { job }]
             }
-            Effect::StartPing { job, request }
-            | Effect::StartTrace { job, request }
-            | Effect::StartPortScan { job, request }
-            | Effect::StartPublicSpeed { job, request }
-            | Effect::StartLinkQuality { job, request }
-            | Effect::StartLanSpeed { job, request } => {
-                self.start_diagnostic(job, request);
+            Effect::StartPing { job, request } => {
+                self.start_ping(job, request);
+                Vec::new()
+            }
+            Effect::StartTrace { job, request } => {
+                self.start_trace(job, request);
+                Vec::new()
+            }
+            Effect::StartPortScan { job, request } => {
+                self.start_port_scan(job, request);
+                Vec::new()
+            }
+            Effect::StartPublicSpeed { job, request } => {
+                self.start_public_speed(job, request);
+                Vec::new()
+            }
+            Effect::StartLinkQuality { job, request } => {
+                self.start_link_quality(job, request);
+                Vec::new()
+            }
+            Effect::StartLanSpeed { job, request } => {
+                self.start_lan_speed(job, request);
                 Vec::new()
             }
             Effect::StopPing(job)
@@ -161,10 +179,7 @@ impl DemoRuntime {
             | Effect::StopLinkQuality(job)
             | Effect::StopLanSpeed(job) => {
                 self.cancel_job(job);
-                vec![RuntimeEvent::DiagnosticFinished {
-                    job,
-                    summary: "stopped by user".into(),
-                }]
+                vec![cancelled_event(job)]
             }
         }
     }
@@ -184,28 +199,201 @@ impl DemoRuntime {
         ready
     }
 
-    fn start_diagnostic(&mut self, job: JobId, request: DiagnosticRequest) {
+    fn start_ping(&mut self, job: JobId, request: PingRequest) {
         self.cancel_job(job);
-        self.schedule(0, RuntimeEvent::DiagnosticStarted { job });
+        self.schedule(0, RuntimeEvent::PingStarted { job });
         for step in 1..=8 {
-            let progress = step * 12;
-            let (primary, detail) =
-                diagnostic_sample(job.tool, step, self.scenario.latency_ms, &request.target);
             self.schedule(
                 step as u64 * 320,
-                RuntimeEvent::DiagnosticProgress {
+                RuntimeEvent::PingSample {
                     job,
-                    progress,
-                    primary,
-                    detail,
+                    sample: PingSample {
+                        sequence: step as u64,
+                        latency_ms: Some(self.scenario.latency_ms + step as u64 % 4),
+                        ttl: Some(64),
+                        size: request.packet_size as usize,
+                    },
                 },
             );
         }
         self.schedule(
             2_900,
-            RuntimeEvent::DiagnosticFinished {
+            RuntimeEvent::PingFinished {
                 job,
-                summary: diagnostic_summary(job.tool, self.scenario.latency_ms),
+                summary: PingSummary {
+                    sent: 8,
+                    received: 8,
+                    min_ms: Some(self.scenario.latency_ms),
+                    average_ms: Some(self.scenario.latency_ms as f64 + 1.5),
+                    max_ms: Some(self.scenario.latency_ms + 3),
+                    loss_percent: 0.0,
+                },
+            },
+        );
+    }
+
+    fn start_trace(&mut self, job: JobId, request: TraceRequest) {
+        self.cancel_job(job);
+        self.schedule(0, RuntimeEvent::TraceStarted { job });
+        let hops = request.max_hops.min(8);
+        for ttl in 1..=hops {
+            self.schedule(
+                ttl as u64 * 320,
+                RuntimeEvent::TraceHop {
+                    job,
+                    hop: TraceHop {
+                        ttl,
+                        address: Some(format!("192.0.2.{ttl}")),
+                        hostname: None,
+                        latency_ms: Some(self.scenario.latency_ms / 2 + ttl as u64 * 2),
+                    },
+                },
+            );
+        }
+        self.schedule(2_900, RuntimeEvent::TraceFinished { job, hops });
+    }
+
+    fn start_port_scan(&mut self, job: JobId, request: PortScanRequest) {
+        self.cancel_job(job);
+        let total = u64::from(request.end_port.saturating_sub(request.start_port)) + 1;
+        self.schedule(0, RuntimeEvent::PortScanStarted { job, total });
+        let open_ports: Vec<u16> = [22, 443, 8_080]
+            .into_iter()
+            .filter(|port| (request.start_port..=request.end_port).contains(port))
+            .collect();
+        for step in 1..=8 {
+            let scanned = total.saturating_mul(step) / 8;
+            self.schedule(
+                step * 320,
+                RuntimeEvent::PortScanProgress {
+                    job,
+                    scanned,
+                    total,
+                },
+            );
+            if let Some(port) = open_ports.get(step as usize % open_ports.len().max(1)) {
+                self.schedule(
+                    step * 320 + 40,
+                    RuntimeEvent::PortScanOpen { job, port: *port },
+                );
+            }
+        }
+        self.schedule(
+            2_900,
+            RuntimeEvent::PortScanFinished {
+                job,
+                scanned: total,
+                total,
+                cancelled: false,
+            },
+        );
+    }
+
+    fn start_public_speed(&mut self, job: JobId, request: PublicSpeedRequest) {
+        self.cancel_job(job);
+        self.schedule(
+            0,
+            RuntimeEvent::PublicSpeedStarted {
+                job,
+                server: Some("demo.invalid".into()),
+            },
+        );
+        for step in 1..=8 {
+            let elapsed_ms = request.max_duration_ms.saturating_mul(step) / 8;
+            let bits_per_second = 32_000_000 + step * 6_400_000;
+            self.schedule(
+                step * 320,
+                RuntimeEvent::PublicSpeedSample {
+                    job,
+                    sample: SpeedSample {
+                        elapsed_ms,
+                        bytes: bits_per_second / 8 * elapsed_ms / 1_000,
+                        bits_per_second,
+                    },
+                },
+            );
+        }
+        self.schedule(
+            2_900,
+            RuntimeEvent::PublicSpeedFinished {
+                job,
+                summary: SpeedSummary {
+                    average_bps: 73_600_000,
+                    peak_bps: 83_200_000,
+                    total_bytes: 138_000_000,
+                },
+            },
+        );
+    }
+
+    fn start_link_quality(&mut self, job: JobId, request: LinkQualityRequest) {
+        self.cancel_job(job);
+        self.schedule(0, RuntimeEvent::LinkQualityStarted { job });
+        let count = request.count.min(8);
+        for sequence in 1..=count {
+            self.schedule(
+                sequence as u64 * 320,
+                RuntimeEvent::LinkQualitySample {
+                    job,
+                    sample: LinkQualitySample {
+                        sequence,
+                        latency_ms: Some(self.scenario.latency_ms as f64 + f64::from(sequence % 4)),
+                        jitter_ms: Some(3.0 + f64::from(sequence % 5)),
+                        loss_percent: f64::from(sequence % 4),
+                        rssi_dbm: Some(-55 - sequence as i16 * 2),
+                    },
+                },
+            );
+        }
+        let degraded = self.scenario.latency_ms > 100;
+        self.schedule(
+            2_900,
+            RuntimeEvent::LinkQualityFinished {
+                job,
+                summary: LinkQualitySummary {
+                    score: if degraded { 58.0 } else { 92.0 },
+                    average_latency_ms: Some(self.scenario.latency_ms as f64),
+                    jitter_ms: Some(4.2),
+                    loss_percent: if degraded { 2.5 } else { 0.0 },
+                },
+            },
+        );
+    }
+
+    fn start_lan_speed(&mut self, job: JobId, request: LanSpeedRequest) {
+        self.cancel_job(job);
+        self.schedule(0, RuntimeEvent::LanSpeedStarted { job });
+        for step in 1..=8 {
+            let elapsed_ms = request
+                .duration_secs
+                .saturating_mul(1_000)
+                .saturating_mul(step)
+                / 8;
+            self.schedule(
+                step * 320,
+                RuntimeEvent::LanSpeedSample {
+                    job,
+                    sample: LanSpeedSample {
+                        elapsed_ms,
+                        tx_bps: (144 + step * 24) * 1_000_000,
+                        rx_bps: (132 + step * 22) * 1_000_000,
+                        loss_percent: Some(0.2),
+                        jitter_ms: Some(1.4),
+                    },
+                },
+            );
+        }
+        self.schedule(
+            2_900,
+            RuntimeEvent::LanSpeedFinished {
+                job,
+                summary: LanSpeedSummary {
+                    tx_bytes: 360_000_000,
+                    rx_bytes: 330_000_000,
+                    elapsed_ms: request.duration_secs * 1_000,
+                    loss_percent: Some(0.2),
+                    jitter_ms: Some(1.4),
+                },
             },
         );
     }
@@ -251,70 +439,90 @@ fn event_job(event: &RuntimeEvent) -> Option<JobId> {
         | RuntimeEvent::ScanHostFound { job, .. }
         | RuntimeEvent::ScanFinished { job }
         | RuntimeEvent::ScanCancelled { job }
-        | RuntimeEvent::DiagnosticStarted { job }
-        | RuntimeEvent::DiagnosticProgress { job, .. }
-        | RuntimeEvent::DiagnosticFinished { job, .. }
-        | RuntimeEvent::DiagnosticFailed { job, .. } => Some(*job),
+        | RuntimeEvent::PingStarted { job }
+        | RuntimeEvent::PingSample { job, .. }
+        | RuntimeEvent::PingFinished { job, .. }
+        | RuntimeEvent::PingFailed { job, .. }
+        | RuntimeEvent::TraceStarted { job }
+        | RuntimeEvent::TraceHop { job, .. }
+        | RuntimeEvent::TraceFinished { job, .. }
+        | RuntimeEvent::TraceFailed { job, .. }
+        | RuntimeEvent::PortScanStarted { job, .. }
+        | RuntimeEvent::PortScanProgress { job, .. }
+        | RuntimeEvent::PortScanOpen { job, .. }
+        | RuntimeEvent::PortScanFinished { job, .. }
+        | RuntimeEvent::PortScanFailed { job, .. }
+        | RuntimeEvent::PublicSpeedStarted { job, .. }
+        | RuntimeEvent::PublicSpeedSample { job, .. }
+        | RuntimeEvent::PublicSpeedFinished { job, .. }
+        | RuntimeEvent::PublicSpeedFailed { job, .. }
+        | RuntimeEvent::LinkQualityStarted { job }
+        | RuntimeEvent::LinkQualitySample { job, .. }
+        | RuntimeEvent::LinkQualityFinished { job, .. }
+        | RuntimeEvent::LinkQualityFailed { job, .. }
+        | RuntimeEvent::LanSpeedStarted { job }
+        | RuntimeEvent::LanSpeedSample { job, .. }
+        | RuntimeEvent::LanSpeedFinished { job, .. }
+        | RuntimeEvent::LanSpeedFailed { job, .. } => Some(*job),
         _ => None,
     }
 }
 
-fn diagnostic_sample(tool: ToolKind, step: u8, latency: u64, target: &str) -> (String, String) {
-    match tool {
-        ToolKind::Ping => (
-            format!("reply from {target}: time={} ms", latency + step as u64 % 4),
-            format!("sequence={step} ttl=64"),
-        ),
-        ToolKind::Trace => (
-            format!("hop {step}: 192.0.2.{step}"),
-            format!("{} ms", latency / 2 + step as u64 * 2),
-        ),
-        ToolKind::PortScan => (
-            format!("scanned {} ports", step as u16 * 1024),
-            if matches!(step, 2 | 5 | 7) {
-                format!("open: {}", [22, 443, 8080][(step as usize / 2) % 3])
-            } else {
-                "no new open port".into()
+fn cancelled_event(job: JobId) -> RuntimeEvent {
+    match job.tool {
+        ToolKind::Scanner => RuntimeEvent::ScanCancelled { job },
+        ToolKind::Ping => RuntimeEvent::PingFinished {
+            job,
+            summary: PingSummary {
+                sent: 0,
+                received: 0,
+                min_ms: None,
+                average_ms: None,
+                max_ms: None,
+                loss_percent: 0.0,
             },
-        ),
-        ToolKind::PublicSpeed => (
-            format!("download {:.1} MiB/s", 4.0 + step as f64 * 0.8),
-            format!("sample {step}/8"),
-        ),
-        ToolKind::LinkQuality => (
-            format!("latency={} ms · jitter={} ms", latency, 3 + step % 5),
-            format!("RSSI={} dBm · loss={} %", -55 - step as i16 * 2, step % 4),
-        ),
-        ToolKind::LanSpeed => (
-            format!("throughput {} MiB/s", 18 + step as u16 * 3),
-            format!("stream {}/8", step),
-        ),
-        ToolKind::Scanner => unreachable!(),
-    }
-}
-
-fn diagnostic_summary(tool: ToolKind, latency: u64) -> String {
-    match tool {
-        ToolKind::Ping => format!("8 packets · average {latency} ms · 0% loss"),
-        ToolKind::Trace => "route completed in 8 hops".into(),
-        ToolKind::PortScan => "3 open ports found".into(),
-        ToolKind::PublicSpeed => "average 9.2 MiB/s · peak 10.4 MiB/s".into(),
-        ToolKind::LinkQuality => {
-            if latency > 100 {
-                "score 58/100 · weak wireless link".into()
-            } else {
-                "score 92/100 · excellent".into()
-            }
-        }
-        ToolKind::LanSpeed => "average 36 MiB/s · 0.2% loss".into(),
-        ToolKind::Scanner => unreachable!(),
+        },
+        ToolKind::Trace => RuntimeEvent::TraceFinished { job, hops: 0 },
+        ToolKind::PortScan => RuntimeEvent::PortScanFinished {
+            job,
+            scanned: 0,
+            total: 0,
+            cancelled: true,
+        },
+        ToolKind::PublicSpeed => RuntimeEvent::PublicSpeedFinished {
+            job,
+            summary: SpeedSummary {
+                average_bps: 0,
+                peak_bps: 0,
+                total_bytes: 0,
+            },
+        },
+        ToolKind::LinkQuality => RuntimeEvent::LinkQualityFinished {
+            job,
+            summary: LinkQualitySummary {
+                score: 0.0,
+                average_latency_ms: None,
+                jitter_ms: None,
+                loss_percent: 0.0,
+            },
+        },
+        ToolKind::LanSpeed => RuntimeEvent::LanSpeedFinished {
+            job,
+            summary: LanSpeedSummary {
+                tx_bytes: 0,
+                rx_bytes: 0,
+                elapsed_ms: 0,
+                loss_percent: None,
+                jitter_ms: None,
+            },
+        },
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iptools_core::{DiagnosticRequest, Effect, JobId, ScanRequest};
+    use iptools_core::{Effect, JobId, PingRequest, ScanRequest};
 
     #[test]
     fn all_scenarios_parse() {
@@ -360,14 +568,38 @@ mod tests {
         };
         runtime.dispatch(Effect::StartPing {
             job,
-            request: DiagnosticRequest {
+            request: PingRequest {
                 target: "192.0.2.1".into(),
+                ..PingRequest::default()
             },
         });
         let events = runtime.advance(3_000);
         assert!(events.iter().any(|event| matches!(
             event,
-            RuntimeEvent::DiagnosticFinished { job: current, .. } if *current == job
+            RuntimeEvent::PingFinished { job: current, .. } if *current == job
         )));
+    }
+
+    #[test]
+    fn equal_scenario_and_input_produce_identical_event_sequences() {
+        let mut native_demo = DemoRuntime::new(ScenarioId::MultiAdapter).unwrap();
+        let mut web_demo = DemoRuntime::new(ScenarioId::MultiAdapter).unwrap();
+        let job = JobId {
+            tool: ToolKind::Ping,
+            generation: 7,
+        };
+        let effect = Effect::StartPing {
+            job,
+            request: PingRequest::default(),
+        };
+
+        assert_eq!(native_demo.bootstrap(), web_demo.bootstrap());
+        assert_eq!(
+            native_demo.dispatch(effect.clone()),
+            web_demo.dispatch(effect)
+        );
+        for delta in [0, 320, 640, 1_000, 2_000] {
+            assert_eq!(native_demo.advance(delta), web_demo.advance(delta));
+        }
     }
 }

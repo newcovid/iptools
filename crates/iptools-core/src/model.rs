@@ -1,8 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Action, DiagnosticRequest, Effect, InputEvent, JobId, KeyCode, Message::*, RuntimeEvent,
-    ScanRequest, ToolKind,
+    Action, Effect, InputEvent, JobId, KeyCode, Message::*, RuntimeEvent, ScanRequest, ToolKind,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -15,16 +14,27 @@ pub enum Message {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Language {
     #[default]
-    English,
-    Chinese,
+    En,
+    Zh,
 }
 
 impl Language {
-    pub fn toggle(self) -> Self {
+    pub const fn toggle(self) -> Self {
         match self {
-            Self::English => Self::Chinese,
-            Self::Chinese => Self::English,
+            Self::En => Self::Zh,
+            Self::Zh => Self::En,
         }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::En => "en-US",
+            Self::Zh => "zh-CN",
+        }
+    }
+
+    pub const fn next(self) -> Self {
+        self.toggle()
     }
 }
 
@@ -178,9 +188,7 @@ impl Default for ScannerState {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct DiagnosticState {
-    pub tool: DiagnosticTool,
-    pub target: String,
+pub struct DiagnosticCommonState {
     pub status: TaskStatus,
     pub progress: u8,
     pub primary: String,
@@ -189,17 +197,110 @@ pub struct DiagnosticState {
     pub job: Option<JobId>,
 }
 
-impl Default for DiagnosticState {
+impl Default for DiagnosticCommonState {
     fn default() -> Self {
         Self {
-            tool: DiagnosticTool::Ping,
-            target: "192.0.2.1".into(),
             status: TaskStatus::Idle,
             progress: 0,
             primary: String::new(),
             detail: String::new(),
             log: Vec::new(),
             job: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct PingState {
+    pub request: crate::PingRequest,
+    pub common: DiagnosticCommonState,
+    pub samples: Vec<crate::PingSample>,
+    pub summary: Option<crate::PingSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct TraceState {
+    pub request: crate::TraceRequest,
+    pub common: DiagnosticCommonState,
+    pub hops: Vec<crate::TraceHop>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct PortScanState {
+    pub request: crate::PortScanRequest,
+    pub common: DiagnosticCommonState,
+    pub scanned: u64,
+    pub total: u64,
+    pub open_ports: Vec<u16>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct PublicSpeedState {
+    pub request: crate::PublicSpeedRequest,
+    pub common: DiagnosticCommonState,
+    pub server: Option<String>,
+    pub samples: Vec<crate::SpeedSample>,
+    pub summary: Option<crate::SpeedSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct LinkQualityState {
+    pub request: crate::LinkQualityRequest,
+    pub common: DiagnosticCommonState,
+    pub samples: Vec<crate::LinkQualitySample>,
+    pub summary: Option<crate::LinkQualitySummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct LanSpeedState {
+    pub request: crate::LanSpeedRequest,
+    pub common: DiagnosticCommonState,
+    pub samples: Vec<crate::LanSpeedSample>,
+    pub summary: Option<crate::LanSpeedSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct DiagnosticsState {
+    pub tool: DiagnosticTool,
+    pub ping: PingState,
+    pub trace: TraceState,
+    pub port_scan: PortScanState,
+    pub public_speed: PublicSpeedState,
+    pub link_quality: LinkQualityState,
+    pub lan_speed: LanSpeedState,
+}
+
+impl DiagnosticsState {
+    pub fn active_common(&self) -> &DiagnosticCommonState {
+        match self.tool {
+            DiagnosticTool::Ping => &self.ping.common,
+            DiagnosticTool::Trace => &self.trace.common,
+            DiagnosticTool::PortScan => &self.port_scan.common,
+            DiagnosticTool::PublicSpeed => &self.public_speed.common,
+            DiagnosticTool::LinkQuality => &self.link_quality.common,
+            DiagnosticTool::LanSpeed => &self.lan_speed.common,
+        }
+    }
+
+    pub fn active_common_mut(&mut self) -> &mut DiagnosticCommonState {
+        match self.tool {
+            DiagnosticTool::Ping => &mut self.ping.common,
+            DiagnosticTool::Trace => &mut self.trace.common,
+            DiagnosticTool::PortScan => &mut self.port_scan.common,
+            DiagnosticTool::PublicSpeed => &mut self.public_speed.common,
+            DiagnosticTool::LinkQuality => &mut self.link_quality.common,
+            DiagnosticTool::LanSpeed => &mut self.lan_speed.common,
+        }
+    }
+
+    pub fn active_target(&self) -> &str {
+        match self.tool {
+            DiagnosticTool::Ping => &self.ping.request.target,
+            DiagnosticTool::Trace => &self.trace.request.target,
+            DiagnosticTool::PortScan => &self.port_scan.request.target,
+            DiagnosticTool::PublicSpeed => "automatic endpoint",
+            DiagnosticTool::LinkQuality => &self.link_quality.request.target,
+            DiagnosticTool::LanSpeed => &self.lan_speed.request.peer,
         }
     }
 }
@@ -217,7 +318,7 @@ pub struct AppModel {
     pub adapter_selected: usize,
     pub scanner: ScannerState,
     pub traffic: Vec<TrafficRow>,
-    pub diagnostics: DiagnosticState,
+    pub diagnostics: DiagnosticsState,
     pub scan_concurrency: usize,
     generation: u64,
 }
@@ -229,14 +330,14 @@ impl Default for AppModel {
             demo: true,
             elapsed_ms: 0,
             page: Page::Dashboard,
-            language: Language::English,
+            language: Language::En,
             show_help: false,
             dashboard: DashboardState::default(),
             adapters: Vec::new(),
             adapter_selected: 0,
             scanner: ScannerState::default(),
             traffic: Vec::new(),
-            diagnostics: DiagnosticState::default(),
+            diagnostics: DiagnosticsState::default(),
             scan_concurrency: 50,
             generation: 0,
         }
@@ -380,22 +481,74 @@ impl AppModel {
     }
 
     fn toggle_diagnostic(&mut self) -> Vec<Effect> {
-        if let Some(job) = self.diagnostics.job {
-            self.diagnostics.job = None;
-            self.diagnostics.status = TaskStatus::Done;
+        if let Some(job) = self.diagnostics.active_common().job {
+            let common = self.diagnostics.active_common_mut();
+            common.job = None;
+            common.status = TaskStatus::Done;
             return vec![stop_effect(job)];
         }
 
         let tool = ToolKind::from(self.diagnostics.tool);
         let job = self.next_job(tool);
-        self.diagnostics.job = Some(job);
-        self.diagnostics.status = TaskStatus::Running;
-        self.diagnostics.progress = 0;
-        self.diagnostics.log.clear();
-        let request = DiagnosticRequest {
-            target: self.diagnostics.target.clone(),
+        let common = self.diagnostics.active_common_mut();
+        common.job = Some(job);
+        common.status = TaskStatus::Running;
+        common.progress = 0;
+        common.primary.clear();
+        common.detail.clear();
+        common.log.clear();
+
+        let effect = match self.diagnostics.tool {
+            DiagnosticTool::Ping => {
+                self.diagnostics.ping.samples.clear();
+                self.diagnostics.ping.summary = None;
+                Effect::StartPing {
+                    job,
+                    request: self.diagnostics.ping.request.clone(),
+                }
+            }
+            DiagnosticTool::Trace => {
+                self.diagnostics.trace.hops.clear();
+                Effect::StartTrace {
+                    job,
+                    request: self.diagnostics.trace.request.clone(),
+                }
+            }
+            DiagnosticTool::PortScan => {
+                self.diagnostics.port_scan.scanned = 0;
+                self.diagnostics.port_scan.total = 0;
+                self.diagnostics.port_scan.open_ports.clear();
+                Effect::StartPortScan {
+                    job,
+                    request: self.diagnostics.port_scan.request.clone(),
+                }
+            }
+            DiagnosticTool::PublicSpeed => {
+                self.diagnostics.public_speed.samples.clear();
+                self.diagnostics.public_speed.summary = None;
+                Effect::StartPublicSpeed {
+                    job,
+                    request: self.diagnostics.public_speed.request.clone(),
+                }
+            }
+            DiagnosticTool::LinkQuality => {
+                self.diagnostics.link_quality.samples.clear();
+                self.diagnostics.link_quality.summary = None;
+                Effect::StartLinkQuality {
+                    job,
+                    request: self.diagnostics.link_quality.request.clone(),
+                }
+            }
+            DiagnosticTool::LanSpeed => {
+                self.diagnostics.lan_speed.samples.clear();
+                self.diagnostics.lan_speed.summary = None;
+                Effect::StartLanSpeed {
+                    job,
+                    request: self.diagnostics.lan_speed.request.clone(),
+                }
+            }
         };
-        vec![start_effect(job, request)]
+        vec![effect]
     }
 
     fn handle_runtime(&mut self, event: RuntimeEvent) {
@@ -437,51 +590,267 @@ impl AppModel {
                 self.scanner.status = TaskStatus::Done;
                 self.scanner.job = None;
             }
-            RuntimeEvent::DiagnosticStarted { job } if self.diagnostics.job == Some(job) => {
-                self.diagnostics.status = TaskStatus::Running
+            RuntimeEvent::PingStarted { job } if self.diagnostics.ping.common.job == Some(job) => {
+                self.diagnostics.ping.common.status = TaskStatus::Running;
             }
-            RuntimeEvent::DiagnosticProgress {
-                job,
-                progress,
-                primary,
-                detail,
-            } if self.diagnostics.job == Some(job) => {
-                self.diagnostics.progress = progress;
-                self.diagnostics.primary = primary.clone();
-                self.diagnostics.detail = detail;
-                self.diagnostics.log.push(primary);
-            }
-            RuntimeEvent::DiagnosticFinished { job, summary }
-                if self.diagnostics.job == Some(job) =>
+            RuntimeEvent::PingSample { job, sample }
+                if self.diagnostics.ping.common.job == Some(job) =>
             {
-                self.diagnostics.status = TaskStatus::Done;
-                self.diagnostics.progress = 100;
-                self.diagnostics.detail = summary;
-                self.diagnostics.job = None;
+                let primary = sample.latency_ms.map_or_else(
+                    || format!("sequence {} timed out", sample.sequence),
+                    |latency| format!("reply {}: {latency} ms", sample.sequence),
+                );
+                let common = &mut self.diagnostics.ping.common;
+                common.progress = (sample.sequence.saturating_add(1) * 12).min(99) as u8;
+                common.primary = primary.clone();
+                common.detail = format!("ttl={:?} size={}", sample.ttl, sample.size);
+                common.log.push(primary);
+                self.diagnostics.ping.samples.push(sample);
             }
-            RuntimeEvent::DiagnosticFailed { job, error } if self.diagnostics.job == Some(job) => {
-                self.diagnostics.status = TaskStatus::Failed(error);
-                self.diagnostics.job = None;
+            RuntimeEvent::PingFinished { job, summary }
+                if self.diagnostics.ping.common.job == Some(job) =>
+            {
+                finish_common(
+                    &mut self.diagnostics.ping.common,
+                    format!(
+                        "{} received / {} sent · {:.1}% loss",
+                        summary.received, summary.sent, summary.loss_percent
+                    ),
+                );
+                self.diagnostics.ping.summary = Some(summary);
+            }
+            RuntimeEvent::PingFailed { job, error }
+                if self.diagnostics.ping.common.job == Some(job) =>
+            {
+                fail_common(&mut self.diagnostics.ping.common, error);
+            }
+            RuntimeEvent::TraceStarted { job }
+                if self.diagnostics.trace.common.job == Some(job) =>
+            {
+                self.diagnostics.trace.common.status = TaskStatus::Running;
+            }
+            RuntimeEvent::TraceHop { job, hop }
+                if self.diagnostics.trace.common.job == Some(job) =>
+            {
+                let primary = format!("hop {}: {}", hop.ttl, hop.address.as_deref().unwrap_or("*"));
+                let common = &mut self.diagnostics.trace.common;
+                common.progress = hop
+                    .ttl
+                    .saturating_mul(100)
+                    .checked_div(self.diagnostics.trace.request.max_hops.max(1))
+                    .unwrap_or(0)
+                    .min(99);
+                common.primary = primary.clone();
+                common.detail = hop
+                    .latency_ms
+                    .map_or_else(|| "timeout".into(), |latency| format!("{latency} ms"));
+                common.log.push(primary);
+                self.diagnostics.trace.hops.push(hop);
+            }
+            RuntimeEvent::TraceFinished { job, hops }
+                if self.diagnostics.trace.common.job == Some(job) =>
+            {
+                finish_common(
+                    &mut self.diagnostics.trace.common,
+                    format!("route completed in {hops} hops"),
+                );
+            }
+            RuntimeEvent::TraceFailed { job, error }
+                if self.diagnostics.trace.common.job == Some(job) =>
+            {
+                fail_common(&mut self.diagnostics.trace.common, error);
+            }
+            RuntimeEvent::PortScanStarted { job, total }
+                if self.diagnostics.port_scan.common.job == Some(job) =>
+            {
+                self.diagnostics.port_scan.total = total;
+                self.diagnostics.port_scan.common.status = TaskStatus::Running;
+            }
+            RuntimeEvent::PortScanProgress {
+                job,
+                scanned,
+                total,
+            } if self.diagnostics.port_scan.common.job == Some(job) => {
+                let state = &mut self.diagnostics.port_scan;
+                state.scanned = scanned;
+                state.total = total;
+                state.common.progress = scanned
+                    .saturating_mul(100)
+                    .checked_div(total.max(1))
+                    .unwrap_or(0)
+                    .min(100) as u8;
+                state.common.primary = format!("scanned {scanned} ports");
+                state.common.detail = format!("{} open", state.open_ports.len());
+            }
+            RuntimeEvent::PortScanOpen { job, port }
+                if self.diagnostics.port_scan.common.job == Some(job) =>
+            {
+                let state = &mut self.diagnostics.port_scan;
+                if let Err(index) = state.open_ports.binary_search(&port) {
+                    state.open_ports.insert(index, port);
+                }
+                let line = format!("open: {port}");
+                state.common.primary = line.clone();
+                state.common.log.push(line);
+            }
+            RuntimeEvent::PortScanFinished {
+                job,
+                scanned,
+                total,
+                cancelled,
+            } if self.diagnostics.port_scan.common.job == Some(job) => {
+                let state = &mut self.diagnostics.port_scan;
+                state.scanned = scanned;
+                state.total = total;
+                finish_common(
+                    &mut state.common,
+                    format!(
+                        "{} · {} open ports",
+                        if cancelled { "cancelled" } else { "completed" },
+                        state.open_ports.len()
+                    ),
+                );
+            }
+            RuntimeEvent::PortScanFailed { job, error }
+                if self.diagnostics.port_scan.common.job == Some(job) =>
+            {
+                fail_common(&mut self.diagnostics.port_scan.common, error);
+            }
+            RuntimeEvent::PublicSpeedStarted { job, server }
+                if self.diagnostics.public_speed.common.job == Some(job) =>
+            {
+                self.diagnostics.public_speed.server = server;
+                self.diagnostics.public_speed.common.status = TaskStatus::Running;
+            }
+            RuntimeEvent::PublicSpeedSample { job, sample }
+                if self.diagnostics.public_speed.common.job == Some(job) =>
+            {
+                let state = &mut self.diagnostics.public_speed;
+                state.common.progress = sample
+                    .elapsed_ms
+                    .saturating_mul(100)
+                    .checked_div(state.request.max_duration_ms.max(1))
+                    .unwrap_or(0)
+                    .min(99) as u8;
+                state.common.primary = format!("{} bps", sample.bits_per_second);
+                state.common.detail = format!("{} bytes", sample.bytes);
+                state.samples.push(sample);
+            }
+            RuntimeEvent::PublicSpeedFinished { job, summary }
+                if self.diagnostics.public_speed.common.job == Some(job) =>
+            {
+                finish_common(
+                    &mut self.diagnostics.public_speed.common,
+                    format!(
+                        "average {} bps · peak {} bps",
+                        summary.average_bps, summary.peak_bps
+                    ),
+                );
+                self.diagnostics.public_speed.summary = Some(summary);
+            }
+            RuntimeEvent::PublicSpeedFailed { job, error }
+                if self.diagnostics.public_speed.common.job == Some(job) =>
+            {
+                fail_common(&mut self.diagnostics.public_speed.common, error);
+            }
+            RuntimeEvent::LinkQualityStarted { job }
+                if self.diagnostics.link_quality.common.job == Some(job) =>
+            {
+                self.diagnostics.link_quality.common.status = TaskStatus::Running;
+            }
+            RuntimeEvent::LinkQualitySample { job, sample }
+                if self.diagnostics.link_quality.common.job == Some(job) =>
+            {
+                let state = &mut self.diagnostics.link_quality;
+                state.common.progress = sample
+                    .sequence
+                    .saturating_mul(100)
+                    .checked_div(state.request.count.max(1))
+                    .unwrap_or(0)
+                    .min(99) as u8;
+                state.common.primary = format!("latency={:?} ms", sample.latency_ms);
+                state.common.detail = format!(
+                    "loss={:.1}% · rssi={:?}",
+                    sample.loss_percent, sample.rssi_dbm
+                );
+                state.samples.push(sample);
+            }
+            RuntimeEvent::LinkQualityFinished { job, summary }
+                if self.diagnostics.link_quality.common.job == Some(job) =>
+            {
+                finish_common(
+                    &mut self.diagnostics.link_quality.common,
+                    format!(
+                        "score {:.0}/100 · loss {:.1}%",
+                        summary.score, summary.loss_percent
+                    ),
+                );
+                self.diagnostics.link_quality.summary = Some(summary);
+            }
+            RuntimeEvent::LinkQualityFailed { job, error }
+                if self.diagnostics.link_quality.common.job == Some(job) =>
+            {
+                fail_common(&mut self.diagnostics.link_quality.common, error);
+            }
+            RuntimeEvent::LanSpeedStarted { job }
+                if self.diagnostics.lan_speed.common.job == Some(job) =>
+            {
+                self.diagnostics.lan_speed.common.status = TaskStatus::Running;
+            }
+            RuntimeEvent::LanSpeedSample { job, sample }
+                if self.diagnostics.lan_speed.common.job == Some(job) =>
+            {
+                let state = &mut self.diagnostics.lan_speed;
+                state.common.progress = sample
+                    .elapsed_ms
+                    .saturating_mul(100)
+                    .checked_div(state.request.duration_secs.saturating_mul(1_000).max(1))
+                    .unwrap_or(0)
+                    .min(99) as u8;
+                state.common.primary =
+                    format!("tx={} bps · rx={} bps", sample.tx_bps, sample.rx_bps);
+                state.common.detail = format!(
+                    "loss={:?} · jitter={:?}",
+                    sample.loss_percent, sample.jitter_ms
+                );
+                state.samples.push(sample);
+            }
+            RuntimeEvent::LanSpeedFinished { job, summary }
+                if self.diagnostics.lan_speed.common.job == Some(job) =>
+            {
+                finish_common(
+                    &mut self.diagnostics.lan_speed.common,
+                    format!(
+                        "tx={} bytes · rx={} bytes",
+                        summary.tx_bytes, summary.rx_bytes
+                    ),
+                );
+                self.diagnostics.lan_speed.summary = Some(summary);
+            }
+            RuntimeEvent::LanSpeedFailed { job, error }
+                if self.diagnostics.lan_speed.common.job == Some(job) =>
+            {
+                fail_common(&mut self.diagnostics.lan_speed.common, error);
             }
             _ => {}
         }
     }
 }
 
-fn wrap(current: usize, len: usize, delta: isize) -> usize {
-    (current as isize + delta).rem_euclid(len as isize) as usize
+fn finish_common(common: &mut DiagnosticCommonState, summary: String) {
+    common.status = TaskStatus::Done;
+    common.progress = 100;
+    common.detail = summary;
+    common.job = None;
 }
 
-fn start_effect(job: JobId, request: DiagnosticRequest) -> Effect {
-    match job.tool {
-        ToolKind::Ping => Effect::StartPing { job, request },
-        ToolKind::Trace => Effect::StartTrace { job, request },
-        ToolKind::PortScan => Effect::StartPortScan { job, request },
-        ToolKind::PublicSpeed => Effect::StartPublicSpeed { job, request },
-        ToolKind::LinkQuality => Effect::StartLinkQuality { job, request },
-        ToolKind::LanSpeed => Effect::StartLanSpeed { job, request },
-        ToolKind::Scanner => unreachable!("scanner has its own effect"),
-    }
+fn fail_common(common: &mut DiagnosticCommonState, error: crate::RuntimeError) {
+    common.status = TaskStatus::Failed(error.message);
+    common.job = None;
+}
+
+fn wrap(current: usize, len: usize, delta: isize) -> usize {
+    (current as isize + delta).rem_euclid(len as isize) as usize
 }
 
 fn stop_effect(job: JobId) -> Effect {
@@ -536,5 +905,94 @@ mod tests {
             },
         }));
         assert_eq!(app.scanner.results.len(), 1);
+    }
+
+    #[test]
+    fn typed_ping_events_ignore_stale_and_post_cancel_samples() {
+        let mut app = AppModel {
+            page: Page::Diagnostics,
+            ..AppModel::default()
+        };
+        let effects = app.update(Input(InputEvent::Action(Action::Toggle)));
+        let Effect::StartPing { job, request } = effects[0].clone() else {
+            panic!("expected typed ping effect");
+        };
+        assert_eq!(request, crate::PingRequest::default());
+
+        let sample = crate::PingSample {
+            sequence: 1,
+            latency_ms: Some(12),
+            ttl: Some(64),
+            size: 32,
+        };
+        app.update(Runtime(RuntimeEvent::PingSample {
+            job: JobId {
+                generation: job.generation + 1,
+                ..job
+            },
+            sample: sample.clone(),
+        }));
+        assert!(app.diagnostics.ping.samples.is_empty());
+
+        app.update(Runtime(RuntimeEvent::PingSample {
+            job,
+            sample: sample.clone(),
+        }));
+        assert_eq!(app.diagnostics.ping.samples.first(), Some(&sample));
+
+        assert_eq!(
+            app.update(Input(InputEvent::Action(Action::Toggle))),
+            [Effect::StopPing(job)]
+        );
+        app.update(Runtime(RuntimeEvent::PingSample { job, sample }));
+        assert_eq!(app.diagnostics.ping.samples.len(), 1);
+    }
+
+    #[test]
+    fn typed_failure_only_mutates_its_current_tool_generation() {
+        let mut app = AppModel {
+            page: Page::Diagnostics,
+            ..AppModel::default()
+        };
+        app.diagnostics.tool = DiagnosticTool::Trace;
+        let effects = app.update(Input(InputEvent::Action(Action::Toggle)));
+        let Effect::StartTrace { job, request } = effects[0].clone() else {
+            panic!("expected typed trace effect");
+        };
+        assert_eq!(request, crate::TraceRequest::default());
+
+        app.update(Runtime(RuntimeEvent::TraceFailed {
+            job,
+            error: crate::RuntimeError::new(crate::RuntimeErrorCode::Timeout, "trace timeout"),
+        }));
+        assert_eq!(
+            app.diagnostics.trace.common.status,
+            TaskStatus::Failed("trace timeout".into())
+        );
+        assert_eq!(app.diagnostics.trace.common.job, None);
+        assert_eq!(app.diagnostics.ping.common.status, TaskStatus::Idle);
+    }
+
+    #[test]
+    fn port_scan_effect_carries_validated_shape_not_generic_text() {
+        let mut app = AppModel {
+            page: Page::Diagnostics,
+            ..AppModel::default()
+        };
+        app.diagnostics.tool = DiagnosticTool::PortScan;
+        app.diagnostics.port_scan.request = crate::PortScanRequest {
+            target: "192.0.2.10".into(),
+            start_port: 20,
+            end_port: 443,
+            timeout_ms: 250,
+            concurrency: 64,
+        };
+        let effects = app.update(Input(InputEvent::Action(Action::Toggle)));
+        let Effect::StartPortScan { request, .. } = &effects[0] else {
+            panic!("expected typed port scan effect");
+        };
+        assert_eq!(request.start_port, 20);
+        assert_eq!(request.end_port, 443);
+        assert_eq!(request.concurrency, 64);
     }
 }

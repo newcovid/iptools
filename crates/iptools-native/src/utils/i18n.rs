@@ -1,39 +1,14 @@
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// 支持的语言类型
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum Language {
-    #[default]
-    En,
-    Zh,
-}
+pub use iptools_core::Language;
 
-impl Language {
-    pub fn as_str(&self) -> &str {
-        match self {
-            Language::En => "en-US",
-            Language::Zh => "zh-CN",
-        }
-    }
-
-    /// 循环切换下一个语言
-    pub fn next(&self) -> Self {
-        match self {
-            Language::En => Language::Zh,
-            Language::Zh => Language::En,
-        }
-    }
-
-    /// 根据操作系统的用户区域设置推断默认语言。
-    /// 仅区分中文 / 英文（其余一律回退英文），用于首次启动尚无配置文件时。
-    pub fn detect_system() -> Self {
-        let tag = system_locale_tag().to_lowercase();
-        if tag.starts_with("zh") {
-            Language::Zh
-        } else {
-            Language::En
-        }
+/// Infer the first-run default without leaking platform/environment access into core.
+pub fn detect_system_language() -> Language {
+    let tag = system_locale_tag().to_lowercase();
+    if tag.starts_with("zh") {
+        Language::Zh
+    } else {
+        Language::En
     }
 }
 
