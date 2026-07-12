@@ -450,7 +450,11 @@ impl Backend for DomBackend {
     }
 
     fn size(&self) -> IoResult<Size> {
-        let size = get_size();
+        // The DOM grid is sized from its parent element, which can be much
+        // smaller than the browser viewport when the terminal lives inside a
+        // page shell. Reporting the viewport size makes Ratatui lay out rows
+        // that `draw` cannot display, clipping footers and bottom panels.
+        let size = self.size;
         Ok(Size::new(
             size.width.saturating_sub(1),
             size.height.saturating_sub(1),

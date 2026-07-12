@@ -2,6 +2,8 @@
 
 iptools 是一个五 crate virtual workspace。内部架构允许重建，外部必须保留 `iptools` 二进制名、默认 CLI、配置 JSON 和发布包兼容性。
 
+共享渲染器必须遵守 [`ui-compatibility.md`](ui-compatibility.md)：状态和运行时可以现代化，但不得顺带降低 v0.3.1 的终端层级、信息密度与交互体验；Web 专属控制保留在 Ratatui 画面之外。
+
 ## Workspace 边界
 
 ```text
@@ -53,7 +55,7 @@ Web 和 native `--demo` 使用 `iptools-demo::DemoRuntime` 的固定 seed 与定
 
 真实原生页面的既有网络算法暂时保留在 `iptools-native/src/modules` 和 `utils` 中，作为兼容迁移桥；新增跨端行为必须进入 core/ui/runtime 边界，不能继续增加 detached spawn 或无界通道。迁移桥删除前，真实网络算法行为不得因 Web 展览而改变。
 
-Scanner、Port Scan、Dashboard、Adapter 读取、Traffic、Adapter Edit、Ping 与 Trace 已进入阶段 3 的垂直切片：ARP/主机名解析、TCP 连接扫描、Dashboard 的系统/公网信息、适配器枚举和流量采样、网卡 DHCP/静态地址写入、ICMP Ping 与逐跳跟踪均已移到 `NativeRuntime::dispatch(Effect)`。所有操作均使用 JobId；同一工具的新任务取代旧 generation，core 丢弃迟到结果。Ping 的累计统计最多以 4 Hz 进入 UI；Trace 保留 v0.3.1 的 IPv4 逐跳算法。两者共用 v0.3.1 的目标 MRU 和 Menu/Main/Config 焦点模型，参数继续写入兼容的 session JSON。Adapter 读取与写入共用单许可 blocking gate，确保不可中断的系统写入完成并被等待后，更新的写入才会执行；Traffic 仍使用独立的快速采样路径。Adapter Edit 在 core 与 native 边界各自校验请求，区分永久生效、Linux 运行时临时生效与 Demo 模拟生效；Web 永远只修改确定性场景。旧原生页继续作为兼容迁移桥，共享 `AppModel` 已可直接由这些 native handler 驱动。
+Scanner、Port Scan、Dashboard、Adapter 读取、Traffic、Adapter Edit、Ping、Trace、Public Speed 与 Link Quality 已进入阶段 3 的垂直切片：ARP/主机名解析、TCP 连接扫描、Dashboard 的系统/公网信息、适配器枚举和流量采样、网卡 DHCP/静态地址写入、ICMP Ping、逐跳跟踪、公网流式下载及源地址绑定的链路探测均已移到 `NativeRuntime::dispatch(Effect)`。所有操作均使用 JobId；同一工具的新任务取代旧 generation，core 丢弃迟到结果。Ping 和 Link Quality 的累计统计最多以 4 Hz 进入 UI；Trace 保留 v0.3.1 的 IPv4 逐跳算法；Public Speed 保留三端点顺序、`no_proxy()`、6 秒连接超时和 15 秒总时长。Link Quality 保留按 GUID/MAC/名称识别网卡、每网卡独立参数、无线 RSSI/PHY/速率采样和有线/无线差异化评分，评分纯函数已迁入 core。诊断工具共用 v0.3.1 的目标 MRU 和 Menu/Main/Config 焦点模型，参数继续写入兼容的 session JSON。Adapter 读取与写入共用单许可 blocking gate，确保不可中断的系统写入完成并被等待后，更新的写入才会执行；Traffic 仍使用独立的快速采样路径。Adapter Edit 在 core 与 native 边界各自校验请求，区分永久生效、Linux 运行时临时生效与 Demo 模拟生效；Web 永远只修改确定性场景。旧原生页继续作为兼容迁移桥，共享 `AppModel` 已可直接由这些 native handler 驱动。
 
 错误策略：binary 顶层可用 `anyhow`，领域与 runtime 边界使用强类型错误；结构化日志使用 `tracing`，core 不依赖 tracing。
 
@@ -63,11 +65,12 @@ Scanner、Port Scan、Dashboard、Adapter 读取、Traffic、Adapter Edit、Ping
 
 ## Web、字体与 PWA
 
-Web 默认使用 Canvas，中文自动选择 DOM；`?renderer=canvas` / `?renderer=dom` 可显式覆盖。Ratzilla 0.3.1 通过 `vendor/ratzilla` 保留三个窄补丁：
+Web 默认使用 Canvas，中文自动选择 DOM；`?renderer=canvas` / `?renderer=dom` 可显式覆盖。Ratzilla 0.3.1 通过 `vendor/ratzilla` 保留四个窄补丁：
 
 - Canvas 非 ASCII 裁剪区按 Unicode 宽度扩展，避免中文被切成半个字；
 - DOM resize 交接帧忽略旧 frame 超出新 cell vector 的单元，下一帧由 Ratatui autoresize 对齐。
 - DOM 在全宽字符被替换时恢复其隐藏续格，并禁止续格跨越行边界，避免页面切换后整行逐格左移。
+- DOM 向 Ratatui 报告终端容器的实测行列数而非整个浏览器视口，避免底部日志、状态栏和页脚被布局到不可见单元。
 
 Maple Mono CN 字体以 OFL-1.1 许可分发。Web 只携带项目字符、Latin-1、箭头和框线符号的 WOFF2 子集，避免完整 CJK 字体突破首载预算。
 子集固定使用 Maple Mono NF CN 7.900 的 SHA-256，并由 `scripts/subset-web-font.py` 从共享源码、场景、Web 外壳与语言包重新生成；CI 验证所有必需字符均存在。

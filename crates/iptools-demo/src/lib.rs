@@ -4,10 +4,11 @@ use std::{collections::VecDeque, str::FromStr};
 
 use iptools_core::{
     AdapterApplyOutcome, AdapterInfo, DashboardInterface, DashboardSnapshot, Effect, JobId,
-    LanSpeedRequest, LanSpeedSample, LanSpeedSummary, LinkQualityRequest, LinkQualitySample,
-    LinkQualitySummary, PingRequest, PingSample, PingSummary, PortScanRequest, PublicIpInfo,
-    PublicSpeedRequest, RuntimeError, RuntimeErrorCode, RuntimeEvent, ScanHost, SpeedSample,
-    SpeedSummary, ToolKind, TraceHop, TraceRequest, TrafficRow,
+    LanSpeedRequest, LanSpeedSample, LanSpeedSummary, LinkQualityAdapter, LinkQualityGrade,
+    LinkQualityRequest, LinkQualitySample, LinkQualitySnapshot, LinkQualitySummary, PingRequest,
+    PingSample, PingSummary, PortScanRequest, PublicIpInfo, PublicSpeedRequest, RuntimeError,
+    RuntimeErrorCode, RuntimeEvent, ScanHost, SpeedSample, SpeedSummary, ToolKind, TraceHop,
+    TraceRequest, TrafficRow, WirelessSnapshot,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -385,15 +386,15 @@ impl DemoRuntime {
         );
         for step in 1..=8 {
             let elapsed_ms = request.max_duration_ms.saturating_mul(step) / 8;
-            let bits_per_second = 32_000_000 + step * 6_400_000;
+            let bytes_per_second = 4_000_000 + step * 800_000;
             self.schedule(
                 step * 320,
                 RuntimeEvent::PublicSpeedSample {
                     job,
                     sample: SpeedSample {
                         elapsed_ms,
-                        bytes: bits_per_second / 8 * elapsed_ms / 1_000,
-                        bits_per_second,
+                        bytes: bytes_per_second * elapsed_ms / 1_000,
+                        bytes_per_second,
                     },
                 },
             );
@@ -403,8 +404,8 @@ impl DemoRuntime {
             RuntimeEvent::PublicSpeedFinished {
                 job,
                 summary: SpeedSummary {
-                    average_bps: 73_600_000,
-                    peak_bps: 83_200_000,
+                    average_bytes_per_second: 9_200_000,
+                    peak_bytes_per_second: 10_400_000,
                     total_bytes: 138_000_000,
                 },
             },
@@ -413,34 +414,126 @@ impl DemoRuntime {
 
     fn start_link_quality(&mut self, job: JobId, request: LinkQualityRequest) {
         self.cancel_job(job);
-        self.schedule(0, RuntimeEvent::LinkQualityStarted { job });
-        let count = request.count.min(8);
+        let adapter = request.adapter.or_else(|| {
+            self.scenario.adapters.iter().find_map(|adapter| {
+                (adapter.is_physical && adapter.ipv4.parse::<std::net::Ipv4Addr>().is_ok()).then(
+                    || LinkQualityAdapter {
+                        key: if adapter.guid.is_empty() {
+                            adapter.mac.clone()
+                        } else {
+                            adapter.guid.clone()
+                        },
+                        name: adapter.name.clone(),
+                        guid: adapter.guid.clone(),
+                        ipv4: adapter.ipv4.clone(),
+                        is_wifi: adapter.kind.eq_ignore_ascii_case("wireless")
+                            || adapter.ssid.is_some(),
+                        link_speed_bps: adapter.link_speed_bps,
+                        mac: adapter.mac.clone(),
+                    },
+                )
+            })
+        });
+        let Some(adapter) = adapter else {
+            self.schedule(
+                0,
+                RuntimeEvent::LinkQualityFailed {
+                    job,
+                    error: RuntimeError::new(
+                        RuntimeErrorCode::InvalidRequest,
+                        "no demo adapter is available",
+                    ),
+                },
+            );
+            return;
+        };
+        let degraded = self.scenario.latency_ms > 100;
+        let snapshot = LinkQualitySnapshot {
+            wireless: adapter.is_wifi.then(|| WirelessSnapshot {
+                ssid: self
+                    .scenario
+                    .adapters
+                    .iter()
+                    .find(|candidate| candidate.guid == adapter.guid)
+                    .and_then(|candidate| candidate.ssid.clone())
+                    .unwrap_or_else(|| "Demo Wi-Fi".into()),
+                bssid: "02:AA:BB:CC:DD:01".into(),
+                signal_quality: if degraded { 34 } else { 88 },
+                rssi_dbm: if degraded { -79 } else { -55 },
+                phy_type: "802.11ax · Wi-Fi 6".into(),
+                wifi_generation: 6,
+                band: "5 GHz".into(),
+                channel: 36,
+                frequency_mhz: 5_180,
+                rx_rate_mbps: if degraded { 72 } else { 866 },
+                tx_rate_mbps: if degraded { 58 } else { 780 },
+                authentication: "WPA2-Personal".into(),
+                cipher: "CCMP (AES)".into(),
+            }),
+            adapter,
+        };
+        self.schedule(
+            0,
+            RuntimeEvent::LinkQualityStarted {
+                job,
+                snapshot: Box::new(snapshot.clone()),
+            },
+        );
+        let count = request.count.clamp(5, 8);
+        let mut final_sample = None;
         for sequence in 1..=count {
+            let lost = degraded && sequence % 4 == 0;
+            let received = if degraded {
+                sequence - sequence / 4
+            } else {
+                sequence
+            };
+            let latency = (!lost).then_some(self.scenario.latency_ms + u64::from(sequence % 4));
+            let rssi = snapshot
+                .wireless
+                .as_ref()
+                .map(|wireless| wireless.rssi_dbm - sequence as i32 % 3);
+            let quality = snapshot
+                .wireless
+                .as_ref()
+                .map(|wireless| wireless.signal_quality.saturating_sub(sequence % 3));
+            let sample = LinkQualitySample {
+                sequence,
+                latency_ms: latency,
+                sent: sequence,
+                received,
+                min_latency_ms: Some(self.scenario.latency_ms),
+                average_latency_ms: Some(self.scenario.latency_ms as f64 + 1.5),
+                max_latency_ms: Some(self.scenario.latency_ms + 3),
+                jitter_ms: Some(if degraded { 18.0 } else { 2.0 }),
+                loss_percent: (sequence - received) as f64 * 100.0 / sequence as f64,
+                rssi_dbm: rssi,
+                min_rssi_dbm: rssi.map(|value| value - 2),
+                average_rssi_dbm: rssi.map(|value| value as f64 - 1.0),
+                max_rssi_dbm: rssi,
+                signal_quality: quality,
+                min_signal_quality: quality.map(|value| value.saturating_sub(2)),
+                average_signal_quality: quality.map(|value| value as f64 - 1.0),
+                max_signal_quality: quality,
+                link_speed_bps: snapshot.adapter.link_speed_bps,
+            };
             self.schedule(
                 sequence as u64 * 320,
                 RuntimeEvent::LinkQualitySample {
                     job,
-                    sample: LinkQualitySample {
-                        sequence,
-                        latency_ms: Some(self.scenario.latency_ms as f64 + f64::from(sequence % 4)),
-                        jitter_ms: Some(3.0 + f64::from(sequence % 5)),
-                        loss_percent: f64::from(sequence % 4),
-                        rssi_dbm: Some(-55 - sequence as i16 * 2),
-                    },
+                    sample: sample.clone(),
                 },
             );
+            final_sample = Some(sample);
         }
-        let degraded = self.scenario.latency_ms > 100;
         self.schedule(
             2_900,
             RuntimeEvent::LinkQualityFinished {
                 job,
-                summary: LinkQualitySummary {
-                    score: if degraded { 58.0 } else { 92.0 },
-                    average_latency_ms: Some(self.scenario.latency_ms as f64),
-                    jitter_ms: Some(4.2),
-                    loss_percent: if degraded { 2.5 } else { 0.0 },
-                },
+                summary: iptools_core::link_quality::summary_from_sample(
+                    &snapshot,
+                    &final_sample.expect("demo count is clamped above zero"),
+                ),
             },
         );
     }
@@ -555,7 +648,7 @@ fn event_job(event: &RuntimeEvent) -> Option<JobId> {
         | RuntimeEvent::PublicSpeedSample { job, .. }
         | RuntimeEvent::PublicSpeedFinished { job, .. }
         | RuntimeEvent::PublicSpeedFailed { job, .. }
-        | RuntimeEvent::LinkQualityStarted { job }
+        | RuntimeEvent::LinkQualityStarted { job, .. }
         | RuntimeEvent::LinkQualitySample { job, .. }
         | RuntimeEvent::LinkQualityFinished { job, .. }
         | RuntimeEvent::LinkQualityFailed { job, .. }
@@ -601,8 +694,8 @@ fn cancelled_event(job: JobId) -> RuntimeEvent {
         ToolKind::PublicSpeed => RuntimeEvent::PublicSpeedFinished {
             job,
             summary: SpeedSummary {
-                average_bps: 0,
-                peak_bps: 0,
+                average_bytes_per_second: 0,
+                peak_bytes_per_second: 0,
                 total_bytes: 0,
             },
         },
@@ -610,9 +703,23 @@ fn cancelled_event(job: JobId) -> RuntimeEvent {
             job,
             summary: LinkQualitySummary {
                 score: 0.0,
+                grade: LinkQualityGrade::Poor,
+                weakest: None,
+                dimensions: Vec::new(),
+                sent: 0,
+                received: 0,
+                min_latency_ms: None,
                 average_latency_ms: None,
+                max_latency_ms: None,
                 jitter_ms: None,
                 loss_percent: 0.0,
+                min_rssi_dbm: None,
+                average_rssi_dbm: None,
+                max_rssi_dbm: None,
+                min_signal_quality: None,
+                average_signal_quality: None,
+                max_signal_quality: None,
+                link_speed_bps: None,
             },
         },
         ToolKind::LanSpeed => RuntimeEvent::LanSpeedFinished {

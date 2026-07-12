@@ -193,7 +193,7 @@ impl Default for PublicSpeedRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinkQualityRequest {
-    pub adapter_id: Option<String>,
+    pub adapter: Option<LinkQualityAdapter>,
     pub target: String,
     pub count: u32,
     pub interval_ms: u64,
@@ -204,7 +204,7 @@ pub struct LinkQualityRequest {
 impl Default for LinkQualityRequest {
     fn default() -> Self {
         Self {
-            adapter_id: None,
+            adapter: None,
             target: "8.8.8.8".into(),
             count: 20,
             interval_ms: 200,
@@ -212,6 +212,40 @@ impl Default for LinkQualityRequest {
             packet_size: 32,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkQualityAdapter {
+    pub key: String,
+    pub name: String,
+    pub guid: String,
+    pub ipv4: String,
+    pub is_wifi: bool,
+    pub link_speed_bps: Option<u64>,
+    pub mac: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WirelessSnapshot {
+    pub ssid: String,
+    pub bssid: String,
+    pub signal_quality: u32,
+    pub rssi_dbm: i32,
+    pub phy_type: String,
+    pub wifi_generation: u8,
+    pub band: String,
+    pub channel: u32,
+    pub frequency_mhz: u32,
+    pub rx_rate_mbps: u32,
+    pub tx_rate_mbps: u32,
+    pub authentication: String,
+    pub cipher: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkQualitySnapshot {
+    pub adapter: LinkQualityAdapter,
+    pub wireless: Option<WirelessSnapshot>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -329,8 +363,10 @@ pub enum Effect {
 pub enum SessionUpdate {
     Ping(crate::PingPersist),
     Trace(crate::TracePersist),
+    LinkQuality(crate::LinkQualityPersist),
     TargetHistory(Vec<String>),
     Ui(crate::UiPersist),
+    Reset(crate::UiPersist),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -395,31 +431,83 @@ pub struct TraceHop {
 pub struct SpeedSample {
     pub elapsed_ms: u64,
     pub bytes: u64,
-    pub bits_per_second: u64,
+    pub bytes_per_second: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SpeedSummary {
-    pub average_bps: u64,
-    pub peak_bps: u64,
+    pub average_bytes_per_second: u64,
+    pub peak_bytes_per_second: u64,
     pub total_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LinkQualitySample {
     pub sequence: u32,
-    pub latency_ms: Option<f64>,
+    pub latency_ms: Option<u64>,
+    pub sent: u32,
+    pub received: u32,
+    pub min_latency_ms: Option<u64>,
+    pub average_latency_ms: Option<f64>,
+    pub max_latency_ms: Option<u64>,
     pub jitter_ms: Option<f64>,
     pub loss_percent: f64,
-    pub rssi_dbm: Option<i16>,
+    pub rssi_dbm: Option<i32>,
+    pub min_rssi_dbm: Option<i32>,
+    pub average_rssi_dbm: Option<f64>,
+    pub max_rssi_dbm: Option<i32>,
+    pub signal_quality: Option<u32>,
+    pub min_signal_quality: Option<u32>,
+    pub average_signal_quality: Option<f64>,
+    pub max_signal_quality: Option<u32>,
+    pub link_speed_bps: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LinkQualityGrade {
+    Excellent,
+    Good,
+    Fair,
+    Poor,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LinkQualityDimensionKind {
+    Loss,
+    Latency,
+    Jitter,
+    Signal,
+    Rate,
+    Phy,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LinkQualityDimension {
+    pub kind: LinkQualityDimensionKind,
+    pub score: f64,
+    pub weight: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LinkQualitySummary {
     pub score: f64,
+    pub grade: LinkQualityGrade,
+    pub weakest: Option<LinkQualityDimensionKind>,
+    pub dimensions: Vec<LinkQualityDimension>,
+    pub sent: u32,
+    pub received: u32,
+    pub min_latency_ms: Option<u64>,
     pub average_latency_ms: Option<f64>,
+    pub max_latency_ms: Option<u64>,
     pub jitter_ms: Option<f64>,
     pub loss_percent: f64,
+    pub min_rssi_dbm: Option<i32>,
+    pub average_rssi_dbm: Option<f64>,
+    pub max_rssi_dbm: Option<i32>,
+    pub min_signal_quality: Option<u32>,
+    pub average_signal_quality: Option<f64>,
+    pub max_signal_quality: Option<u32>,
+    pub link_speed_bps: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -580,6 +668,7 @@ pub enum RuntimeEvent {
     },
     LinkQualityStarted {
         job: JobId,
+        snapshot: Box<LinkQualitySnapshot>,
     },
     LinkQualitySample {
         job: JobId,

@@ -72,6 +72,9 @@ impl NativeRuntime {
                                             job,
                                             host: ScanHost {
                                                 ip: ip.to_string(),
+                                                vendor: crate::utils::oui::lookup(&mac)
+                                                    .unwrap_or("-")
+                                                    .to_string(),
                                                 mac,
                                                 hostname,
                                             },
