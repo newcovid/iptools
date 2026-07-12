@@ -16,7 +16,11 @@ an upstream release contains equivalent behavior:
    continuation cell, so without this restoration each page transition can
    permanently remove one `ch` and shift the rest of that row left. A fullwidth
    glyph in the last column also no longer hides the first cell of the next row.
+4. `DomBackend::size` reports the measured terminal parent grid rather than the
+   entire browser viewport. The old mismatch let Ratatui place logs, status and
+   the footer in rows for which the DOM backend had created no cells.
 
 `cargo test --manifest-path vendor/ratzilla/Cargo.toml --lib` covers the pure
-width, resize-index and continuation-boundary decisions. Browser behavior is additionally covered by
+width, resize-index and continuation-boundary decisions. Browser behavior,
+including bottom-row visibility, is additionally covered by
 `crates/iptools-web/tests/e2e.mjs`.

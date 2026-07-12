@@ -24,6 +24,8 @@ mod wasm {
         ui: UiState,
         last_frame_ms: f64,
         input_generation: u64,
+        state_revision: u64,
+        scheduled_revision: Option<u64>,
     }
 
     impl WebApp {
@@ -45,11 +47,14 @@ mod wasm {
                 ui: UiState::default(),
                 last_frame_ms: performance_now(),
                 input_generation: 0,
+                state_revision: 0,
+                scheduled_revision: None,
             })
         }
 
         fn input(&mut self, input: InputEvent) {
             self.input_generation = self.input_generation.saturating_add(1);
+            self.state_revision = self.state_revision.saturating_add(1);
             let previous_language = self.model.language;
             let effects = self.model.update(Message::Input(input));
             self.dispatch(effects);
@@ -72,6 +77,7 @@ mod wasm {
             let effects = self.model.update(Message::Tick(delta));
             self.dispatch(effects);
             for event in self.runtime.advance(delta) {
+                self.state_revision = self.state_revision.saturating_add(1);
                 let effects = self.model.update(Message::Runtime(event));
                 self.dispatch(effects);
             }
@@ -84,6 +90,7 @@ mod wasm {
                     Effect::PersistSession(_) => {}
                     effect => {
                         for event in self.runtime.dispatch(effect) {
+                            self.state_revision = self.state_revision.saturating_add(1);
                             self.model.update(Message::Runtime(event));
                         }
                     }
@@ -166,9 +173,16 @@ mod wasm {
             let mut state = app.borrow_mut();
             state.tick();
             let input_generation = state.input_generation;
+            let state_revision = state.state_revision;
+            let should_mark = state.scheduled_revision != Some(state_revision);
+            if should_mark {
+                state.scheduled_revision = Some(state_revision);
+            }
             let WebApp { model, ui, .. } = &mut *state;
             iptools_ui::render(frame, model, ui);
-            mark_rendered(input_generation);
+            if should_mark {
+                mark_rendered(input_generation, state_revision);
+            }
         });
         focus_terminal();
         Ok(())
@@ -429,15 +443,38 @@ mod wasm {
         }
     }
 
-    fn mark_rendered(input_generation: u64) {
+    fn mark_rendered(input_generation: u64, state_revision: u64) {
         if let Some(terminal) = window()
             .and_then(|value| value.document())
             .and_then(|document| document.get_element_by_id("terminal"))
         {
             let _ = terminal.set_attribute(
-                "data-rendered-input-generation",
+                "data-pending-input-generation",
                 &input_generation.to_string(),
             );
+            let _ =
+                terminal.set_attribute("data-pending-state-revision", &state_revision.to_string());
+            let second_frame = Closure::once_into_js(move || {
+                if let Some(terminal) = window()
+                    .and_then(|value| value.document())
+                    .and_then(|document| document.get_element_by_id("terminal"))
+                {
+                    let _ = terminal.set_attribute(
+                        "data-rendered-input-generation",
+                        &input_generation.to_string(),
+                    );
+                    let _ = terminal
+                        .set_attribute("data-rendered-state-revision", &state_revision.to_string());
+                }
+            });
+            let first_frame = Closure::once_into_js(move || {
+                if let Some(window) = window() {
+                    let _ = window.request_animation_frame(second_frame.unchecked_ref());
+                }
+            });
+            if let Some(window) = window() {
+                let _ = window.request_animation_frame(first_frame.unchecked_ref());
+            }
         }
     }
 

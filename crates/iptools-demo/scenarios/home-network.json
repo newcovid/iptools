@@ -26,10 +26,10 @@
     }
   ],
   "scan_hosts": [
-    { "ip": "192.168.1.1", "mac": "02:AA:00:00:00:01", "hostname": "gateway.demo" },
-    { "ip": "192.168.1.8", "mac": "02:AA:00:00:00:08", "hostname": "nas.demo" },
-    { "ip": "192.168.1.18", "mac": "02:AA:00:00:00:12", "hostname": "living-room.demo" },
-    { "ip": "192.168.1.31", "mac": "02:AA:00:00:00:1F", "hostname": "printer.demo" },
-    { "ip": "192.168.1.52", "mac": "02:AA:00:00:00:34", "hostname": "phone.demo" }
+    { "ip": "192.168.1.1", "mac": "02:AA:00:00:00:01", "vendor": "Demo Networks", "hostname": "gateway.demo" },
+    { "ip": "192.168.1.8", "mac": "02:AA:00:00:00:08", "vendor": "Demo Storage", "hostname": "nas.demo" },
+    { "ip": "192.168.1.18", "mac": "02:AA:00:00:00:12", "vendor": "Demo Media", "hostname": "living-room.demo" },
+    { "ip": "192.168.1.31", "mac": "02:AA:00:00:00:1F", "vendor": "Demo Print", "hostname": "printer.demo" },
+    { "ip": "192.168.1.52", "mac": "02:AA:00:00:00:34", "vendor": "Demo Mobile", "hostname": "phone.demo" }
   ]
 }

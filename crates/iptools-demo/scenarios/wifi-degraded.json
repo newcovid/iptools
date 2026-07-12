@@ -19,8 +19,8 @@
     }
   ],
   "scan_hosts": [
-    { "ip": "192.168.50.1", "mac": "02:BB:00:00:00:01", "hostname": "mesh-gateway.demo" },
-    { "ip": "192.168.50.12", "mac": "02:BB:00:00:00:0C", "hostname": "camera.demo" },
-    { "ip": "192.168.50.44", "mac": "02:BB:00:00:00:2C", "hostname": "tablet.demo" }
+    { "ip": "192.168.50.1", "mac": "02:BB:00:00:00:01", "vendor": "Demo Mesh", "hostname": "mesh-gateway.demo" },
+    { "ip": "192.168.50.12", "mac": "02:BB:00:00:00:0C", "vendor": "Demo Vision", "hostname": "camera.demo" },
+    { "ip": "192.168.50.44", "mac": "02:BB:00:00:00:2C", "vendor": "Demo Mobile", "hostname": "tablet.demo" }
   ]
 }

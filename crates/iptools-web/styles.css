@@ -17,9 +17,11 @@
 
 body {
   margin: 0;
+  height: 100vh;
   min-height: 100vh;
+  overflow: hidden;
   display: grid;
-  grid-template-rows: auto auto minmax(420px, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   gap: .5rem;
   padding: max(.75rem, env(safe-area-inset-top)) max(.75rem, env(safe-area-inset-right)) max(.75rem, env(safe-area-inset-bottom)) max(.75rem, env(safe-area-inset-left));
   background: radial-gradient(circle at top, #122638 0, #081018 55%);
@@ -50,7 +52,7 @@ button:hover, a:hover, select:hover { border-color: #5ee8ff; }
 
 #terminal {
   min-width: 0;
-  min-height: 420px;
+  min-height: 0;
   overflow: hidden;
   border: 1px solid #29465c;
   border-radius: .55rem;
@@ -91,6 +93,11 @@ button:hover, a:hover, select:hover { border-color: #5ee8ff; }
 
 @media (max-width: 720px) and (orientation: portrait) {
   .rotate { display: block; }
+  body {
+    height: auto;
+    overflow: auto;
+    grid-template-rows: auto auto minmax(360px, 1fr) auto;
+  }
   #terminal { min-height: 360px; }
   header { align-items: flex-start; flex-direction: column; }
 }
