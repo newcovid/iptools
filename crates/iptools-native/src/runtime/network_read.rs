@@ -211,6 +211,7 @@ fn adapter_info(interface: net::InterfaceInfo, point: Option<NetworkPoint>) -> A
         guid: interface.guid,
         kind: interface.interface_type,
         ipv4: interface.ipv4.first().cloned().unwrap_or_default(),
+        cidr: interface.cidr,
         ipv6: interface.ipv6,
         mac: interface.mac,
         status: if interface.is_up { "up" } else { "down" }.into(),

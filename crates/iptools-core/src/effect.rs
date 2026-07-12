@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AdapterConfig, AdapterInfo, DashboardSnapshot, DiagnosticTool, PublicIpConfig, ScanHost,
+    AdapterEditParams, AdapterInfo, DashboardSnapshot, DiagnosticTool, PublicIpConfig, ScanHost,
     TrafficRow,
 };
 
@@ -21,6 +21,7 @@ pub struct JobId {
 pub enum ToolKind {
     Dashboard,
     Adapters,
+    AdapterEdit,
     Traffic,
     Scanner,
     Ping,
@@ -34,6 +35,71 @@ pub enum ToolKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct DashboardRequest {
     pub public_ip: PublicIpConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdapterConfigRequest {
+    pub guid: String,
+    pub name: String,
+    pub use_dhcp: bool,
+    pub ip: String,
+    pub mask: String,
+    pub gateway: Option<String>,
+    pub dns: Vec<String>,
+}
+
+impl AdapterConfigRequest {
+    pub fn validate(&self) -> Result<(), AdapterValidationError> {
+        if self.use_dhcp {
+            return Ok(());
+        }
+        self.ip
+            .parse::<std::net::Ipv4Addr>()
+            .map_err(|_| AdapterValidationError::Ipv4)?;
+        let mask = self
+            .mask
+            .parse::<std::net::Ipv4Addr>()
+            .map(u32::from)
+            .map_err(|_| AdapterValidationError::Mask)?;
+        let prefix = mask.leading_ones();
+        if !(1..=31).contains(&prefix) || mask != u32::MAX << (32 - prefix) {
+            return Err(AdapterValidationError::Mask);
+        }
+        if self
+            .gateway
+            .as_deref()
+            .is_some_and(|value| value.parse::<std::net::Ipv4Addr>().is_err())
+        {
+            return Err(AdapterValidationError::Gateway);
+        }
+        if self
+            .dns
+            .iter()
+            .any(|value| value.parse::<std::net::Ipv4Addr>().is_err())
+        {
+            return Err(AdapterValidationError::Dns);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AdapterApplyOutcome {
+    Persistent,
+    RuntimeOnly,
+    Simulated,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+pub enum AdapterValidationError {
+    #[error("invalid IPv4 address")]
+    Ipv4,
+    #[error("subnet mask must be contiguous and cannot be /0 or /32")]
+    Mask,
+    #[error("invalid gateway address")]
+    Gateway,
+    #[error("invalid DNS address")]
+    Dns,
 }
 
 impl From<DiagnosticTool> for ToolKind {
@@ -202,6 +268,11 @@ impl Default for LanSpeedRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
     PersistPreferences(Preferences),
+    PersistAdapterEdit {
+        guid: String,
+        params: AdapterEditParams,
+        history: Vec<String>,
+    },
     RefreshDashboard {
         job: JobId,
         request: DashboardRequest,
@@ -212,7 +283,10 @@ pub enum Effect {
     RefreshTraffic {
         job: JobId,
     },
-    ApplyAdapterConfig(AdapterConfig),
+    ApplyAdapterConfig {
+        job: JobId,
+        request: AdapterConfigRequest,
+    },
     StartScan {
         job: JobId,
         request: ScanRequest,
@@ -390,7 +464,17 @@ pub enum RuntimeEvent {
     TrafficRefreshCancelled {
         job: JobId,
     },
-    AdapterConfigApplied(Result<String, String>),
+    AdapterConfigStarted {
+        job: JobId,
+    },
+    AdapterConfigFinished {
+        job: JobId,
+        outcome: AdapterApplyOutcome,
+    },
+    AdapterConfigFailed {
+        job: JobId,
+        error: RuntimeError,
+    },
     ScanStarted {
         job: JobId,
         total: u64,

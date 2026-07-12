@@ -75,6 +75,15 @@ fn dispatch_effects(
                 config.scan_concurrency = preferences.scan_concurrency;
                 config.save();
             }
+            Effect::PersistAdapterEdit {
+                guid,
+                params,
+                history,
+            } => {
+                config.session.adapter_edit.adapters.insert(guid, params);
+                config.session.history.adapter = history;
+                config.save();
+            }
             effect => {
                 for event in runtime.dispatch(effect) {
                     model.update(Message::Runtime(event));
@@ -145,7 +154,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use iptools_core::{Language, Preferences};
+    use iptools_core::{AdapterEditParams, Language, Preferences};
 
     use super::*;
 
@@ -176,6 +185,47 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(saved.language, Language::Zh);
         assert_eq!(saved.scan_concurrency, 120);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn native_demo_persists_guid_scoped_adapter_form_without_real_network_io() {
+        let path = std::env::temp_dir().join(format!(
+            "iptools-demo-adapter-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut config = Config::load(Some(path.to_str().unwrap()));
+        let mut model = AppModel::default();
+        let mut runtime = DemoRuntime::new(ScenarioId::HomeNetwork).unwrap();
+        let params = AdapterEditParams {
+            use_dhcp: false,
+            ip: "10.0.0.8".into(),
+            mask: "255.255.255.0".into(),
+            gateway: "10.0.0.1".into(),
+            dns1: "1.1.1.1".into(),
+            dns2: String::new(),
+        };
+        dispatch_effects(
+            &mut model,
+            &mut runtime,
+            &mut config,
+            vec![Effect::PersistAdapterEdit {
+                guid: "demo-ethernet".into(),
+                params: params.clone(),
+                history: vec!["10.0.0.8".into()],
+            }],
+        );
+        let saved: iptools_core::ConfigData =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            saved.session.adapter_edit.adapters.get("demo-ethernet"),
+            Some(&params)
+        );
+        assert_eq!(saved.session.history.adapter, ["10.0.0.8"]);
         std::fs::remove_file(path).unwrap();
     }
 }
