@@ -6,9 +6,24 @@
   "upload_bps": 1572864,
   "latency_ms": 18,
   "adapters": [
-    { "name": "Ethernet", "kind": "wired", "ipv4": "192.168.1.20", "mac": "02:11:22:33:44:10", "status": "up · 1 Gbps" },
-    { "name": "Wi-Fi", "kind": "wireless", "ipv4": "192.168.1.21", "mac": "02:11:22:33:44:11", "status": "up · HomeLab" },
-    { "name": "VPN", "kind": "virtual", "ipv4": "10.8.0.2", "mac": "02:11:22:33:44:12", "status": "standby" }
+    {
+      "name": "Ethernet", "description": "Intel 2.5GbE Controller", "guid": "demo-ethernet",
+      "kind": "wired", "ipv4": "192.168.1.20", "mac": "02:11:22:33:44:10", "status": "up · 1 Gbps",
+      "dhcp_enabled": true, "is_physical": true, "link_speed_bps": 1000000000,
+      "download_bps": 6291456, "upload_bps": 1048576, "total_download": 8589934592, "total_upload": 1610612736
+    },
+    {
+      "name": "Wi-Fi", "description": "Wi-Fi 6 wireless adapter", "guid": "demo-wifi",
+      "kind": "wireless", "ipv4": "192.168.1.21", "mac": "02:11:22:33:44:11", "status": "up · HomeLab",
+      "ssid": "HomeLab", "dhcp_enabled": true, "is_physical": true, "link_speed_bps": 866000000,
+      "download_bps": 2097152, "upload_bps": 524288, "total_download": 3221225472, "total_upload": 805306368
+    },
+    {
+      "name": "VPN", "description": "WireGuard tunnel", "guid": "demo-vpn",
+      "kind": "virtual", "ipv4": "10.8.0.2", "mac": "02:11:22:33:44:12", "status": "standby",
+      "dhcp_enabled": false, "is_physical": false, "download_bps": 65536, "upload_bps": 32768,
+      "total_download": 268435456, "total_upload": 134217728
+    }
   ],
   "scan_hosts": [
     { "ip": "192.168.1.1", "mac": "02:AA:00:00:00:01", "hostname": "gateway.demo" },

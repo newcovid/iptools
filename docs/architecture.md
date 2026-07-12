@@ -53,7 +53,7 @@ Web 和 native `--demo` 使用 `iptools-demo::DemoRuntime` 的固定 seed 与定
 
 真实原生页面的既有网络算法暂时保留在 `iptools-native/src/modules` 和 `utils` 中，作为兼容迁移桥；新增跨端行为必须进入 core/ui/runtime 边界，不能继续增加 detached spawn 或无界通道。迁移桥删除前，真实网络算法行为不得因 Web 展览而改变。
 
-Scanner、Port Scan 与 Dashboard 已进入阶段 3 的垂直切片：ARP/主机名解析、TCP 连接扫描，以及 Dashboard 的系统/网卡采样、代理探测和多公网端点回退已移到 `NativeRuntime::dispatch(Effect)`。Dashboard 使用强类型 `DashboardRequest/DashboardSnapshot` 与 JobId；刷新会取消旧 generation，core 丢弃迟到结果。旧原生页继续作为兼容迁移桥，共享 `AppModel` 已可直接由这些 native handler 驱动。
+Scanner、Port Scan、Dashboard、Adapter 读取与 Traffic 已进入阶段 3 的垂直切片：ARP/主机名解析、TCP 连接扫描、Dashboard 的系统/公网信息，以及适配器枚举和流量采样已移到 `NativeRuntime::dispatch(Effect)`。所有刷新均使用 JobId；同一工具的新刷新取消旧 generation，core 丢弃迟到结果。Adapter 与 Traffic 共用速率、累计量和会话基线采样器，但慢速平台适配器枚举通过单许可 blocking gate 串行执行，不阻塞快速 Traffic 刷新。旧原生页继续作为兼容迁移桥，共享 `AppModel` 已可直接由这些 native handler 驱动。
 
 错误策略：binary 顶层可用 `anyhow`，领域与 runtime 边界使用强类型错误；结构化日志使用 `tracing`，core 不依赖 tracing。
 
@@ -63,10 +63,11 @@ Scanner、Port Scan 与 Dashboard 已进入阶段 3 的垂直切片：ARP/主机
 
 ## Web、字体与 PWA
 
-Web 默认使用 Canvas，中文自动选择 DOM；`?renderer=canvas` / `?renderer=dom` 可显式覆盖。Ratzilla 0.3.1 通过 `vendor/ratzilla` 保留两个窄补丁：
+Web 默认使用 Canvas，中文自动选择 DOM；`?renderer=canvas` / `?renderer=dom` 可显式覆盖。Ratzilla 0.3.1 通过 `vendor/ratzilla` 保留三个窄补丁：
 
 - Canvas 非 ASCII 裁剪区按 Unicode 宽度扩展，避免中文被切成半个字；
 - DOM resize 交接帧忽略旧 frame 超出新 cell vector 的单元，下一帧由 Ratatui autoresize 对齐。
+- DOM 在全宽字符被替换时恢复其隐藏续格，并禁止续格跨越行边界，避免页面切换后整行逐格左移。
 
 Maple Mono CN 字体以 OFL-1.1 许可分发。Web 只携带项目字符、Latin-1、箭头和框线符号的 WOFF2 子集，避免完整 CJK 字体突破首载预算。
 子集固定使用 Maple Mono NF CN 7.900 的 SHA-256，并由 `scripts/subset-web-font.py` 从共享源码、场景、Web 外壳与语言包重新生成；CI 验证所有必需字符均存在。

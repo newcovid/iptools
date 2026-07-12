@@ -99,12 +99,33 @@ impl DiagnosticTool {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct AdapterInfo {
     pub name: String,
+    pub description: String,
+    pub guid: String,
     pub kind: String,
     pub ipv4: String,
+    pub ipv6: Vec<String>,
     pub mac: String,
     pub status: String,
+    pub ssid: Option<String>,
+    pub dhcp_enabled: bool,
+    pub is_physical: bool,
+    pub link_speed_bps: Option<u64>,
+    pub download_bps: u64,
+    pub upload_bps: u64,
+    pub total_download: u64,
+    pub total_upload: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct AdaptersState {
+    pub items: Vec<AdapterInfo>,
+    pub selected: usize,
+    pub status: TaskStatus,
+    pub error: Option<crate::RuntimeError>,
+    pub job: Option<JobId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -117,12 +138,24 @@ pub struct AdapterConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct TrafficRow {
     pub name: String,
     pub download_bps: u64,
     pub upload_bps: u64,
     pub total_download: u64,
     pub total_upload: u64,
+    pub session_download: u64,
+    pub session_upload: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct TrafficState {
+    pub rows: Vec<TrafficRow>,
+    pub selected: usize,
+    pub status: TaskStatus,
+    pub error: Option<crate::RuntimeError>,
+    pub job: Option<JobId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -366,10 +399,9 @@ pub struct AppModel {
     pub language: Language,
     pub show_help: bool,
     pub dashboard: DashboardState,
-    pub adapters: Vec<AdapterInfo>,
-    pub adapter_selected: usize,
+    pub adapters: AdaptersState,
     pub scanner: ScannerState,
-    pub traffic: Vec<TrafficRow>,
+    pub traffic: TrafficState,
     pub diagnostics: DiagnosticsState,
     pub scan_concurrency: usize,
     #[serde(default)]
@@ -387,10 +419,9 @@ impl Default for AppModel {
             language: Language::En,
             show_help: false,
             dashboard: DashboardState::default(),
-            adapters: Vec::new(),
-            adapter_selected: 0,
+            adapters: AdaptersState::default(),
             scanner: ScannerState::default(),
-            traffic: Vec::new(),
+            traffic: TrafficState::default(),
             diagnostics: DiagnosticsState::default(),
             scan_concurrency: 50,
             public_ip_config: crate::PublicIpConfig::default(),
@@ -480,8 +511,9 @@ impl AppModel {
             Refresh => {
                 return match self.page {
                     Page::Dashboard => self.refresh_dashboard(),
-                    Page::Adapters => vec![Effect::RefreshAdapters],
-                    _ => Vec::new(),
+                    Page::Adapters => self.refresh_adapters(),
+                    Page::Traffic => self.refresh_traffic(),
+                    Page::Scanner | Page::Diagnostics | Page::Settings => Vec::new(),
                 };
             }
             Edit if self.page == Page::Scanner => self.scanner.editing = true,
@@ -507,8 +539,12 @@ impl AppModel {
 
     fn navigate(&mut self, delta: isize) {
         match self.page {
-            Page::Adapters if !self.adapters.is_empty() => {
-                self.adapter_selected = wrap(self.adapter_selected, self.adapters.len(), delta)
+            Page::Adapters if !self.adapters.items.is_empty() => {
+                self.adapters.selected =
+                    wrap(self.adapters.selected, self.adapters.items.len(), delta)
+            }
+            Page::Traffic if !self.traffic.rows.is_empty() => {
+                self.traffic.selected = wrap(self.traffic.selected, self.traffic.rows.len(), delta)
             }
             Page::Scanner if !self.scanner.results.is_empty() => {
                 self.scanner.selected =
@@ -545,6 +581,22 @@ impl AppModel {
                 public_ip: self.public_ip_config.clone(),
             },
         }]
+    }
+
+    fn refresh_adapters(&mut self) -> Vec<Effect> {
+        let job = self.next_job(ToolKind::Adapters);
+        self.adapters.job = Some(job);
+        self.adapters.status = TaskStatus::Running;
+        self.adapters.error = None;
+        vec![Effect::RefreshAdapters { job }]
+    }
+
+    fn refresh_traffic(&mut self) -> Vec<Effect> {
+        let job = self.next_job(ToolKind::Traffic);
+        self.traffic.job = Some(job);
+        self.traffic.status = TaskStatus::Running;
+        self.traffic.error = None;
+        vec![Effect::RefreshTraffic { job }]
     }
 
     fn toggle_scan(&mut self) -> Vec<Effect> {
@@ -666,8 +718,60 @@ impl AppModel {
                 self.dashboard.status = TaskStatus::Done;
                 self.dashboard.job = None;
             }
-            RuntimeEvent::AdaptersUpdated(adapters) => self.adapters = adapters,
-            RuntimeEvent::TrafficUpdated(rows) => self.traffic = rows,
+            RuntimeEvent::AdaptersUpdated(adapters) => self.adapters.items = adapters,
+            RuntimeEvent::TrafficUpdated(rows) => self.traffic.rows = rows,
+            RuntimeEvent::AdaptersRefreshFinished { job, adapters }
+                if self.adapters.job == Some(job) =>
+            {
+                let selected_name = self
+                    .adapters
+                    .items
+                    .get(self.adapters.selected)
+                    .map(|adapter| adapter.name.as_str());
+                self.adapters.selected = selected_name
+                    .and_then(|name| adapters.iter().position(|adapter| adapter.name == name))
+                    .unwrap_or(0)
+                    .min(adapters.len().saturating_sub(1));
+                self.adapters.items = adapters;
+                self.adapters.status = TaskStatus::Done;
+                self.adapters.error = None;
+                self.adapters.job = None;
+            }
+            RuntimeEvent::AdaptersRefreshFailed { job, error }
+                if self.adapters.job == Some(job) =>
+            {
+                self.adapters.status = TaskStatus::Failed(error.message.clone());
+                self.adapters.error = Some(error);
+                self.adapters.job = None;
+            }
+            RuntimeEvent::AdaptersRefreshCancelled { job } if self.adapters.job == Some(job) => {
+                self.adapters.status = TaskStatus::Done;
+                self.adapters.job = None;
+            }
+            RuntimeEvent::TrafficRefreshFinished { job, rows } if self.traffic.job == Some(job) => {
+                let selected_name = self
+                    .traffic
+                    .rows
+                    .get(self.traffic.selected)
+                    .map(|row| row.name.as_str());
+                self.traffic.selected = selected_name
+                    .and_then(|name| rows.iter().position(|row| row.name == name))
+                    .unwrap_or(0)
+                    .min(rows.len().saturating_sub(1));
+                self.traffic.rows = rows;
+                self.traffic.status = TaskStatus::Done;
+                self.traffic.error = None;
+                self.traffic.job = None;
+            }
+            RuntimeEvent::TrafficRefreshFailed { job, error } if self.traffic.job == Some(job) => {
+                self.traffic.status = TaskStatus::Failed(error.message.clone());
+                self.traffic.error = Some(error);
+                self.traffic.job = None;
+            }
+            RuntimeEvent::TrafficRefreshCancelled { job } if self.traffic.job == Some(job) => {
+                self.traffic.status = TaskStatus::Done;
+                self.traffic.job = None;
+            }
             RuntimeEvent::AdapterConfigApplied(_) => {}
             RuntimeEvent::ScanStarted { job, total } if self.scanner.job == Some(job) => {
                 self.scanner.total = total;
@@ -956,6 +1060,9 @@ fn wrap(current: usize, len: usize, delta: isize) -> usize {
 fn stop_effect(job: JobId) -> Effect {
     match job.tool {
         ToolKind::Dashboard => unreachable!("dashboard refreshes are not diagnostic jobs"),
+        ToolKind::Adapters | ToolKind::Traffic => {
+            unreachable!("read-only refreshes are not diagnostic jobs")
+        }
         ToolKind::Ping => Effect::StopPing(job),
         ToolKind::Trace => Effect::StopTrace(job),
         ToolKind::PortScan => Effect::StopPortScan(job),
@@ -1185,6 +1292,86 @@ mod tests {
             app.dashboard.error.as_ref().unwrap().code,
             crate::RuntimeErrorCode::Network
         );
+    }
+
+    #[test]
+    fn adapter_and_traffic_refreshes_are_job_scoped_and_preserve_selection() {
+        let mut app = AppModel {
+            page: Page::Adapters,
+            ..AppModel::default()
+        };
+        app.adapters.items = vec![
+            AdapterInfo {
+                name: "Ethernet".into(),
+                ..AdapterInfo::default()
+            },
+            AdapterInfo {
+                name: "Wi-Fi".into(),
+                ..AdapterInfo::default()
+            },
+        ];
+        app.adapters.selected = 1;
+        let [first_effect] = app
+            .update(Input(InputEvent::Action(Action::Refresh)))
+            .try_into()
+            .unwrap();
+        let first = match first_effect {
+            Effect::RefreshAdapters { job } => job,
+            other => panic!("unexpected effect: {other:?}"),
+        };
+        let [second_effect] = app
+            .update(Input(InputEvent::Action(Action::Refresh)))
+            .try_into()
+            .unwrap();
+        let second = match second_effect {
+            Effect::RefreshAdapters { job } => job,
+            other => panic!("unexpected effect: {other:?}"),
+        };
+        app.update(Runtime(RuntimeEvent::AdaptersRefreshFinished {
+            job: first,
+            adapters: vec![AdapterInfo {
+                name: "stale".into(),
+                ..AdapterInfo::default()
+            }],
+        }));
+        assert_eq!(app.adapters.job, Some(second));
+        assert_eq!(app.adapters.items[1].name, "Wi-Fi");
+
+        app.update(Runtime(RuntimeEvent::AdaptersRefreshFinished {
+            job: second,
+            adapters: vec![
+                AdapterInfo {
+                    name: "Wi-Fi".into(),
+                    ..AdapterInfo::default()
+                },
+                AdapterInfo {
+                    name: "Ethernet".into(),
+                    ..AdapterInfo::default()
+                },
+            ],
+        }));
+        assert_eq!(app.adapters.selected, 0);
+        assert_eq!(app.adapters.status, TaskStatus::Done);
+
+        app.page = Page::Traffic;
+        let [effect] = app
+            .update(Input(InputEvent::Action(Action::Refresh)))
+            .try_into()
+            .unwrap();
+        let job = match effect {
+            Effect::RefreshTraffic { job } => job,
+            other => panic!("unexpected effect: {other:?}"),
+        };
+        app.update(Runtime(RuntimeEvent::TrafficRefreshFinished {
+            job,
+            rows: vec![TrafficRow {
+                name: "Wi-Fi".into(),
+                download_bps: 1_024,
+                ..TrafficRow::default()
+            }],
+        }));
+        assert_eq!(app.traffic.rows[0].download_bps, 1_024);
+        assert_eq!(app.traffic.status, TaskStatus::Done);
     }
 
     #[test]

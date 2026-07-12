@@ -241,21 +241,28 @@ fn render_dashboard(frame: &mut Frame, area: Rect, model: &AppModel) {
 }
 
 fn render_adapters(frame: &mut Frame, area: Rect, model: &AppModel) {
-    let rows = model.adapters.iter().enumerate().map(|(index, adapter)| {
-        let style = if index == model.adapter_selected {
-            Style::default().bg(SELECTED)
-        } else {
-            Style::default()
-        };
-        Row::new(vec![
-            Cell::from(adapter.name.clone()),
-            Cell::from(adapter.kind.clone()),
-            Cell::from(adapter.ipv4.clone()),
-            Cell::from(adapter.mac.clone()),
-            Cell::from(adapter.status.clone()),
-        ])
-        .style(style)
-    });
+    let areas =
+        Layout::vertical([Constraint::Percentage(58), Constraint::Percentage(42)]).split(area);
+    let rows = model
+        .adapters
+        .items
+        .iter()
+        .enumerate()
+        .map(|(index, adapter)| {
+            let style = if index == model.adapters.selected {
+                Style::default().bg(SELECTED)
+            } else {
+                Style::default()
+            };
+            Row::new(vec![
+                Cell::from(adapter.name.clone()),
+                Cell::from(adapter.kind.clone()),
+                Cell::from(adapter.ipv4.clone()),
+                Cell::from(adapter.mac.clone()),
+                Cell::from(adapter.status.clone()),
+            ])
+            .style(style)
+        });
     frame.render_widget(
         Table::new(
             rows,
@@ -271,8 +278,75 @@ fn render_adapters(frame: &mut Frame, area: Rect, model: &AppModel) {
             Row::new(["Adapter", "Type", "IPv4", "MAC", "Status"])
                 .style(Style::default().fg(PRIMARY).add_modifier(Modifier::BOLD)),
         )
-        .block(Block::bordered().title(tr(model.language, " 适配器 ", " Adapters "))),
-        area,
+        .block(Block::bordered().title(format!(
+            " {} · {} ",
+            tr(model.language, "适配器", "Adapters"),
+            task_label(&model.adapters.status, model.language).trim()
+        ))),
+        areas[0],
+    );
+
+    let details = model
+        .adapters
+        .items
+        .get(model.adapters.selected)
+        .map(|adapter| {
+            vec![
+                line(
+                    tr(model.language, "描述", "Description"),
+                    &adapter.description,
+                ),
+                line(
+                    "SSID",
+                    adapter
+                        .ssid
+                        .as_deref()
+                        .unwrap_or(tr(model.language, "无", "none")),
+                ),
+                line(
+                    tr(model.language, "寻址", "Addressing"),
+                    if adapter.dhcp_enabled {
+                        "DHCP"
+                    } else {
+                        "static"
+                    },
+                ),
+                line(
+                    tr(model.language, "链路速率", "Link rate"),
+                    &adapter
+                        .link_speed_bps
+                        .map_or_else(|| "—".into(), |bits| format_rate(bits.saturating_div(8))),
+                ),
+                line(
+                    tr(model.language, "实时流量", "Live traffic"),
+                    &format!(
+                        "↓ {}  ↑ {}",
+                        format_rate(adapter.download_bps),
+                        format_rate(adapter.upload_bps)
+                    ),
+                ),
+                line(
+                    tr(model.language, "累计流量", "Totals"),
+                    &format!(
+                        "↓ {}  ↑ {}",
+                        format_bytes(adapter.total_download),
+                        format_bytes(adapter.total_upload)
+                    ),
+                ),
+            ]
+        })
+        .unwrap_or_else(|| {
+            vec![Line::from(tr(
+                model.language,
+                "未发现网络适配器。",
+                "No network adapters detected.",
+            ))]
+        });
+    frame.render_widget(
+        Paragraph::new(details)
+            .block(Block::bordered().title(tr(model.language, " 详情 ", " Details ")))
+            .wrap(Wrap { trim: true }),
+        areas[1],
     );
 }
 
@@ -355,14 +429,27 @@ fn render_scanner(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut UiSt
 }
 
 fn render_traffic(frame: &mut Frame, area: Rect, model: &AppModel) {
-    let rows = model.traffic.iter().map(|row| {
+    let rows = model.traffic.rows.iter().enumerate().map(|(index, row)| {
         Row::new(vec![
             row.name.clone(),
             format_rate(row.download_bps),
             format_rate(row.upload_bps),
-            format_bytes(row.total_download),
-            format_bytes(row.total_upload),
+            format!(
+                "{} / {}",
+                format_bytes(row.session_download),
+                format_bytes(row.session_upload)
+            ),
+            format!(
+                "{} / {}",
+                format_bytes(row.total_download),
+                format_bytes(row.total_upload)
+            ),
         ])
+        .style(if index == model.traffic.selected {
+            Style::default().bg(SELECTED)
+        } else {
+            Style::default()
+        })
     });
     frame.render_widget(
         Table::new(
@@ -376,10 +463,20 @@ fn render_traffic(frame: &mut Frame, area: Rect, model: &AppModel) {
             ],
         )
         .header(
-            Row::new(["Adapter", "Download", "Upload", "Total RX", "Total TX"])
-                .style(Style::default().fg(PRIMARY)),
+            Row::new([
+                "Adapter",
+                "Download",
+                "Upload",
+                "Session RX/TX",
+                "Total RX/TX",
+            ])
+            .style(Style::default().fg(PRIMARY)),
         )
-        .block(Block::bordered().title(tr(model.language, " 实时流量 ", " Live Traffic "))),
+        .block(Block::bordered().title(format!(
+            " {} · {} ",
+            tr(model.language, "实时流量", "Live Traffic"),
+            task_label(&model.traffic.status, model.language).trim()
+        ))),
         area,
     );
 }
@@ -677,6 +774,62 @@ mod tests {
                     assert!(text.contains("demo-router"));
                     assert!(text.contains("203.0.113.10"));
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn adapter_and_traffic_states_render_in_both_languages_and_compact_sizes() {
+        for (width, height) in [(80, 24), (120, 36)] {
+            for language in [Language::En, Language::Zh] {
+                let mut model = AppModel::default();
+                model.language = language;
+                model.page = Page::Adapters;
+                model.adapters.items = vec![iptools_core::AdapterInfo {
+                    name: "Wi-Fi".into(),
+                    description: "Wireless LAN adapter".into(),
+                    kind: "wireless".into(),
+                    ipv4: "192.168.1.20".into(),
+                    mac: "02:11:22:33:44:55".into(),
+                    status: "up".into(),
+                    ssid: Some("实验网络".into()),
+                    dhcp_enabled: true,
+                    is_physical: true,
+                    link_speed_bps: Some(866_000_000),
+                    download_bps: 1_048_576,
+                    upload_bps: 262_144,
+                    total_download: 8_589_934_592,
+                    total_upload: 1_610_612_736,
+                    ..iptools_core::AdapterInfo::default()
+                }];
+                model.adapters.status = TaskStatus::Done;
+                let backend = TestBackend::new(width, height);
+                let mut terminal = Terminal::new(backend).unwrap();
+                let mut ui = UiState::default();
+                terminal
+                    .draw(|frame| render(frame, &model, &mut ui))
+                    .unwrap();
+                let text = terminal.backend().to_string();
+                assert!(text.contains("192.168.1.20"), "{text}");
+                assert!(text.contains("Wireless LAN"), "{text}");
+
+                model.page = Page::Traffic;
+                model.traffic.rows = vec![iptools_core::TrafficRow {
+                    name: "Wi-Fi".into(),
+                    download_bps: 1_048_576,
+                    upload_bps: 262_144,
+                    total_download: 8_589_934_592,
+                    total_upload: 1_610_612_736,
+                    session_download: 734_003_200,
+                    session_upload: 125_829_120,
+                }];
+                model.traffic.status = TaskStatus::Running;
+                terminal
+                    .draw(|frame| render(frame, &model, &mut ui))
+                    .unwrap();
+                let text = terminal.backend().to_string();
+                assert!(text.contains("Wi-Fi"));
+                assert!(text.contains("1.0 MiB/s"));
             }
         }
     }

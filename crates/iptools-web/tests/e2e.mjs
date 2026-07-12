@@ -33,7 +33,7 @@ try {
   );
   await page.screenshot({
     path: "../../target/playwright-web-demo-font-fixed.png",
-    fullPage: true,
+    fullPage: false,
   });
 
   assert.equal(
@@ -63,6 +63,16 @@ try {
   await page.waitForTimeout(150);
   const afterTab = hash(await page.locator("#terminal").screenshot());
   assert.notEqual(afterTab, before, "Tab should switch the rendered page");
+  await page.keyboard.press("r");
+  await page.waitForFunction(() => {
+    const text = document.getElementById("terminal")?.textContent ?? "";
+    return text.includes("192.168.50.37") && text.includes("完成");
+  });
+  await page.waitForTimeout(250);
+  await page.screenshot({
+    path: "../../target/playwright-web-adapter-zh.png",
+    fullPage: false,
+  });
 
   await page.keyboard.press("Tab");
   await page.keyboard.press("Space");
@@ -200,6 +210,36 @@ try {
   );
   assert.match(await settingsPage.locator("#terminal").textContent(), /Scan concurrency\s+60/);
   await settingsPage.close();
+
+  const trafficPage = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  await trafficPage.goto(`${baseURL}?scenario=multi-adapter&lang=en&renderer=dom`, {
+    waitUntil: "domcontentloaded",
+  });
+  await trafficPage.waitForSelector("#terminal");
+  await trafficPage.waitForFunction(() =>
+    document.getElementById("terminal")?.textContent?.includes("Dashboard"),
+  );
+  const trafficNextPage = trafficPage.getByRole("button", { name: "Tab", exact: true });
+  for (let index = 0; index < 3; index += 1) {
+    const generation = Number(
+      await trafficPage.locator("#terminal").getAttribute("data-rendered-input-generation"),
+    );
+    await trafficNextPage.click();
+    await trafficPage.waitForFunction(
+      (previous) =>
+        Number(document.getElementById("terminal")?.dataset.renderedInputGeneration) > previous,
+      generation,
+    );
+  }
+  await trafficPage.waitForFunction(() =>
+    document.getElementById("terminal")?.textContent?.includes("Live Traffic"),
+  );
+  await trafficPage.keyboard.press("r");
+  await trafficPage.waitForFunction(() => {
+    const text = document.getElementById("terminal")?.textContent ?? "";
+    return text.includes("Done") && text.includes("Ethernet");
+  });
+  await trafficPage.close();
 
   const narrowPage = await browser.newPage({ viewport: { width: 390, height: 844 } });
   await narrowPage.goto(`${baseURL}?lang=zh`, { waitUntil: "domcontentloaded" });

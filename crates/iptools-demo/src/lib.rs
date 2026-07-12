@@ -116,9 +116,16 @@ impl DemoRuntime {
                     snapshot: Box::new(self.dashboard_snapshot()),
                 }]
             }
-            Effect::RefreshAdapters => vec![RuntimeEvent::AdaptersUpdated(
-                self.scenario.adapters.clone(),
-            )],
+            Effect::RefreshAdapters { job } => {
+                vec![RuntimeEvent::AdaptersRefreshFinished {
+                    job,
+                    adapters: self.scenario.adapters.clone(),
+                }]
+            }
+            Effect::RefreshTraffic { job } => vec![RuntimeEvent::TrafficRefreshFinished {
+                job,
+                rows: self.traffic_rows(),
+            }],
             Effect::ApplyAdapterConfig(config) => vec![RuntimeEvent::AdapterConfigApplied(Ok(
                 format!("simulated configuration applied to {}", config.name),
             ))],
@@ -463,6 +470,8 @@ impl DemoRuntime {
                 upload_bps: self.scenario.upload_bps / (index as u64 + 1),
                 total_download: 8_589_934_592 * (index as u64 + 1),
                 total_upload: 1_610_612_736 * (index as u64 + 1),
+                session_download: 734_003_200 * (index as u64 + 1),
+                session_upload: 125_829_120 * (index as u64 + 1),
             })
             .collect()
     }
@@ -473,6 +482,12 @@ fn event_job(event: &RuntimeEvent) -> Option<JobId> {
         RuntimeEvent::DashboardRefreshFinished { job, .. }
         | RuntimeEvent::DashboardRefreshFailed { job, .. }
         | RuntimeEvent::DashboardRefreshCancelled { job }
+        | RuntimeEvent::AdaptersRefreshFinished { job, .. }
+        | RuntimeEvent::AdaptersRefreshFailed { job, .. }
+        | RuntimeEvent::AdaptersRefreshCancelled { job }
+        | RuntimeEvent::TrafficRefreshFinished { job, .. }
+        | RuntimeEvent::TrafficRefreshFailed { job, .. }
+        | RuntimeEvent::TrafficRefreshCancelled { job }
         | RuntimeEvent::ScanStarted { job, .. }
         | RuntimeEvent::ScanProgress { job, .. }
         | RuntimeEvent::ScanHostFound { job, .. }
@@ -510,6 +525,8 @@ fn event_job(event: &RuntimeEvent) -> Option<JobId> {
 fn cancelled_event(job: JobId) -> RuntimeEvent {
     match job.tool {
         ToolKind::Dashboard => RuntimeEvent::DashboardRefreshCancelled { job },
+        ToolKind::Adapters => RuntimeEvent::AdaptersRefreshCancelled { job },
+        ToolKind::Traffic => RuntimeEvent::TrafficRefreshCancelled { job },
         ToolKind::Scanner => RuntimeEvent::ScanCancelled { job },
         ToolKind::Ping => RuntimeEvent::PingFinished {
             job,

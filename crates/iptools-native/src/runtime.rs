@@ -1,6 +1,7 @@
 //! Structured lifecycle management for native background jobs.
 
 mod dashboard;
+mod network_read;
 mod port_scan;
 mod scanner;
 
@@ -8,7 +9,10 @@ use std::{collections::HashMap, future::Future};
 
 use iptools_core::{Effect, JobId, RuntimeEvent};
 use sysinfo::Networks;
-use tokio::{sync::mpsc, task::JoinSet};
+use tokio::{
+    sync::{Semaphore, mpsc},
+    task::JoinSet,
+};
 use tokio_util::sync::CancellationToken;
 
 const EVENT_CAPACITY: usize = 512;
@@ -47,6 +51,8 @@ pub struct NativeRuntime {
     event_rx: mpsc::Receiver<RuntimeEvent>,
     dashboard_networks: Networks,
     dashboard_sample: Option<dashboard::TrafficSample>,
+    network_sampler: network_read::NetworkSampler,
+    adapter_gate: std::sync::Arc<Semaphore>,
 }
 
 impl Default for NativeRuntime {
@@ -65,6 +71,8 @@ impl NativeRuntime {
             event_rx,
             dashboard_networks: Networks::new_with_refreshed_list(),
             dashboard_sample: None,
+            network_sampler: network_read::NetworkSampler::new(),
+            adapter_gate: std::sync::Arc::new(Semaphore::new(1)),
         }
     }
 
@@ -76,6 +84,14 @@ impl NativeRuntime {
         match effect {
             Effect::RefreshDashboard { job, request } => {
                 self.spawn_dashboard_refresh(job, request);
+                Ok(())
+            }
+            Effect::RefreshAdapters { job } => {
+                self.spawn_adapters_refresh(job);
+                Ok(())
+            }
+            Effect::RefreshTraffic { job } => {
+                self.spawn_traffic_refresh(job);
                 Ok(())
             }
             Effect::StartScan { job, request } => {
@@ -198,7 +214,8 @@ fn effect_name(effect: &Effect) -> &'static str {
     match effect {
         Effect::PersistPreferences(_) => "persist-preferences",
         Effect::RefreshDashboard { .. } => "refresh-dashboard",
-        Effect::RefreshAdapters => "refresh-adapters",
+        Effect::RefreshAdapters { .. } => "refresh-adapters",
+        Effect::RefreshTraffic { .. } => "refresh-traffic",
         Effect::ApplyAdapterConfig(_) => "apply-adapter-config",
         Effect::StartScan { .. } => "start-scan",
         Effect::CancelScan(_) => "cancel-scan",
