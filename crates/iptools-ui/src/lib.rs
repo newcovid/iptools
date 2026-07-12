@@ -2,21 +2,27 @@
 
 use iptools_core::{
     Action, AdapterApplyOutcome, AdapterEditPhase, AdapterField, AdapterValidationError, AppModel,
-    DiagnosticFocus, DiagnosticTool, Language, Page, RuntimeErrorCode, TaskStatus,
+    DiagnosticFocus, DiagnosticTool, Language, LinkQualityDimensionKind, LinkQualityGrade, Page,
+    RuntimeErrorCode, TaskStatus,
 };
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Clear, Gauge, List, ListItem, Paragraph, Row, Table, Wrap},
+    widgets::{
+        Block, Borders, Cell, Clear, Gauge, List, ListItem, Paragraph, Row, Sparkline, Table, Wrap,
+    },
 };
 use unicode_width::UnicodeWidthStr;
 
-const PRIMARY: Color = Color::Cyan;
-const SECONDARY: Color = Color::Magenta;
-const MUTED: Color = Color::DarkGray;
-const SELECTED: Color = Color::Rgb(24, 52, 72);
+// Keep the v0.3.1 terminal palette as the visual contract for every backend.
+// Web-specific presentation belongs to the surrounding page, not the TUI.
+const PRIMARY: Color = Color::Green;
+const SECONDARY: Color = Color::Cyan;
+const MUTED: Color = Color::Gray;
+const SUBTLE: Color = Color::DarkGray;
+const SELECTED: Color = Color::DarkGray;
 
 /// Ephemeral layout state. No application or platform state is stored here.
 #[derive(Debug, Default)]
@@ -28,6 +34,7 @@ pub struct UiState {
     diagnostic_fields: Vec<(Rect, usize, u16)>,
     adapter_regions: Vec<(Rect, usize)>,
     adapter_fields: Vec<(Rect, AdapterField, u16)>,
+    settings_regions: Vec<(Rect, usize)>,
 }
 
 impl UiState {
@@ -46,6 +53,13 @@ impl UiState {
             .find(|(area, _)| contains(*area, column, row))
         {
             return Some(Action::SelectAdapter(*index));
+        }
+        if let Some((_, index)) = self
+            .settings_regions
+            .iter()
+            .find(|(area, _)| contains(*area, column, row))
+        {
+            return Some(Action::SelectSetting(*index));
         }
         if let Some((_, page)) = self
             .page_regions
@@ -94,8 +108,8 @@ pub fn render(frame: &mut Frame, model: &AppModel, ui: &mut UiState) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
-            Constraint::Min(12),
-            Constraint::Length(2),
+            Constraint::Min(0),
+            Constraint::Length(1),
         ])
         .split(frame.area());
 
@@ -106,7 +120,7 @@ pub fn render(frame: &mut Frame, model: &AppModel, ui: &mut UiState) {
         Page::Scanner => render_scanner(frame, areas[1], model, ui),
         Page::Traffic => render_traffic(frame, areas[1], model),
         Page::Diagnostics => render_diagnostics(frame, areas[1], model, ui),
-        Page::Settings => render_settings(frame, areas[1], model),
+        Page::Settings => render_settings(frame, areas[1], model, ui),
     }
     render_footer(frame, areas[2], model);
 
@@ -117,21 +131,30 @@ pub fn render(frame: &mut Frame, model: &AppModel, ui: &mut UiState) {
 
 fn render_tabs(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut UiState) {
     let block = Block::default().borders(Borders::ALL).title(if model.demo {
-        " IP Tools · DEMO "
+        " IP Tools CLI · DEMO "
     } else {
-        " IP Tools "
+        " IP Tools CLI "
     });
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     let mut x = inner.x;
-    for page in Page::ALL {
+    for (index, page) in Page::ALL.into_iter().enumerate() {
+        if x >= inner.right() {
+            break;
+        }
         let label = format!(" {} ", page_label(page, model.language));
         let width = label.width() as u16;
         let tab = Rect::new(x, inner.y, width.min(inner.right().saturating_sub(x)), 1);
         let style = if model.page == page {
             Style::default()
-                .fg(Color::White)
+                .fg(
+                    if model.page == Page::Diagnostics && model.diagnostics.focused {
+                        Color::White
+                    } else {
+                        PRIMARY
+                    },
+                )
                 .bg(SELECTED)
                 .add_modifier(Modifier::BOLD)
         } else {
@@ -139,9 +162,13 @@ fn render_tabs(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut UiState
         };
         frame.render_widget(Paragraph::new(label).style(style), tab);
         ui.page_regions.push((tab, page));
-        x = x.saturating_add(width + 1);
-        if x >= inner.right() {
-            break;
+        x = x.saturating_add(width);
+        if index + 1 < Page::ALL.len() && x < inner.right() {
+            frame.render_widget(
+                Paragraph::new("|").style(Style::default().fg(MUTED)),
+                Rect::new(x, inner.y, 1, 1),
+            );
+            x = x.saturating_add(1);
         }
     }
 }
@@ -152,87 +179,132 @@ fn render_dashboard(frame: &mut Frame, area: Rect, model: &AppModel) {
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(area);
     let snapshot = &model.dashboard.snapshot;
+    let key = Style::default().fg(MUTED);
     let mut local = vec![
-        line(tr(model.language, "主机", "Host"), &snapshot.hostname),
-        line(
-            tr(model.language, "系统", "System"),
-            &format!("{} {}", snapshot.os_name, snapshot.os_version),
-        ),
-        line(
-            tr(model.language, "更新时间", "Updated"),
-            &snapshot.observed_at,
-        ),
-        line(
-            tr(model.language, "模式", "Mode"),
-            if model.demo {
-                tr(model.language, "确定性演示", "Deterministic demo")
-            } else {
-                tr(model.language, "原生", "Native")
-            },
-        ),
+        Row::new(vec![
+            Cell::from(Span::styled(tr(model.language, "时间", "Time"), key)),
+            Cell::from(snapshot.observed_at.clone()),
+        ]),
+        Row::new(vec![
+            Cell::from(Span::styled(tr(model.language, "主机名", "Hostname"), key)),
+            Cell::from(format!(
+                "{} ({} {})",
+                snapshot.hostname, snapshot.os_name, snapshot.os_version
+            )),
+        ]),
+        Row::new(vec![Cell::from(""), Cell::from("")]),
     ];
     if let Some(interface) = &snapshot.active_interface {
         let name = interface.ssid.as_ref().map_or_else(
             || interface.name.clone(),
             |ssid| format!("{} (SSID: {ssid})", interface.name),
         );
-        local.extend([
-            line(tr(model.language, "接口", "Interface"), &name),
-            line(tr(model.language, "本地 IP", "Local IP"), &interface.ipv4),
-            line(
-                tr(model.language, "连接", "Connection"),
-                &format!(
-                    "{} / {}",
-                    if interface.is_physical {
-                        tr(model.language, "物理", "physical")
-                    } else {
-                        tr(model.language, "虚拟", "virtual")
-                    },
-                    if interface.dhcp_enabled {
-                        "DHCP"
-                    } else {
-                        tr(model.language, "静态", "static")
-                    }
-                ),
-            ),
-        ]);
+        local.push(
+            Row::new(vec![
+                Cell::from(Span::styled(
+                    tr(model.language, "活动接口", "Interface"),
+                    key,
+                )),
+                Cell::from(vec![
+                    Line::from(Span::styled(
+                        name,
+                        Style::default().fg(SECONDARY).add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(Span::styled(
+                        interface.description.clone(),
+                        Style::default().fg(SUBTLE),
+                    )),
+                ]),
+            ])
+            .height(2),
+        );
+        local.push(Row::new(vec![
+            Cell::from(Span::styled(
+                tr(model.language, "连接 / 寻址", "Connection"),
+                key,
+            )),
+            Cell::from(format!(
+                "{} / {}",
+                if interface.is_physical {
+                    tr(model.language, "物理", "Physical")
+                } else {
+                    tr(model.language, "虚拟", "Virtual")
+                },
+                if interface.dhcp_enabled {
+                    "DHCP"
+                } else {
+                    tr(model.language, "静态", "Static")
+                }
+            )),
+        ]));
+        local.push(Row::new(vec![
+            Cell::from(Span::styled(tr(model.language, "本地 IP", "Local IP"), key)),
+            Cell::from(interface.ipv4.clone()),
+        ]));
+        local.push(Row::new(vec![Cell::from(""), Cell::from("")]));
+    } else {
+        local.push(Row::new(vec![
+            Cell::from(Span::styled(tr(model.language, "状态", "Status"), key)),
+            Cell::from(Span::styled(
+                tr(model.language, "无活动接口", "No active interface"),
+                Style::default().fg(Color::Red),
+            )),
+        ]));
     }
     local.extend([
-        line(
-            tr(model.language, "下载", "Download"),
-            &format_rate(snapshot.download_bps),
-        ),
-        line(
-            tr(model.language, "上传", "Upload"),
-            &format_rate(snapshot.upload_bps),
-        ),
-        line(
-            tr(model.language, "总接收", "Received"),
-            &format_bytes(snapshot.total_download),
-        ),
-        line(
-            tr(model.language, "总发送", "Sent"),
-            &format_bytes(snapshot.total_upload),
-        ),
+        Row::new(vec![
+            Cell::from(Span::styled(
+                tr(model.language, "实时速率", "Live Rate"),
+                key,
+            )),
+            Cell::from(Line::from(vec![
+                Span::styled(
+                    format!("↓ {:<10}", format_rate(snapshot.download_bps)),
+                    Style::default().fg(Color::Green),
+                ),
+                Span::styled(
+                    format!("↑ {:<10}", format_rate(snapshot.upload_bps)),
+                    Style::default().fg(Color::Yellow),
+                ),
+            ])),
+        ]),
+        Row::new(vec![
+            Cell::from(Span::styled(
+                tr(model.language, "累计流量", "Traffic Total"),
+                key,
+            )),
+            Cell::from(format!(
+                "{}: {:<10}{}: {:<10}",
+                tr(model.language, "接收", "RX"),
+                format_bytes(snapshot.total_download),
+                tr(model.language, "发送", "TX"),
+                format_bytes(snapshot.total_upload)
+            )),
+        ]),
     ]);
     frame.render_widget(
-        Paragraph::new(local)
-            .block(Block::bordered().title(tr(model.language, " 本地概览 ", " Local Overview ")))
-            .wrap(Wrap { trim: true }),
+        Table::new(local, [Constraint::Length(14), Constraint::Min(0)])
+            .column_spacing(1)
+            .block(Block::bordered().title(tr(model.language, " 本地概览 ", " Local Overview "))),
         cols[0],
     );
+    let proxy = snapshot
+        .proxy
+        .as_deref()
+        .unwrap_or(tr(model.language, "无", "none"));
     let mut public = vec![
-        line(
-            tr(model.language, "代理", "Proxy"),
-            snapshot
-                .proxy
-                .as_deref()
-                .unwrap_or(tr(model.language, "无", "none")),
-        ),
-        line(
-            tr(model.language, "状态", "Status"),
-            task_label(&model.dashboard.status, model.language),
-        ),
+        Row::new(vec![
+            Cell::from(Span::styled(tr(model.language, "系统代理", "Proxy"), key)),
+            Cell::from(Span::styled(
+                proxy,
+                Style::default().fg(if snapshot.proxy.is_some() {
+                    Color::Yellow
+                } else {
+                    SUBTLE
+                }),
+            )),
+        ]),
+        Row::new(vec![Cell::from(""), Cell::from("")]),
     ];
     if let Some(info) = &snapshot.public_info {
         let location = [&info.city, &info.region, &info.country]
@@ -242,34 +314,65 @@ fn render_dashboard(frame: &mut Frame, area: Rect, model: &AppModel) {
             .collect::<Vec<_>>()
             .join(", ");
         public.extend([
-            line("Public IP", &info.ip),
-            line(tr(model.language, "位置", "Location"), &location),
-            line("ISP", &info.isp),
+            Row::new(vec![
+                Cell::from(Span::styled("Public IP", key)),
+                Cell::from(Span::styled(
+                    info.ip.clone(),
+                    Style::default()
+                        .fg(Color::LightCyan)
+                        .add_modifier(Modifier::BOLD),
+                )),
+            ]),
+            Row::new(vec![
+                Cell::from(Span::styled(
+                    tr(model.language, "地理位置", "Location"),
+                    key,
+                )),
+                Cell::from(location),
+            ]),
+            Row::new(vec![
+                Cell::from(Span::styled("ISP", key)),
+                Cell::from(info.isp.clone()),
+            ]),
         ]);
     } else {
-        public.push(line(
-            "Public IP",
-            tr(model.language, "正在获取…", "loading…"),
-        ));
+        public.push(Row::new(vec![
+            Cell::from(Span::styled("Public IP", key)),
+            Cell::from(Span::styled(
+                task_label(&model.dashboard.status, model.language),
+                Style::default().fg(Color::Yellow),
+            )),
+        ]));
     }
     if let Some(error) = &model.dashboard.error {
-        public.push(line(tr(model.language, "错误", "Error"), &error.message));
+        public.push(Row::new(vec![
+            Cell::from(Span::styled(tr(model.language, "错误", "Error"), key)),
+            Cell::from(Span::styled(
+                error.message.clone(),
+                Style::default().fg(Color::Red),
+            )),
+        ]));
     }
-    public.extend([
-        Line::from(""),
-        Line::from(Span::styled(
-            tr(
-                model.language,
-                "在线展览只使用模拟数据，不会访问您的局域网。",
-                "The online exhibit uses simulated data and never accesses your LAN.",
-            ),
-            Style::default().fg(Color::Yellow),
-        )),
-    ]);
+    if model.demo {
+        public.extend([
+            Row::new(vec![Cell::from(""), Cell::from("")]),
+            Row::new(vec![
+                Cell::from(Span::styled(tr(model.language, "说明", "Note"), key)),
+                Cell::from(Span::styled(
+                    tr(
+                        model.language,
+                        "演示模式只使用模拟数据，不访问您的局域网。",
+                        "Demo mode uses simulated data and never accesses your LAN.",
+                    ),
+                    Style::default().fg(SUBTLE),
+                )),
+            ]),
+        ]);
+    }
     frame.render_widget(
-        Paragraph::new(public)
-            .block(Block::bordered().title(tr(model.language, " 公网信息 ", " Public Network ")))
-            .wrap(Wrap { trim: true }),
+        Table::new(public, [Constraint::Length(14), Constraint::Min(0)])
+            .column_spacing(1)
+            .block(Block::bordered().title(tr(model.language, " 公网信息 ", " Public Network "))),
         cols[1],
     );
 }
@@ -279,130 +382,215 @@ fn render_adapters(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut UiS
         render_adapter_edit(frame, area, model, edit, ui);
         return;
     }
-    let areas =
-        Layout::vertical([Constraint::Percentage(58), Constraint::Percentage(42)]).split(area);
-    let table_inner = Block::bordered().inner(areas[0]);
-    for index in 0..model
-        .adapters
-        .items
-        .len()
-        .min(table_inner.height.saturating_sub(1) as usize)
-    {
+    let cols =
+        Layout::horizontal([Constraint::Percentage(30), Constraint::Percentage(70)]).split(area);
+    let list_inner = Block::bordered().inner(cols[0]);
+    for index in 0..model.adapters.items.len().min(list_inner.height as usize) {
         ui.adapter_regions.push((
             Rect::new(
-                table_inner.x,
-                table_inner.y + 1 + index as u16,
-                table_inner.width,
+                list_inner.x,
+                list_inner.y + index as u16,
+                list_inner.width,
                 1,
             ),
             index,
         ));
     }
-    let rows = model
+    let items = model
         .adapters
         .items
         .iter()
         .enumerate()
         .map(|(index, adapter)| {
-            let style = if index == model.adapters.selected {
+            let selected = index == model.adapters.selected;
+            let prefix = if adapter.is_physical { "[P] " } else { "[V] " };
+            let up = adapter_is_up(adapter);
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    if selected { "> " } else { "  " },
+                    Style::default().fg(PRIMARY),
+                ),
+                Span::styled(prefix, Style::default().fg(SECONDARY)),
+                Span::styled(
+                    adapter.name.clone(),
+                    Style::default().fg(if up { Color::White } else { SUBTLE }),
+                ),
+            ]))
+            .style(if selected {
                 Style::default().bg(SELECTED)
             } else {
                 Style::default()
-            };
-            Row::new(vec![
-                Cell::from(adapter.name.clone()),
-                Cell::from(adapter.kind.clone()),
-                Cell::from(adapter.ipv4.clone()),
-                Cell::from(adapter.mac.clone()),
-                Cell::from(adapter.status.clone()),
-            ])
-            .style(style)
+            })
         });
     frame.render_widget(
-        Table::new(
-            rows,
-            [
-                Constraint::Percentage(23),
-                Constraint::Length(10),
-                Constraint::Length(17),
-                Constraint::Length(18),
-                Constraint::Min(8),
-            ],
-        )
-        .header(
-            Row::new(["Adapter", "Type", "IPv4", "MAC", "Status"])
-                .style(Style::default().fg(PRIMARY).add_modifier(Modifier::BOLD)),
-        )
-        .block(Block::bordered().title(format!(
-            " {} · {} ",
-            tr(model.language, "适配器", "Adapters"),
-            task_label(&model.adapters.status, model.language).trim()
+        List::new(items).block(Block::bordered().title(tr(
+            model.language,
+            " 网络适配器 ",
+            " Network Adapters ",
         ))),
-        areas[0],
+        cols[0],
     );
 
-    let details = model
-        .adapters
-        .items
-        .get(model.adapters.selected)
-        .map(|adapter| {
-            vec![
-                line(
-                    tr(model.language, "描述", "Description"),
-                    &adapter.description,
-                ),
-                line(
-                    "SSID",
-                    adapter
-                        .ssid
-                        .as_deref()
-                        .unwrap_or(tr(model.language, "无", "none")),
-                ),
-                line(
-                    tr(model.language, "寻址", "Addressing"),
-                    if adapter.dhcp_enabled {
-                        "DHCP"
+    let detail_block = Block::bordered()
+        .title(tr(model.language, " 适配器详情 ", " Adapter Details "))
+        .title(
+            Line::from(Span::styled(
+                tr(model.language, " [E] 编辑 ", " [E] Edit "),
+                Style::default().fg(SECONDARY),
+            ))
+            .alignment(Alignment::Right),
+        );
+    if let Some(adapter) = model.adapters.items.get(model.adapters.selected) {
+        let key = Style::default().fg(MUTED);
+        let value = Style::default().fg(Color::White);
+        let mut rows = vec![
+            Row::new(vec![
+                Cell::from(Span::styled(
+                    tr(model.language, "名称 / 描述", "Name / Description"),
+                    key,
+                )),
+                Cell::from(vec![
+                    Line::from(Span::styled(
+                        adapter.name.clone(),
+                        Style::default().fg(SECONDARY).add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(Span::styled(
+                        adapter.description.clone(),
+                        Style::default().fg(SUBTLE),
+                    )),
+                ]),
+            ])
+            .height(2),
+            Row::new(vec![
+                Cell::from(Span::styled(tr(model.language, "状态", "Status"), key)),
+                Cell::from(Line::from(vec![
+                    Span::styled(
+                        adapter.status.clone(),
+                        Style::default().fg(if adapter_is_up(adapter) {
+                            Color::Green
+                        } else {
+                            Color::Red
+                        }),
+                    ),
+                    Span::raw("  (SSID: "),
+                    Span::styled(
+                        adapter.ssid.clone().unwrap_or_else(|| "-".into()),
+                        Style::default().fg(if adapter.ssid.is_some() {
+                            Color::Yellow
+                        } else {
+                            SUBTLE
+                        }),
+                    ),
+                    Span::raw(")"),
+                ])),
+            ]),
+            Row::new(vec![
+                Cell::from(Span::styled(
+                    tr(model.language, "连接类型", "Connection Type"),
+                    key,
+                )),
+                Cell::from(format!(
+                    "{} [{}]",
+                    if adapter.is_physical {
+                        tr(model.language, "物理", "Physical")
                     } else {
-                        "static"
+                        tr(model.language, "虚拟", "Virtual")
                     },
+                    adapter.kind
+                )),
+            ]),
+            Row::new(vec![
+                Cell::from(Span::styled(tr(model.language, "IP 类型", "IP Type"), key)),
+                Cell::from(if adapter.dhcp_enabled {
+                    "DHCP"
+                } else {
+                    tr(model.language, "静态", "Static")
+                }),
+            ]),
+            Row::new(vec![
+                Cell::from(Span::styled("MAC", key)),
+                Cell::from(adapter.mac.clone()),
+            ]),
+            Row::new(vec![
+                Cell::from(Span::styled("IPv4", key)),
+                Cell::from(format!(
+                    "• {}",
+                    adapter.cidr.as_deref().unwrap_or(&adapter.ipv4)
+                )),
+            ]),
+        ];
+        rows.push(
+            Row::new(vec![
+                Cell::from(Span::styled("IPv6", key)),
+                Cell::from(if adapter.ipv6.is_empty() {
+                    vec![Line::from("-")]
+                } else {
+                    adapter
+                        .ipv6
+                        .iter()
+                        .map(|ip| Line::from(format!("• {ip}")))
+                        .collect()
+                }),
+            ])
+            .height(adapter.ipv6.len().max(1) as u16),
+        );
+        rows.push(Row::new(vec![Cell::from(""), Cell::from("")]));
+        rows.push(Row::new(vec![
+            Cell::from(Span::styled(
+                tr(model.language, "实时流量", "Traffic Rate"),
+                key,
+            )),
+            Cell::from(Line::from(vec![
+                Span::styled(
+                    format!("↓ {:<10}", format_rate(adapter.download_bps)),
+                    Style::default().fg(Color::Green),
                 ),
-                line(
-                    tr(model.language, "链路速率", "Link rate"),
-                    &adapter
-                        .link_speed_bps
-                        .map_or_else(|| "—".into(), |bits| format_rate(bits.saturating_div(8))),
+                Span::styled(
+                    format!("↑ {:<10}", format_rate(adapter.upload_bps)),
+                    Style::default().fg(Color::Yellow),
                 ),
-                line(
-                    tr(model.language, "实时流量", "Live traffic"),
-                    &format!(
-                        "↓ {}  ↑ {}",
-                        format_rate(adapter.download_bps),
-                        format_rate(adapter.upload_bps)
-                    ),
-                ),
-                line(
-                    tr(model.language, "累计流量", "Totals"),
-                    &format!(
-                        "↓ {}  ↑ {}",
-                        format_bytes(adapter.total_download),
-                        format_bytes(adapter.total_upload)
-                    ),
-                ),
-            ]
-        })
-        .unwrap_or_else(|| {
-            vec![Line::from(tr(
+            ])),
+        ]));
+        rows.push(Row::new(vec![
+            Cell::from(Span::styled(
+                tr(model.language, "累计流量", "Traffic Total"),
+                key,
+            )),
+            Cell::from(format!(
+                "{}: {:<10}{}: {:<10}",
+                tr(model.language, "接收", "RX"),
+                format_bytes(adapter.total_download),
+                tr(model.language, "发送", "TX"),
+                format_bytes(adapter.total_upload)
+            )),
+        ]));
+        frame.render_widget(
+            Table::new(rows, [Constraint::Length(16), Constraint::Min(0)])
+                .column_spacing(1)
+                .style(value)
+                .block(detail_block),
+            cols[1],
+        );
+    } else {
+        frame.render_widget(
+            Paragraph::new(tr(
                 model.language,
                 "未发现网络适配器。",
                 "No network adapters detected.",
-            ))]
-        });
-    frame.render_widget(
-        Paragraph::new(details)
-            .block(Block::bordered().title(tr(model.language, " 详情 ", " Details ")))
-            .wrap(Wrap { trim: true }),
-        areas[1],
-    );
+            ))
+            .block(detail_block),
+            cols[1],
+        );
+    }
+}
+
+fn adapter_is_up(adapter: &iptools_core::AdapterInfo) -> bool {
+    let status = adapter.status.to_ascii_lowercase();
+    !adapter.ipv4.is_empty()
+        && adapter.ipv4 != "—"
+        && !["down", "disconnected", "standby", "internal"]
+            .iter()
+            .any(|marker| status.contains(marker))
 }
 
 fn render_adapter_edit(
@@ -645,9 +833,9 @@ fn render_scanner(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut UiSt
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4),
             Constraint::Length(3),
-            Constraint::Min(5),
+            Constraint::Min(0),
+            Constraint::Length(1),
         ])
         .split(area);
     let input_style = if model.scanner.editing {
@@ -655,34 +843,50 @@ fn render_scanner(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut UiSt
     } else {
         Style::default().fg(Color::White)
     };
+    let action = if model.scanner.status == TaskStatus::Running {
+        tr(model.language, "停止", "Stop")
+    } else {
+        tr(model.language, "开始", "Start")
+    };
+    let status = task_label(&model.scanner.status, model.language).trim();
+    let count = if model.scanner.total == 0 {
+        "—".into()
+    } else {
+        model.scanner.total.to_string()
+    };
     frame.render_widget(
-        Paragraph::new(format!(
-            "CIDR: {}{}",
-            model.scanner.cidr,
-            if model.scanner.editing { "█" } else { "" }
-        ))
-        .style(input_style)
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!(" {} ", tr(model.language, "扫描范围", "Range")),
+                input_style,
+            ),
+            Span::styled(model.scanner.cidr.clone(), input_style),
+            Span::styled(if model.scanner.editing { "█" } else { "" }, input_style),
+            Span::styled(
+                format!(
+                    "   {} {}   [{}]   {} / {}",
+                    tr(model.language, "地址数", "Addresses"),
+                    count,
+                    status,
+                    tr(model.language, "E 编辑", "E Edit"),
+                    action,
+                ),
+                input_style,
+            ),
+        ]))
         .block(Block::bordered().title(tr(
             model.language,
-            " 扫描范围 · E 编辑 ",
-            " Scan Range · E to edit ",
+            " 局域网扫描 ",
+            " LAN Scanner ",
         ))),
         rows[0],
     );
+    ui.scanner_action = Some(rows[0]);
     let ratio = if model.scanner.total == 0 {
         0.0
     } else {
         model.scanner.current as f64 / model.scanner.total as f64
     };
-    frame.render_widget(
-        Gauge::default()
-            .block(Block::bordered().title(task_label(&model.scanner.status, model.language)))
-            .gauge_style(Style::default().fg(SECONDARY))
-            .ratio(ratio.clamp(0.0, 1.0)),
-        rows[1],
-    );
-    ui.scanner_action = Some(rows[1]);
-
     let table_rows = model
         .scanner
         .results
@@ -690,12 +894,28 @@ fn render_scanner(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut UiSt
         .enumerate()
         .map(|(index, host)| {
             Row::new(vec![
-                host.ip.clone(),
+                format!(
+                    "{}{}",
+                    if index == model.scanner.selected {
+                        ">> "
+                    } else {
+                        "   "
+                    },
+                    host.ip
+                ),
                 host.mac.clone(),
+                if host.vendor.is_empty() {
+                    "-".into()
+                } else {
+                    host.vendor.clone()
+                },
                 host.hostname.clone(),
             ])
             .style(if index == model.scanner.selected {
-                Style::default().bg(SELECTED)
+                Style::default()
+                    .fg(SECONDARY)
+                    .bg(SELECTED)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
             })
@@ -704,19 +924,52 @@ fn render_scanner(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut UiSt
         Table::new(
             table_rows,
             [
-                Constraint::Length(17),
-                Constraint::Length(19),
-                Constraint::Min(10),
+                Constraint::Percentage(22),
+                Constraint::Percentage(28),
+                Constraint::Percentage(22),
+                Constraint::Percentage(28),
             ],
         )
-        .header(Row::new(["IP", "MAC", "Hostname"]).style(Style::default().fg(PRIMARY)))
-        .block(Block::bordered().title(tr(
-            model.language,
-            " 发现设备 ",
-            " Discovered Hosts ",
+        .header(
+            Row::new([
+                format!("   {}", tr(model.language, "IP 地址", "IP Address")),
+                "MAC".into(),
+                tr(model.language, "厂商", "Vendor").into(),
+                tr(model.language, "主机名", "Hostname").into(),
+            ])
+            .style(Style::default().fg(MUTED))
+            .bottom_margin(1),
+        )
+        .block(Block::bordered().title(format!(
+            " {} ({}) ",
+            tr(model.language, "发现设备", "Devices Found"),
+            model.scanner.results.len()
         ))),
-        rows[2],
+        rows[1],
     );
+
+    if matches!(model.scanner.status, TaskStatus::Running | TaskStatus::Done) {
+        frame.render_widget(
+            Gauge::default()
+                .gauge_style(
+                    Style::default()
+                        .fg(if model.scanner.status == TaskStatus::Done && ratio < 1.0 {
+                            Color::Yellow
+                        } else {
+                            SECONDARY
+                        })
+                        .bg(SELECTED),
+                )
+                .ratio(ratio.clamp(0.0, 1.0))
+                .label(format!(
+                    "{:.1}% ({}/{})",
+                    ratio * 100.0,
+                    model.scanner.current,
+                    model.scanner.total
+                )),
+            rows[2],
+        );
+    }
 }
 
 fn render_traffic(frame: &mut Frame, area: Rect, model: &AppModel) {
@@ -754,20 +1007,21 @@ fn render_traffic(frame: &mut Frame, area: Rect, model: &AppModel) {
             ],
         )
         .header(
-            Row::new([
-                "Adapter",
-                "Download",
-                "Upload",
-                "Session RX/TX",
-                "Total RX/TX",
+            Row::new(vec![
+                Cell::from(tr(model.language, "接口名称", "Interface Name"))
+                    .style(Style::default().fg(MUTED)),
+                Cell::from(tr(model.language, "接收速率", "RX Rate"))
+                    .style(Style::default().fg(Color::Green)),
+                Cell::from(tr(model.language, "发送速率", "TX Rate"))
+                    .style(Style::default().fg(Color::Yellow)),
+                Cell::from(tr(model.language, "本次接收/发送", "Session RX/TX"))
+                    .style(Style::default().fg(MUTED)),
+                Cell::from(tr(model.language, "累计接收/发送", "Total RX/TX"))
+                    .style(Style::default().fg(MUTED)),
             ])
-            .style(Style::default().fg(PRIMARY)),
+            .bottom_margin(1),
         )
-        .block(Block::bordered().title(format!(
-            " {} · {} ",
-            tr(model.language, "实时流量", "Live Traffic"),
-            task_label(&model.traffic.status, model.language).trim()
-        ))),
+        .block(Block::bordered().title(tr(model.language, " 实时流量 ", " Live Traffic "))),
         area,
     );
 }
@@ -777,9 +1031,9 @@ fn render_diagnostics(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut 
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(20),
-            Constraint::Min(30),
-            Constraint::Length(26),
+            Constraint::Percentage(20),
+            Constraint::Percentage(50),
+            Constraint::Percentage(30),
         ])
         .split(area);
 
@@ -801,18 +1055,27 @@ fn render_diagnostics(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut 
             1,
         );
         ui.diagnostic_regions.push((row, tool));
+        let selected = tool == model.diagnostics.tool;
         items.push(
-            ListItem::new(tool_label(tool)).style(if tool == model.diagnostics.tool {
-                Style::default().fg(Color::White).bg(SELECTED)
+            ListItem::new(format!(
+                "{}{}",
+                if selected { "> " } else { "  " },
+                tool_label(tool, model.language)
+            ))
+            .style(if selected {
+                Style::default()
+                    .fg(Color::White)
+                    .bg(SELECTED)
+                    .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(PRIMARY)
+                Style::default().fg(Color::White)
             }),
         );
     }
     frame.render_widget(
         List::new(items).block(
             Block::bordered()
-                .title(tr(model.language, " 工具 ", " Tools "))
+                .title(tr(model.language, " 诊断工具 ", " Diagnostic Tools "))
                 .border_style(focus_style(DiagnosticFocus::Menu)),
         ),
         cols[0],
@@ -820,7 +1083,7 @@ fn render_diagnostics(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut 
 
     ui.diagnostic_main = Some(cols[1]);
     let main_block = Block::bordered()
-        .title(format!(" {} ", tool_label(model.diagnostics.tool)))
+        .title(tr(model.language, " 主面板 ", " Main Panel "))
         .border_style(focus_style(DiagnosticFocus::Main));
     let main_inner = main_block.inner(cols[1]);
     frame.render_widget(main_block, cols[1]);
@@ -846,47 +1109,12 @@ fn render_diagnostics(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut 
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), main_inner);
     } else {
         match model.diagnostics.tool {
-            DiagnosticTool::Trace => {
-                let rows = model
-                    .diagnostics
-                    .trace
-                    .hops
-                    .iter()
-                    .enumerate()
-                    .map(|(index, hop)| {
-                        Row::new(vec![
-                            hop.ttl.to_string(),
-                            hop.address.clone().unwrap_or_else(|| "*".into()),
-                            hop.latency_ms
-                                .map_or_else(|| "—".into(), |value| format!("{value} ms")),
-                            hop.hostname.clone().unwrap_or_default(),
-                        ])
-                        .style(
-                            if index == model.diagnostics.trace.selected {
-                                Style::default().bg(SELECTED)
-                            } else {
-                                Style::default()
-                            },
-                        )
-                    });
-                frame.render_widget(
-                    Table::new(
-                        rows,
-                        [
-                            Constraint::Length(5),
-                            Constraint::Length(17),
-                            Constraint::Length(10),
-                            Constraint::Min(8),
-                        ],
-                    )
-                    .header(
-                        Row::new(["Hop", "Address", "RTT", "Host"])
-                            .style(Style::default().fg(PRIMARY)),
-                    ),
-                    main_inner,
-                );
-            }
-            _ => {
+            DiagnosticTool::Ping => render_ping(main_inner, frame, model),
+            DiagnosticTool::Trace => render_trace(main_inner, frame, model),
+            DiagnosticTool::PortScan => render_port_scan(main_inner, frame, model),
+            DiagnosticTool::PublicSpeed => render_public_speed(main_inner, frame, model),
+            DiagnosticTool::LinkQuality => render_link_quality(main_inner, frame, model),
+            DiagnosticTool::LanSpeed => {
                 let mut lines = vec![
                     Line::from(Span::styled(
                         common.primary.clone(),
@@ -910,38 +1138,55 @@ fn render_diagnostics(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut 
         }
     }
 
-    let config_rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(7), Constraint::Length(3)])
-        .split(cols[2]);
     let config_block = Block::bordered()
         .title(tr(model.language, " 配置 ", " Configuration "))
         .border_style(focus_style(DiagnosticFocus::Config));
-    let config_inner = config_block.inner(config_rows[0]);
-    frame.render_widget(config_block, config_rows[0]);
+    let config_inner = config_block.inner(cols[2]);
+    frame.render_widget(config_block, cols[2]);
     let fields = diagnostic_fields(model);
     for (index, (label, raw_value)) in fields.into_iter().enumerate() {
-        if index >= config_inner.height as usize {
+        let y = index as u16 * 2;
+        if y + 1 >= config_inner.height {
             break;
         }
-        let row = Rect::new(
+        let label_row = Rect::new(config_inner.x, config_inner.y + y, config_inner.width, 1);
+        let value_row = Rect::new(
             config_inner.x,
-            config_inner.y + index as u16,
+            config_inner.y + y + 1,
             config_inner.width,
             1,
         );
-        let value_x = row.x.saturating_add(11.min(row.width));
-        ui.diagnostic_fields.push((row, index, value_x));
+        let value_x = value_row.x.saturating_add(3.min(value_row.width));
+        ui.diagnostic_fields.push((
+            Rect::new(label_row.x, label_row.y, label_row.width, 2),
+            index,
+            value_x,
+        ));
         let selected = model.diagnostics.focused
             && model.diagnostics.focus == DiagnosticFocus::Config
             && active_diagnostic_config_index(model) == index;
-        let text_editable = index == 0 || model.diagnostics.tool == DiagnosticTool::Trace;
-        let mut spans = vec![Span::styled(
-            format!("{} {label:<8}", if selected { ">" } else { " " }),
-            if selected {
-                Style::default().fg(Color::Yellow)
+        let text_editable = match model.diagnostics.tool {
+            DiagnosticTool::Ping => index == 0,
+            DiagnosticTool::Trace => true,
+            DiagnosticTool::LinkQuality => index >= 1,
+            _ => false,
+        };
+        frame.render_widget(
+            Paragraph::new(format!("{label}:")).style(Style::default().fg(if selected {
+                Color::Yellow
             } else {
-                Style::default().fg(MUTED)
+                MUTED
+            })),
+            label_row,
+        );
+        let mut spans = vec![Span::styled(
+            if selected { ">> " } else { "   " },
+            if selected {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
             },
         )];
         if selected && common.job.is_none() && text_editable {
@@ -955,7 +1200,7 @@ fn render_diagnostics(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut 
                 raw_value[cursor..].to_string(),
                 Style::default().fg(Color::Yellow),
             ));
-            if index == 0
+            if index == diagnostic_target_index(model.diagnostics.tool)
                 && !raw_value.is_empty()
                 && cursor == raw_value.len()
                 && let Some(candidate) = model.diagnostics.target_history.iter().find(|candidate| {
@@ -981,15 +1226,8 @@ fn render_diagnostics(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut 
                 },
             ));
         }
-        frame.render_widget(Paragraph::new(Line::from(spans)), row);
+        frame.render_widget(Paragraph::new(Line::from(spans)), value_row);
     }
-    frame.render_widget(
-        Gauge::default()
-            .block(Block::bordered().title(task_label(&common.status, model.language)))
-            .gauge_style(Style::default().fg(SECONDARY))
-            .percent(common.progress.min(100) as u16),
-        config_rows[1],
-    );
 
     if model.diagnostics.history_open {
         let popup = centered(cols[2], 90, 55);
@@ -1032,6 +1270,754 @@ fn render_diagnostics(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut 
     }
 }
 
+fn render_ping(area: Rect, frame: &mut Frame, model: &AppModel) {
+    let state = &model.diagnostics.ping;
+    let latest = state.samples.last();
+    let summary = state.summary.as_ref();
+    let min = summary
+        .and_then(|value| value.min_ms)
+        .or_else(|| latest.and_then(|value| value.min_ms));
+    let avg = summary
+        .and_then(|value| value.average_ms)
+        .or_else(|| latest.and_then(|value| value.average_ms));
+    let max = summary
+        .and_then(|value| value.max_ms)
+        .or_else(|| latest.and_then(|value| value.max_ms));
+    let loss = summary
+        .map(|value| value.loss_percent)
+        .or_else(|| latest.map(|value| value.loss_percent))
+        .unwrap_or_default();
+    let jitter = if state.samples.len() > 1 {
+        let pairs = state
+            .samples
+            .windows(2)
+            .filter_map(|pair| Some(pair[0].latency_ms?.abs_diff(pair[1].latency_ms?) as f64))
+            .collect::<Vec<_>>();
+        (!pairs.is_empty()).then(|| pairs.iter().sum::<f64>() / pairs.len() as f64)
+    } else {
+        None
+    };
+    let stats_area = Rect::new(area.x, area.y, area.width, area.height.min(4));
+    let status_area = bottom_row(area);
+    let available = status_area.y.saturating_sub(stats_area.bottom());
+    let log_height = available.min(8);
+    let log_area = Rect::new(
+        area.x,
+        status_area.y.saturating_sub(log_height),
+        area.width,
+        log_height,
+    );
+    let chart_area = Rect::new(
+        area.x,
+        stats_area.bottom(),
+        area.width,
+        log_area.y.saturating_sub(stats_area.bottom()),
+    );
+    let third = stats_area.width / 3;
+    let stats = [
+        (
+            format!(
+                "{}: {} ms",
+                tr(model.language, "最近", "Last"),
+                format_optional_u64(latest.and_then(|value| value.latency_ms))
+            ),
+            SECONDARY,
+        ),
+        (
+            format!(
+                "{}: {} ms",
+                tr(model.language, "最小", "Min"),
+                format_optional_u64(min)
+            ),
+            Color::Green,
+        ),
+        (
+            format!(
+                "{}: {} ms",
+                tr(model.language, "最大", "Max"),
+                format_optional_u64(max)
+            ),
+            Color::Red,
+        ),
+        (
+            format!(
+                "{}: {} ms",
+                tr(model.language, "平均", "Average"),
+                format_optional_f64(avg)
+            ),
+            Color::White,
+        ),
+        (
+            format!(
+                "{}: {} ms",
+                tr(model.language, "抖动", "Jitter"),
+                format_optional_f64(jitter)
+            ),
+            Color::White,
+        ),
+        (
+            format!("{}: {:.1}%", tr(model.language, "丢包", "Loss"), loss),
+            Color::White,
+        ),
+    ];
+    for (index, (text, color)) in stats.into_iter().enumerate() {
+        frame.render_widget(
+            Paragraph::new(text).style(Style::default().fg(color)),
+            Rect::new(
+                stats_area.x + third * (index % 3) as u16,
+                stats_area.y + (index / 3) as u16,
+                third,
+                1,
+            ),
+        );
+    }
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::BOTTOM)
+            .border_style(Style::default().fg(SUBTLE)),
+        Rect::new(stats_area.x, stats_area.y + 2, stats_area.width, 1),
+    );
+    let history = state
+        .samples
+        .iter()
+        .map(|sample| sample.latency_ms.unwrap_or_default())
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Sparkline::default()
+            .block(Block::default().title(tr(model.language, "延迟曲线", "Latency History")))
+            .data(&history)
+            .style(Style::default().fg(PRIMARY)),
+        chart_area,
+    );
+    let logs = state
+        .common
+        .log
+        .iter()
+        .rev()
+        .map(|entry| ListItem::new(entry.clone()));
+    frame.render_widget(
+        List::new(logs).block(
+            Block::default()
+                .borders(Borders::TOP)
+                .title(tr(model.language, "日志", "Log"))
+                .style(Style::default().fg(MUTED)),
+        ),
+        log_area,
+    );
+    render_diagnostic_status(frame, status_area, &state.common.status, model.language);
+}
+
+fn render_trace(area: Rect, frame: &mut Frame, model: &AppModel) {
+    let state = &model.diagnostics.trace;
+    let status_area = bottom_row(area);
+    let table_area = Rect::new(
+        area.x,
+        area.y,
+        area.width,
+        status_area.y.saturating_sub(area.y),
+    );
+    let hops = state.hops.iter().enumerate().map(|(index, hop)| {
+        Row::new(vec![
+            Cell::from(format!("{:>2}", hop.ttl)).style(Style::default().fg(SECONDARY)),
+            Cell::from(hop.address.clone().unwrap_or_else(|| "*".into())),
+            Cell::from(
+                hop.latency_ms
+                    .map_or_else(|| "*".into(), |value| format!("{value} ms")),
+            )
+            .style(Style::default().fg(PRIMARY)),
+            Cell::from(hop.hostname.clone().unwrap_or_else(|| "-".into()))
+                .style(Style::default().fg(SUBTLE)),
+        ])
+        .style(if index == state.selected {
+            Style::default().bg(SELECTED)
+        } else {
+            Style::default()
+        })
+    });
+    frame.render_widget(
+        Table::new(
+            hops,
+            [
+                Constraint::Length(4),
+                Constraint::Length(17),
+                Constraint::Length(10),
+                Constraint::Min(0),
+            ],
+        )
+        .header(
+            Row::new([
+                tr(model.language, "跳数", "Hop"),
+                tr(model.language, "地址", "Address"),
+                "RTT",
+                tr(model.language, "主机", "Host"),
+            ])
+            .style(Style::default().fg(MUTED)),
+        ),
+        table_area,
+    );
+    render_diagnostic_status(frame, status_area, &state.common.status, model.language);
+}
+
+fn render_port_scan(area: Rect, frame: &mut Frame, model: &AppModel) {
+    let state = &model.diagnostics.port_scan;
+    let stats_area = Rect::new(area.x, area.y, area.width, area.height.min(2));
+    let status_area = bottom_row(area);
+    let progress_area = Rect::new(area.x, status_area.y.saturating_sub(1), area.width, 1);
+    let ports_area = Rect::new(
+        area.x,
+        stats_area.bottom(),
+        area.width,
+        progress_area.y.saturating_sub(stats_area.bottom()),
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!("{}: ", tr(model.language, "开放端口", "Open")),
+                Style::default().fg(MUTED),
+            ),
+            Span::styled(
+                format!("{:<6}", state.open_ports.len()),
+                Style::default().fg(PRIMARY).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{}: ", tr(model.language, "已扫描", "Scanned")),
+                Style::default().fg(MUTED),
+            ),
+            Span::styled(
+                format!("{} / {}", state.scanned, state.total),
+                Style::default().fg(SECONDARY),
+            ),
+        ])),
+        stats_area,
+    );
+    let ports = state.open_ports.iter().map(|port| {
+        Row::new(vec![
+            Cell::from(port.to_string()),
+            Cell::from(well_known_service(*port)).style(Style::default().fg(SECONDARY)),
+        ])
+    });
+    frame.render_widget(
+        Table::new(ports, [Constraint::Length(10), Constraint::Min(0)])
+            .header(
+                Row::new([
+                    tr(model.language, "端口", "Port"),
+                    tr(model.language, "服务", "Service"),
+                ])
+                .style(Style::default().fg(MUTED)),
+            )
+            .block(Block::default().borders(Borders::TOP).title(tr(
+                model.language,
+                "开放端口",
+                "Open Ports",
+            ))),
+        ports_area,
+    );
+    let ratio = if state.total == 0 {
+        0.0
+    } else {
+        state.scanned as f64 / state.total as f64
+    };
+    frame.render_widget(
+        Gauge::default()
+            .gauge_style(Style::default().fg(SECONDARY).bg(SELECTED))
+            .ratio(ratio.clamp(0.0, 1.0))
+            .label(format!("{:.0}%", ratio * 100.0)),
+        progress_area,
+    );
+    render_diagnostic_status(frame, status_area, &state.common.status, model.language);
+}
+
+fn render_diagnostic_status(
+    frame: &mut Frame,
+    area: Rect,
+    status: &TaskStatus,
+    language: Language,
+) {
+    let (text, color) = match status {
+        TaskStatus::Running => (
+            format!(
+                "{} | {}",
+                tr(language, "运行中", "Running"),
+                tr(language, "Space 停止", "Space to stop")
+            ),
+            Color::Green,
+        ),
+        TaskStatus::Done => (
+            tr(language, "完成 | Space 重新开始", "Done | Space to restart").into(),
+            SECONDARY,
+        ),
+        TaskStatus::Failed(error) => (
+            format!("{}: {error}", tr(language, "失败", "Failed")),
+            Color::Red,
+        ),
+        TaskStatus::Idle => (
+            format!(
+                "{} | {}",
+                tr(language, "已停止", "Stopped"),
+                tr(language, "Space 开始", "Space to start")
+            ),
+            Color::Red,
+        ),
+    };
+    frame.render_widget(Paragraph::new(text).style(Style::default().fg(color)), area);
+}
+
+fn bottom_row(area: Rect) -> Rect {
+    Rect::new(
+        area.x,
+        area.bottom().saturating_sub(1),
+        area.width,
+        area.height.min(1),
+    )
+}
+
+fn well_known_service(port: u16) -> &'static str {
+    match port {
+        20 | 21 => "FTP",
+        22 => "SSH",
+        23 => "Telnet",
+        25 => "SMTP",
+        53 => "DNS",
+        67 | 68 => "DHCP",
+        80 => "HTTP",
+        110 => "POP3",
+        123 => "NTP",
+        143 => "IMAP",
+        443 => "HTTPS",
+        445 => "SMB",
+        3306 => "MySQL",
+        3389 => "RDP",
+        5432 => "PostgreSQL",
+        6379 => "Redis",
+        8080 => "HTTP-alt",
+        _ => "-",
+    }
+}
+
+fn render_public_speed(area: Rect, frame: &mut Frame, model: &AppModel) {
+    let state = &model.diagnostics.public_speed;
+    let latest = state.samples.last();
+    let current = latest.map_or(0, |sample| sample.bytes_per_second);
+    let total = latest
+        .map(|sample| sample.bytes)
+        .or_else(|| state.summary.as_ref().map(|summary| summary.total_bytes))
+        .unwrap_or_default();
+    let elapsed = latest.map_or(0, |sample| sample.elapsed_ms);
+    let average = state
+        .summary
+        .as_ref()
+        .map_or(0, |summary| summary.average_bytes_per_second);
+    let peak = state.summary.as_ref().map_or(current, |summary| {
+        summary.peak_bytes_per_second.max(current)
+    });
+    let status_area = bottom_row(area);
+    let metric_height = status_area.y.saturating_sub(area.y).min(6);
+    let metric_area = Rect::new(area.x, area.y, area.width, metric_height);
+    let metrics = Layout::vertical([
+        Constraint::Length(metric_height.min(2)),
+        Constraint::Length(metric_height.saturating_sub(2).min(2)),
+        Constraint::Length(metric_height.saturating_sub(4).min(2)),
+    ])
+    .split(metric_area);
+    let chart_area = Rect::new(
+        area.x,
+        metric_area.bottom(),
+        area.width,
+        status_area.y.saturating_sub(metric_area.bottom()),
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                tr(model.language, "当前速率  ", "Current speed  "),
+                Style::default().fg(MUTED),
+            ),
+            Span::styled(
+                format_speed_dual(current),
+                Style::default().fg(PRIMARY).add_modifier(Modifier::BOLD),
+            ),
+        ])),
+        metrics[0],
+    );
+    frame.render_widget(
+        Paragraph::new(format!(
+            "{}: {}    {}: {}",
+            tr(model.language, "平均", "Average"),
+            format_speed_dual(average),
+            tr(model.language, "峰值", "Peak"),
+            format_speed_dual(peak)
+        )),
+        metrics[1],
+    );
+    frame.render_widget(
+        Paragraph::new(format!(
+            "{}: {}    {}: {:.1}s    {}: {}",
+            tr(model.language, "已下载", "Downloaded"),
+            format_bytes(total),
+            tr(model.language, "用时", "Elapsed"),
+            elapsed as f64 / 1_000.0,
+            tr(model.language, "状态", "Status"),
+            task_label(&state.common.status, model.language).trim()
+        )),
+        metrics[2],
+    );
+    let history = state
+        .samples
+        .iter()
+        .map(|sample| sample.bytes_per_second)
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Sparkline::default()
+            .block(Block::default().borders(Borders::TOP).title(tr(
+                model.language,
+                " 速率历史 ",
+                " Speed history ",
+            )))
+            .data(&history)
+            .style(Style::default().fg(PRIMARY)),
+        chart_area,
+    );
+    render_diagnostic_status(frame, status_area, &state.common.status, model.language);
+}
+
+fn render_link_quality(area: Rect, frame: &mut Frame, model: &AppModel) {
+    let state = &model.diagnostics.link_quality;
+    let is_wifi = snapshot_is_wifi(state);
+    let dimension_count = if is_wifi { 6 } else { 3 };
+    let metric_count = if is_wifi { 6 } else { 4 };
+    let status_area = bottom_row(area);
+    let rssi_height = if is_wifi {
+        3.min(status_area.y.saturating_sub(area.y))
+    } else {
+        0
+    };
+    let rssi_area = Rect::new(
+        area.x,
+        status_area.y.saturating_sub(rssi_height),
+        area.width,
+        rssi_height,
+    );
+    let header_area = Rect::new(area.x, area.y, area.width, area.height.min(1));
+    let overall_area = Rect::new(
+        area.x,
+        header_area.bottom(),
+        area.width,
+        area.height.saturating_sub(1).min(1),
+    );
+    let dimensions_area = Rect::new(area.x, overall_area.bottom(), area.width, dimension_count);
+    let metrics_area = Rect::new(area.x, dimensions_area.bottom(), area.width, metric_count);
+    let history_area = Rect::new(
+        area.x,
+        metrics_area.bottom(),
+        area.width,
+        rssi_area.y.saturating_sub(metrics_area.bottom()),
+    );
+
+    let snapshot = state.snapshot.as_ref();
+    let adapter_name = snapshot
+        .map(|value| value.adapter.name.as_str())
+        .or_else(|| {
+            state
+                .adapters
+                .get(state.selected_adapter)
+                .map(|value| value.name.as_str())
+        })
+        .unwrap_or(tr(model.language, "无可用网卡", "No adapter"));
+    let mut header = vec![
+        Span::styled(
+            format!("{}: ", tr(model.language, "网卡", "Adapter")),
+            Style::default().fg(MUTED),
+        ),
+        Span::styled(adapter_name.to_string(), Style::default().fg(SECONDARY)),
+    ];
+    if let Some(snapshot) = snapshot {
+        header.push(Span::styled(
+            format!(
+                " [{}] · {}",
+                if snapshot.adapter.is_wifi {
+                    tr(model.language, "无线", "Wireless")
+                } else {
+                    tr(model.language, "有线", "Wired")
+                },
+                snapshot.adapter.ipv4
+            ),
+            Style::default().fg(SECONDARY),
+        ));
+        if let Some(wireless) = &snapshot.wireless {
+            header.push(Span::styled(
+                format!("  SSID: {}", wireless.ssid),
+                Style::default().fg(Color::White),
+            ));
+        }
+    }
+    frame.render_widget(Paragraph::new(Line::from(header)), header_area);
+
+    if let Some(summary) = &state.summary {
+        frame.render_widget(
+            Gauge::default()
+                .gauge_style(
+                    Style::default()
+                        .fg(link_grade_color(summary.grade))
+                        .bg(SELECTED),
+                )
+                .ratio((summary.score / 100.0).clamp(0.0, 1.0))
+                .label(format!(
+                    "{}: {} ({:.0})",
+                    tr(model.language, "评级", "Grade"),
+                    link_grade(summary.grade, model.language),
+                    summary.score
+                )),
+            overall_area,
+        );
+        let dimensions = summary
+            .dimensions
+            .iter()
+            .take(dimension_count as usize)
+            .map(|dimension| {
+                let color = link_score_color(dimension.score);
+                Line::from(vec![
+                    Span::styled(
+                        pad_display(link_dimension(dimension.kind, model.language), 8),
+                        Style::default().fg(MUTED),
+                    ),
+                    Span::styled(score_bar(dimension.score, 12), Style::default().fg(color)),
+                    Span::styled(
+                        format!(
+                            " {:>3.0}{}",
+                            dimension.score,
+                            if summary.weakest == Some(dimension.kind) {
+                                " ◀"
+                            } else {
+                                ""
+                            }
+                        ),
+                        Style::default().fg(color),
+                    ),
+                ])
+            })
+            .collect::<Vec<_>>();
+        frame.render_widget(Paragraph::new(dimensions), dimensions_area);
+
+        let min = state
+            .samples
+            .last()
+            .and_then(|sample| sample.min_latency_ms);
+        let max = state
+            .samples
+            .last()
+            .and_then(|sample| sample.max_latency_ms);
+        let mut metrics = vec![
+            Line::from(format!(
+                "{}: {}/{}/{} ms   {}: {} ms",
+                tr(model.language, "最小/平均/最大", "Min/avg/max"),
+                format_optional_u64(min),
+                format_optional_f64(summary.average_latency_ms),
+                format_optional_u64(max),
+                tr(model.language, "抖动", "Jitter"),
+                format_optional_f64(summary.jitter_ms)
+            )),
+            Line::from(format!(
+                "{}: {:.1}%   {}: {}/{}",
+                tr(model.language, "丢包", "Loss"),
+                summary.loss_percent,
+                tr(model.language, "收发", "Received"),
+                summary.received,
+                summary.sent
+            )),
+        ];
+        if let Some(wireless) = snapshot.and_then(|value| value.wireless.as_ref()) {
+            let sample = state.samples.last();
+            metrics.extend([
+                Line::from(format!(
+                    "RSSI: {}/{}/{} dBm   {}: {} ({}, {} MHz)",
+                    sample
+                        .and_then(|value| value.min_rssi_dbm)
+                        .map_or_else(|| "—".into(), |value| value.to_string()),
+                    format_optional_f64(summary.average_rssi_dbm),
+                    sample
+                        .and_then(|value| value.max_rssi_dbm)
+                        .map_or_else(|| "—".into(), |value| value.to_string()),
+                    tr(model.language, "信道", "Channel"),
+                    wireless.channel,
+                    wireless.band,
+                    wireless.frequency_mhz
+                )),
+                Line::from(format!(
+                    "{}: {}%   {}: {}",
+                    tr(model.language, "信号质量", "Signal quality"),
+                    format_optional_f64(summary.average_signal_quality),
+                    tr(model.language, "制式", "PHY"),
+                    wireless.phy_type
+                )),
+                Line::from(format!(
+                    "Tx/Rx: {}/{} Mbps",
+                    wireless.tx_rate_mbps, wireless.rx_rate_mbps
+                )),
+                Line::from(format!(
+                    "BSSID: {}   {} / {}",
+                    wireless.bssid, wireless.authentication, wireless.cipher
+                )),
+            ]);
+        } else if let Some(snapshot) = snapshot {
+            metrics.extend([
+                Line::from(format!(
+                    "{}: {}",
+                    tr(model.language, "链路速率", "Link speed"),
+                    summary
+                        .link_speed_bps
+                        .map(|speed| format_speed_dual(speed / 8))
+                        .unwrap_or_else(|| "—".into())
+                )),
+                Line::from(format!(
+                    "MAC: {}   IPv4: {}",
+                    snapshot.adapter.mac, snapshot.adapter.ipv4
+                )),
+            ]);
+        }
+        frame.render_widget(Paragraph::new(metrics), metrics_area);
+    } else {
+        frame.render_widget(
+            Paragraph::new(tr(
+                model.language,
+                "等待链路质量样本…",
+                "Waiting for link-quality samples…",
+            ))
+            .style(Style::default().fg(SUBTLE)),
+            dimensions_area,
+        );
+    }
+
+    let latency = state
+        .samples
+        .iter()
+        .map(|sample| sample.latency_ms.unwrap_or_default())
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Sparkline::default()
+            .block(Block::default().borders(Borders::TOP).title(tr(
+                model.language,
+                "延迟历史",
+                "Latency History",
+            )))
+            .data(&latency)
+            .style(Style::default().fg(PRIMARY)),
+        history_area,
+    );
+    if is_wifi {
+        let rssi = state
+            .samples
+            .iter()
+            .map(|sample| {
+                sample
+                    .rssi_dbm
+                    .map_or(0, |value| (value + 100).max(0) as u64)
+            })
+            .collect::<Vec<_>>();
+        frame.render_widget(
+            Sparkline::default()
+                .block(Block::default().borders(Borders::TOP).title(tr(
+                    model.language,
+                    "RSSI 历史",
+                    "RSSI History",
+                )))
+                .data(&rssi)
+                .style(Style::default().fg(Color::Magenta)),
+            rssi_area,
+        );
+    }
+    render_diagnostic_status(frame, status_area, &state.common.status, model.language);
+}
+
+fn snapshot_is_wifi(state: &iptools_core::LinkQualityState) -> bool {
+    state
+        .snapshot
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.adapter.is_wifi)
+}
+
+fn format_speed_dual(bytes_per_second: u64) -> String {
+    if bytes_per_second >= 1_000_000 {
+        format!(
+            "{:.2} MB/s · {:.2} Mbps",
+            bytes_per_second as f64 / 1_000_000.0,
+            bytes_per_second as f64 * 8.0 / 1_000_000.0
+        )
+    } else {
+        format!(
+            "{:.1} KB/s · {:.2} Mbps",
+            bytes_per_second as f64 / 1_000.0,
+            bytes_per_second as f64 * 8.0 / 1_000_000.0
+        )
+    }
+}
+
+fn format_optional_f64(value: Option<f64>) -> String {
+    value.map_or_else(|| "—".into(), |value| format!("{value:.1}"))
+}
+
+fn format_optional_u64(value: Option<u64>) -> String {
+    value.map_or_else(|| "—".into(), |value| value.to_string())
+}
+
+fn pad_display(value: &str, width: usize) -> String {
+    let padding = width.saturating_sub(UnicodeWidthStr::width(value));
+    format!("{value}{}", " ".repeat(padding))
+}
+
+fn link_grade(grade: LinkQualityGrade, language: Language) -> &'static str {
+    match grade {
+        LinkQualityGrade::Excellent => tr(language, "优秀", "Excellent"),
+        LinkQualityGrade::Good => tr(language, "良好", "Good"),
+        LinkQualityGrade::Fair => tr(language, "一般", "Fair"),
+        LinkQualityGrade::Poor => tr(language, "较差", "Poor"),
+    }
+}
+
+fn link_grade_color(grade: LinkQualityGrade) -> Color {
+    match grade {
+        LinkQualityGrade::Excellent => Color::Green,
+        LinkQualityGrade::Good => Color::Cyan,
+        LinkQualityGrade::Fair => Color::Yellow,
+        LinkQualityGrade::Poor => Color::Red,
+    }
+}
+
+fn link_score_color(score: f64) -> Color {
+    if score >= 85.0 {
+        Color::Green
+    } else if score >= 70.0 {
+        Color::Cyan
+    } else if score >= 50.0 {
+        Color::Yellow
+    } else {
+        Color::Red
+    }
+}
+
+fn link_dimension(kind: LinkQualityDimensionKind, language: Language) -> &'static str {
+    match kind {
+        LinkQualityDimensionKind::Loss => tr(language, "丢包", "Loss"),
+        LinkQualityDimensionKind::Latency => tr(language, "延迟", "Latency"),
+        LinkQualityDimensionKind::Jitter => tr(language, "抖动", "Jitter"),
+        LinkQualityDimensionKind::Signal => tr(language, "信号", "Signal"),
+        LinkQualityDimensionKind::Rate => tr(language, "速率", "Rate"),
+        LinkQualityDimensionKind::Phy => tr(language, "制式", "PHY"),
+    }
+}
+
+fn score_bar(score: f64, width: usize) -> String {
+    let filled = ((score / 100.0) * width as f64).round() as usize;
+    let filled = filled.min(width);
+    format!("{}{}", "█".repeat(filled), "░".repeat(width - filled))
+}
+
+fn diagnostic_target_index(tool: DiagnosticTool) -> usize {
+    if tool == DiagnosticTool::LinkQuality {
+        1
+    } else {
+        0
+    }
+}
+
 fn diagnostic_failure(
     common: &iptools_core::DiagnosticCommonState,
     language: Language,
@@ -1067,6 +2053,7 @@ fn active_diagnostic_config_index(model: &AppModel) -> usize {
     match model.diagnostics.tool {
         DiagnosticTool::Ping => model.diagnostics.ping.config_selected,
         DiagnosticTool::Trace => model.diagnostics.trace.config_selected,
+        DiagnosticTool::LinkQuality => model.diagnostics.link_quality.config_selected,
         _ => 0,
     }
 }
@@ -1105,6 +2092,46 @@ fn diagnostic_fields(model: &AppModel) -> Vec<(&'static str, String)> {
                 model.diagnostics.trace.timeout_input.clone(),
             ),
         ],
+        DiagnosticTool::PublicSpeed => vec![(
+            tr(model.language, "服务器", "Server"),
+            model
+                .diagnostics
+                .public_speed
+                .server
+                .clone()
+                .unwrap_or_else(|| tr(model.language, "自动选择", "Automatic").into()),
+        )],
+        DiagnosticTool::LinkQuality => {
+            let state = &model.diagnostics.link_quality;
+            let adapter = state
+                .adapters
+                .get(state.selected_adapter)
+                .map(|adapter| format!("{} ({})", adapter.name, adapter.ipv4))
+                .unwrap_or_else(|| tr(model.language, "无可用网卡", "No adapter").into());
+            vec![
+                (tr(model.language, "网卡", "Adapter"), adapter),
+                (
+                    tr(model.language, "目标", "Target"),
+                    state.params.target.clone(),
+                ),
+                (
+                    tr(model.language, "次数", "Count"),
+                    state.params.count.clone(),
+                ),
+                (
+                    tr(model.language, "间隔", "Interval"),
+                    state.params.interval_ms.clone(),
+                ),
+                (
+                    tr(model.language, "超时", "Timeout"),
+                    state.params.timeout_ms.clone(),
+                ),
+                (
+                    tr(model.language, "载荷", "Payload"),
+                    state.params.packet_size.clone(),
+                ),
+            ]
+        }
         _ => vec![(
             tr(model.language, "目标", "Target"),
             model.diagnostics.active_target().to_string(),
@@ -1112,30 +2139,75 @@ fn diagnostic_fields(model: &AppModel) -> Vec<(&'static str, String)> {
     }
 }
 
-fn render_settings(frame: &mut Frame, area: Rect, model: &AppModel) {
+fn render_settings(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut UiState) {
     let language = match model.language {
         Language::Zh => "简体中文",
         Language::En => "English",
     };
-    let rows = vec![
-        Row::new(["Language".to_string(), language.to_string()]),
-        Row::new([
-            "Scan concurrency".to_string(),
+    let rows = Layout::vertical([Constraint::Min(0), Constraint::Length(3)]).split(area);
+    let list_inner = Block::bordered().inner(rows[0]);
+    for index in 0..3 {
+        ui.settings_regions.push((
+            Rect::new(list_inner.x, list_inner.y + index, list_inner.width, 1),
+            index as usize,
+        ));
+    }
+    let values = [
+        (tr(model.language, "语言", "Language"), language.to_string()),
+        (
+            tr(model.language, "扫描并发数", "Scan concurrency"),
             model.scan_concurrency.to_string(),
-        ]),
-        Row::new([
-            "Runtime".to_string(),
-            if model.demo { "Demo" } else { "Native" }.to_string(),
-        ]),
-        Row::new([
-            "Persistence".to_string(),
-            "Browser local / native config.json".to_string(),
-        ]),
+        ),
+        (
+            tr(
+                model.language,
+                "清空参数记忆",
+                "Reset remembered parameters",
+            ),
+            if model.settings_just_reset {
+                tr(model.language, "已清空 ✓", "Cleared ✓").to_string()
+            } else {
+                tr(model.language, "按 Enter 清空", "Press Enter to clear").to_string()
+            },
+        ),
     ];
+    let items = values
+        .into_iter()
+        .enumerate()
+        .map(|(index, (label, value))| {
+            let selected = index == model.settings_selected;
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    if selected { "> " } else { "  " },
+                    Style::default().fg(PRIMARY),
+                ),
+                Span::styled(pad_display(label, 20), Style::default().fg(MUTED)),
+                Span::raw(" : "),
+                Span::styled(
+                    value,
+                    Style::default().fg(SECONDARY).add_modifier(Modifier::BOLD),
+                ),
+            ]))
+            .style(if selected {
+                Style::default().bg(SELECTED)
+            } else {
+                Style::default()
+            })
+        });
     frame.render_widget(
-        Table::new(rows, [Constraint::Length(24), Constraint::Min(20)])
-            .block(Block::bordered().title(tr(model.language, " 设置 ", " Settings "))),
-        area,
+        List::new(items).block(Block::bordered().title(tr(model.language, " 设置 ", " Settings "))),
+        rows[0],
+    );
+    frame.render_widget(
+        Paragraph::new(tr(
+            model.language,
+            "方向键选择与修改；Enter 确认。清空仅重置参数记忆，不改变当前页面。",
+            "Use arrows to select and edit; Enter confirms. Reset keeps the current page.",
+        ))
+        .block(Block::bordered())
+        .style(Style::default().fg(Color::Yellow))
+        .alignment(Alignment::Center),
+        rows[1],
     );
 }
 
@@ -1143,11 +2215,11 @@ fn render_footer(frame: &mut Frame, area: Rect, model: &AppModel) {
     frame.render_widget(
         Paragraph::new(tr(
             model.language,
-            " [Tab] 切页  [方向键] 导航  [Enter/Space] 开始/停止  [E] 编辑  [F1] 帮助 ",
-            " [Tab] Pages  [Arrows] Navigate  [Enter/Space] Start/Stop  [E] Edit  [F1] Help ",
+            " [Tab/Shift+Tab] 切换   [Ctrl+L] 语言   [F1] 帮助   [Ctrl+C] 退出 ",
+            " [Tab/Shift+Tab] Switch   [Ctrl+L] Language   [F1] Help   [Ctrl+C] Quit ",
         ))
         .style(Style::default().fg(MUTED))
-        .alignment(Alignment::Center),
+        .alignment(Alignment::Left),
         area,
     );
 }
@@ -1211,14 +2283,19 @@ fn page_label(page: Page, language: Language) -> &'static str {
     }
 }
 
-fn tool_label(tool: DiagnosticTool) -> &'static str {
-    match tool {
-        DiagnosticTool::Ping => "Ping",
-        DiagnosticTool::Trace => "Trace Route",
-        DiagnosticTool::PortScan => "Port Scan",
-        DiagnosticTool::PublicSpeed => "Public Speed",
-        DiagnosticTool::LinkQuality => "Link Quality",
-        DiagnosticTool::LanSpeed => "LAN Speed",
+fn tool_label(tool: DiagnosticTool, language: Language) -> &'static str {
+    match (tool, language) {
+        (DiagnosticTool::Ping, _) => "Ping",
+        (DiagnosticTool::Trace, Language::Zh) => "路由追踪",
+        (DiagnosticTool::PortScan, Language::Zh) => "端口扫描",
+        (DiagnosticTool::PublicSpeed, Language::Zh) => "公网测速",
+        (DiagnosticTool::LinkQuality, Language::Zh) => "链路质量",
+        (DiagnosticTool::LanSpeed, Language::Zh) => "局域网测速",
+        (DiagnosticTool::Trace, Language::En) => "Trace Route",
+        (DiagnosticTool::PortScan, Language::En) => "Port Scan",
+        (DiagnosticTool::PublicSpeed, Language::En) => "Public Speed",
+        (DiagnosticTool::LinkQuality, Language::En) => "Link Quality",
+        (DiagnosticTool::LanSpeed, Language::En) => "LAN Speed",
     }
 }
 
@@ -1233,13 +2310,6 @@ fn task_label(status: &TaskStatus, language: Language) -> &'static str {
         ),
         TaskStatus::Failed(_) => tr(language, " 失败 · 点击重试 ", " Failed · click to retry "),
     }
-}
-
-fn line(label: &str, value: &str) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(format!("{label:<12}"), Style::default().fg(MUTED)),
-        Span::styled(value.to_string(), Style::default().fg(Color::White)),
-    ])
 }
 
 fn format_rate(value: u64) -> String {
@@ -1359,7 +2429,7 @@ mod tests {
                 let text = terminal.backend().to_string();
                 assert!(text.contains("192.168.1.20"), "{text}");
                 assert!(text.contains("Wireless LAN"), "{text}");
-                assert_eq!(ui.hit_test(2, 5), Some(Action::SelectAdapter(0)));
+                assert_eq!(ui.hit_test(2, 4), Some(Action::SelectAdapter(0)));
 
                 model.page = Page::Traffic;
                 model.traffic.rows = vec![iptools_core::TrafficRow {
@@ -1450,6 +2520,7 @@ mod tests {
                     model.scanner.results = vec![iptools_core::ScanHost {
                         ip: "192.168.1.1".into(),
                         mac: "00:11:22:33:44:55".into(),
+                        vendor: "Example Networks".into(),
                         hostname: "gateway".into(),
                     }];
                     let mut ui = UiState::default();
@@ -1503,7 +2574,8 @@ mod tests {
                             "Operation failed"
                         }));
                     } else {
-                        assert!(text.contains("open: 443"));
+                        assert!(text.contains("443"));
+                        assert!(text.contains("HTTPS"));
                     }
                     assert!(ui.diagnostic_main.is_some());
                 }
@@ -1532,8 +2604,17 @@ mod tests {
             let text = terminal.backend().to_string();
             assert!(text.contains("8.8.8.8"), "{text}");
             assert!(text.contains("1000 ms"), "{text}");
+            assert!(text.contains("reply 3: 20 ms"), "{text}");
+            assert!(
+                text.contains(if language == Language::Zh {
+                    "运行中"
+                } else {
+                    "Running"
+                }),
+                "{text}"
+            );
             assert_eq!(
-                ui.hit_test(107, 4),
+                ui.hit_test(89, 5),
                 Some(Action::SelectDiagnosticField(0, 1))
             );
             assert_eq!(
@@ -1575,6 +2656,170 @@ mod tests {
                 }),
                 "{text}"
             );
+        }
+    }
+
+    #[test]
+    fn public_speed_and_link_quality_render_full_shared_results_in_both_languages() {
+        for language in [Language::En, Language::Zh] {
+            let backend = TestBackend::new(120, 36);
+            let mut terminal = Terminal::new(backend).unwrap();
+            let mut model = AppModel::default();
+            model.page = Page::Diagnostics;
+            model.language = language;
+            model.diagnostics.focused = true;
+            model.diagnostics.focus = DiagnosticFocus::Main;
+            model.diagnostics.tool = DiagnosticTool::PublicSpeed;
+            model.diagnostics.public_speed.server = Some("demo.invalid".into());
+            model.diagnostics.public_speed.samples = vec![iptools_core::SpeedSample {
+                elapsed_ms: 2_000,
+                bytes: 16_000_000,
+                bytes_per_second: 8_000_000,
+            }];
+            model.diagnostics.public_speed.summary = Some(iptools_core::SpeedSummary {
+                average_bytes_per_second: 7_000_000,
+                peak_bytes_per_second: 8_000_000,
+                total_bytes: 16_000_000,
+            });
+            let mut ui = UiState::default();
+            terminal
+                .draw(|frame| render(frame, &model, &mut ui))
+                .unwrap();
+            let text = terminal.backend().to_string();
+            assert!(text.contains("64.00 Mbps"), "{text}");
+            assert!(text.contains("demo.invalid"), "{text}");
+
+            let adapter = iptools_core::LinkQualityAdapter {
+                key: "wifi-guid".into(),
+                name: "Wi-Fi".into(),
+                guid: "wifi-guid".into(),
+                ipv4: "192.168.1.21".into(),
+                is_wifi: true,
+                link_speed_bps: Some(866_000_000),
+                mac: "02:00:00:00:00:21".into(),
+            };
+            let snapshot = iptools_core::LinkQualitySnapshot {
+                adapter: adapter.clone(),
+                wireless: Some(iptools_core::WirelessSnapshot {
+                    ssid: "Lab".into(),
+                    bssid: "02:AA:BB:CC:DD:01".into(),
+                    signal_quality: 88,
+                    rssi_dbm: -55,
+                    phy_type: "802.11ax · Wi-Fi 6".into(),
+                    wifi_generation: 6,
+                    band: "5 GHz".into(),
+                    channel: 36,
+                    frequency_mhz: 5_180,
+                    rx_rate_mbps: 866,
+                    tx_rate_mbps: 780,
+                    authentication: "WPA2-Personal".into(),
+                    cipher: "CCMP (AES)".into(),
+                }),
+            };
+            let sample = iptools_core::LinkQualitySample {
+                sequence: 8,
+                latency_ms: Some(20),
+                sent: 8,
+                received: 8,
+                min_latency_ms: Some(18),
+                average_latency_ms: Some(20.0),
+                max_latency_ms: Some(23),
+                jitter_ms: Some(2.0),
+                loss_percent: 0.0,
+                rssi_dbm: Some(-55),
+                min_rssi_dbm: Some(-58),
+                average_rssi_dbm: Some(-56.0),
+                max_rssi_dbm: Some(-54),
+                signal_quality: Some(88),
+                min_signal_quality: Some(84),
+                average_signal_quality: Some(87.0),
+                max_signal_quality: Some(90),
+                link_speed_bps: None,
+            };
+            model.diagnostics.tool = DiagnosticTool::LinkQuality;
+            model.diagnostics.focus = DiagnosticFocus::Config;
+            model.diagnostics.link_quality.adapters = vec![adapter];
+            model.diagnostics.link_quality.snapshot = Some(snapshot.clone());
+            model.diagnostics.link_quality.summary = Some(
+                iptools_core::link_quality::summary_from_sample(&snapshot, &sample),
+            );
+            terminal
+                .draw(|frame| render(frame, &model, &mut ui))
+                .unwrap();
+            let text = terminal.backend().to_string();
+            assert!(text.contains("Lab"), "{text}");
+            assert!(text.contains("802.11ax"), "{text}");
+            assert!(text.contains(if language == Language::Zh {
+                "优秀"
+            } else {
+                "Excellent"
+            }));
+            assert!(matches!(
+                ui.hit_test(89, 7),
+                Some(Action::SelectDiagnosticField(1, _))
+            ));
+        }
+    }
+
+    #[test]
+    fn public_speed_and_link_quality_states_render_at_compact_and_standard_sizes() {
+        for (width, height) in [(80, 24), (120, 36)] {
+            for language in [Language::En, Language::Zh] {
+                for tool in [DiagnosticTool::PublicSpeed, DiagnosticTool::LinkQuality] {
+                    for status in [
+                        TaskStatus::Idle,
+                        TaskStatus::Running,
+                        TaskStatus::Done,
+                        TaskStatus::Failed("offline".into()),
+                    ] {
+                        let backend = TestBackend::new(width, height);
+                        let mut terminal = Terminal::new(backend).unwrap();
+                        let mut model = AppModel::default();
+                        model.page = Page::Diagnostics;
+                        model.language = language;
+                        model.diagnostics.tool = tool;
+                        model.diagnostics.active_common_mut().status = status;
+                        let mut ui = UiState::default();
+                        terminal
+                            .draw(|frame| render(frame, &model, &mut ui))
+                            .unwrap();
+                        let text = terminal.backend().to_string();
+                        assert!(text.contains(tool_label(tool, language)), "{text}");
+                        assert!(ui.diagnostic_main.is_some());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn settings_preserve_v031_list_reset_feedback_and_mouse_rows() {
+        for (width, height) in [(80, 24), (120, 36), (160, 48)] {
+            for language in [Language::En, Language::Zh] {
+                let backend = TestBackend::new(width, height);
+                let mut terminal = Terminal::new(backend).unwrap();
+                let mut model = AppModel::default();
+                model.page = Page::Settings;
+                model.language = language;
+                model.settings_selected = 2;
+                model.settings_just_reset = true;
+                model.scan_concurrency = 120;
+                let mut ui = UiState::default();
+                terminal
+                    .draw(|frame| render(frame, &model, &mut ui))
+                    .unwrap();
+                let text = terminal.backend().to_string();
+                assert!(text.contains("120"), "{text}");
+                assert!(
+                    text.contains(if language == Language::Zh {
+                        "已清空"
+                    } else {
+                        "Cleared"
+                    }),
+                    "{text}"
+                );
+                assert_eq!(ui.hit_test(2, 6), Some(Action::SelectSetting(2)));
+            }
         }
     }
 }

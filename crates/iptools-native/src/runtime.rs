@@ -128,6 +128,22 @@ impl NativeRuntime {
                 self.cancel(job);
                 Ok(())
             }
+            Effect::StartPublicSpeed { job, request } => {
+                self.spawn_public_speed(job, request);
+                Ok(())
+            }
+            Effect::StopPublicSpeed(job) => {
+                self.cancel(job);
+                Ok(())
+            }
+            Effect::StartLinkQuality { job, request } => {
+                self.spawn_link_quality(job, request);
+                Ok(())
+            }
+            Effect::StopLinkQuality(job) => {
+                self.cancel(job);
+                Ok(())
+            }
             Effect::StopPortScan(job) => {
                 self.cancel(job);
                 Ok(())

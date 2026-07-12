@@ -23,6 +23,11 @@ try {
   await page.waitForSelector("#terminal_ratzilla_grid");
   await page.waitForTimeout(600);
   await page.evaluate(() => document.fonts.ready);
+  assert.match(
+    await page.locator("#terminal").textContent(),
+    /\[Ctrl\+C\].*(退出|Quit)/,
+    "DOM terminal size must keep the bottom footer inside the visible grid",
+  );
   assert.match(await page.locator(".demo-badge").textContent(), /v0\.4 PREVIEW.*SIMULATED DATA/);
   assert.ok(
     (await page.locator(".demo-badge").boundingBox())?.height <= 24,
@@ -59,7 +64,7 @@ try {
   );
   await page.waitForFunction(() => {
     const text = document.getElementById("terminal")?.textContent ?? "";
-    return text.includes("198.51.100.27") && text.includes("完成");
+    return text.includes("198.51.100.27") && text.includes("公网信息");
   });
 
   const before = hash(await page.locator("#terminal").screenshot());
@@ -70,7 +75,7 @@ try {
   await page.keyboard.press("r");
   await page.waitForFunction(() => {
     const text = document.getElementById("terminal")?.textContent ?? "";
-    return text.includes("192.168.50.37") && text.includes("完成");
+    return text.includes("192.168.50.37") && text.includes("适配器详情");
   });
   await page.waitForTimeout(250);
   await page.screenshot({
@@ -106,7 +111,7 @@ try {
   await page.keyboard.press("Enter");
   await page.waitForFunction(() => {
     const text = document.getElementById("terminal")?.textContent ?? "";
-    return text.includes("10.20.30.40") && text.includes("完成");
+    return text.includes("10.20.30.40") && text.includes("适配器详情");
   });
 
   await page.keyboard.press("Tab");
@@ -234,16 +239,22 @@ try {
     await nextPageButton.click();
   }
   await settingsPage.waitForFunction(
-    () => document.getElementById("terminal")?.textContent?.includes("Persistence"),
+    () => document.getElementById("terminal")?.textContent?.includes("Reset remembered parameters"),
   );
+  await settingsPage.keyboard.press("ArrowDown");
   await settingsPage.keyboard.press("ArrowRight");
   await settingsPage.waitForFunction(
     () => localStorage.getItem("iptools.web.v1.scan_concurrency") === "60",
   );
   await settingsPage.waitForFunction(() =>
-    /Scan concurrency\s+60/.test(document.getElementById("terminal")?.textContent ?? ""),
+    /Scan concurrency\s*:\s*60/.test(document.getElementById("terminal")?.textContent ?? ""),
   );
-  assert.match(await settingsPage.locator("#terminal").textContent(), /Scan concurrency\s+60/);
+  assert.match(await settingsPage.locator("#terminal").textContent(), /Scan concurrency\s*:\s*60/);
+  await settingsPage.keyboard.press("ArrowDown");
+  await settingsPage.keyboard.press("Enter");
+  await settingsPage.waitForFunction(() =>
+    document.getElementById("terminal")?.textContent?.includes("Cleared"),
+  );
   await settingsPage.close();
 
   const trafficPage = await browser.newPage({ viewport: { width: 1280, height: 900 } });
@@ -269,11 +280,16 @@ try {
   await trafficPage.waitForFunction(() =>
     document.getElementById("terminal")?.textContent?.includes("Live Traffic"),
   );
+  const beforeTrafficRefresh = Number(
+    await trafficPage.locator("#terminal").getAttribute("data-rendered-state-revision"),
+  );
   await trafficPage.keyboard.press("r");
-  await trafficPage.waitForFunction(() => {
-    const text = document.getElementById("terminal")?.textContent ?? "";
-    return text.includes("Done") && text.includes("Ethernet");
-  });
+  await trafficPage.waitForFunction(
+    (revision) =>
+      Number(document.getElementById("terminal")?.dataset.renderedStateRevision) > revision &&
+      document.getElementById("terminal")?.textContent?.includes("Ethernet"),
+    beforeTrafficRefresh,
+  );
   await trafficPage.close();
 
   const diagnosticsPage = await browser.newPage({ viewport: { width: 1280, height: 900 } });
@@ -309,9 +325,14 @@ try {
   await diagnosticsPage.keyboard.press("Space");
   await diagnosticsPage.keyboard.press("Tab");
   await diagnosticsPage.keyboard.press("ArrowDown");
+  const beforeIntervalAdjust = Number(
+    await diagnosticsPage.locator("#terminal").getAttribute("data-rendered-input-generation"),
+  );
   await diagnosticsPage.keyboard.press("ArrowRight");
-  await diagnosticsPage.waitForFunction(() =>
-    /间隔\s+1100 ms/.test(document.getElementById("terminal")?.textContent ?? ""),
+  await diagnosticsPage.waitForFunction(
+    (generation) =>
+      Number(document.getElementById("terminal")?.dataset.renderedInputGeneration) > generation,
+    beforeIntervalAdjust,
   );
   await diagnosticsPage.keyboard.press("ArrowUp");
   await diagnosticsPage.keyboard.press("Control+r");
@@ -330,6 +351,36 @@ try {
   await waitForStableTerminal(diagnosticsPage);
   await diagnosticsPage.screenshot({
     path: "../../target/playwright-web-ping-trace-zh.png",
+    fullPage: false,
+  });
+  await diagnosticsPage.keyboard.press("Shift+Tab");
+  await diagnosticsPage.keyboard.press("ArrowDown");
+  await diagnosticsPage.keyboard.press("ArrowDown");
+  await diagnosticsPage.keyboard.press("Tab");
+  await diagnosticsPage.keyboard.press("Tab");
+  await diagnosticsPage.keyboard.press("ArrowRight");
+  await diagnosticsPage.keyboard.press("Shift+Tab");
+  await diagnosticsPage.keyboard.press("Space");
+  await diagnosticsPage.waitForFunction(() => {
+    const text = document.getElementById("terminal")?.textContent ?? "";
+    return text.includes("HomeLab") && text.includes("评级") && text.includes("完成");
+  });
+  await waitForStableTerminal(diagnosticsPage);
+  await diagnosticsPage.screenshot({
+    path: "../../target/playwright-web-link-quality-zh.png",
+    fullPage: false,
+  });
+  await diagnosticsPage.keyboard.press("Shift+Tab");
+  await diagnosticsPage.keyboard.press("ArrowDown");
+  await diagnosticsPage.keyboard.press("Tab");
+  await diagnosticsPage.keyboard.press("Space");
+  await diagnosticsPage.waitForFunction(() => {
+    const text = document.getElementById("terminal")?.textContent ?? "";
+    return text.includes("demo.invalid") && text.includes("Mbps") && text.includes("完成");
+  });
+  await waitForStableTerminal(diagnosticsPage);
+  await diagnosticsPage.screenshot({
+    path: "../../target/playwright-web-public-link-zh.png",
     fullPage: false,
   });
   await diagnosticsPage.close();
@@ -353,6 +404,13 @@ function hash(buffer) {
 }
 
 async function waitForStableTerminal(page) {
+  await page.waitForFunction(() => {
+    const terminal = document.getElementById("terminal");
+    return (
+      terminal?.dataset.pendingStateRevision !== undefined &&
+      terminal.dataset.pendingStateRevision === terminal.dataset.renderedStateRevision
+    );
+  });
   let previous = null;
   let stableFrames = 0;
   for (let attempt = 0; attempt < 20; attempt += 1) {

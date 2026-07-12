@@ -98,6 +98,7 @@ pub enum Action {
     History,
     SelectAdapter(usize),
     SelectAdapterField(crate::AdapterField, usize),
+    SelectSetting(usize),
 }
 
 impl KeyEvent {

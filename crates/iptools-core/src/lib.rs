@@ -3,6 +3,7 @@
 mod config;
 mod effect;
 mod input;
+pub mod link_quality;
 mod model;
 
 pub use config::*;

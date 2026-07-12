@@ -266,6 +266,8 @@ pub struct TrafficState {
 pub struct ScanHost {
     pub ip: String,
     pub mac: String,
+    #[serde(default)]
+    pub vendor: String,
     pub hostname: String,
 }
 
@@ -458,6 +460,12 @@ pub struct PublicSpeedState {
 pub struct LinkQualityState {
     pub request: crate::LinkQualityRequest,
     pub common: DiagnosticCommonState,
+    pub adapters: Vec<crate::LinkQualityAdapter>,
+    pub selected_adapter: usize,
+    pub params: crate::LinkParams,
+    pub persist: crate::LinkQualityPersist,
+    pub config_selected: usize,
+    pub snapshot: Option<crate::LinkQualitySnapshot>,
     pub samples: Vec<crate::LinkQualitySample>,
     pub summary: Option<crate::LinkQualitySummary>,
 }
@@ -557,6 +565,10 @@ pub struct AppModel {
     pub diagnostics: DiagnosticsState,
     pub scan_concurrency: usize,
     #[serde(default)]
+    pub settings_selected: usize,
+    #[serde(default)]
+    pub settings_just_reset: bool,
+    #[serde(default)]
     public_ip_config: crate::PublicIpConfig,
     adapter_edit_persist: crate::AdapterEditPersist,
     adapter_history: Vec<String>,
@@ -578,6 +590,8 @@ impl Default for AppModel {
             traffic: TrafficState::default(),
             diagnostics: DiagnosticsState::default(),
             scan_concurrency: 50,
+            settings_selected: 0,
+            settings_just_reset: false,
             public_ip_config: crate::PublicIpConfig::default(),
             adapter_edit_persist: crate::AdapterEditPersist::default(),
             adapter_history: Vec::new(),
@@ -603,6 +617,17 @@ impl AppModel {
         self.diagnostics.trace.max_hops_input = config.session.trace.max_hops.clone();
         self.diagnostics.trace.timeout_input = config.session.trace.timeout_ms.clone();
         self.sync_trace_request();
+        self.diagnostics.link_quality.persist = config.session.link_quality.clone();
+        self.diagnostics.link_quality.params = self
+            .diagnostics
+            .link_quality
+            .persist
+            .selected
+            .as_ref()
+            .and_then(|key| self.diagnostics.link_quality.persist.adapters.get(key))
+            .cloned()
+            .unwrap_or_default();
+        self.sync_link_quality_request();
         self.diagnostics.target_history = config.session.history.targets.clone();
         self.page = Page::from_index(config.session.ui.last_tab);
         self.diagnostics.tool = DiagnosticTool::from_index(config.session.ui.last_diag_tool);
@@ -1110,11 +1135,10 @@ impl AppModel {
     ) -> Vec<Effect> {
         let running = self.diagnostics.active_common().job.is_some();
         let selected = self.active_diagnostic_config_index();
-        let target_field = selected == 0
-            && matches!(
-                self.diagnostics.tool,
-                DiagnosticTool::Ping | DiagnosticTool::Trace
-            );
+        let target_field = matches!(
+            (self.diagnostics.tool, selected),
+            (DiagnosticTool::Ping | DiagnosticTool::Trace, 0) | (DiagnosticTool::LinkQuality, 1)
+        );
 
         if action == Some(Action::History) && target_field && !running {
             self.diagnostics.history_open = !self.diagnostics.history_open;
@@ -1186,8 +1210,10 @@ impl AppModel {
                 }
             }
         } else if !running
-            && self.diagnostics.tool == DiagnosticTool::Trace
-            && selected > 0
+            && matches!(
+                (self.diagnostics.tool, selected),
+                (DiagnosticTool::Trace, 1..) | (DiagnosticTool::LinkQuality, 2..)
+            )
             && let Some(key) = key
         {
             let mut value = self.active_diagnostic_field().to_string();
@@ -1195,7 +1221,7 @@ impl AppModel {
                 c.is_ascii_digit()
             }) {
                 self.set_active_diagnostic_field(value);
-                self.sync_trace_request();
+                self.sync_active_diagnostic_request();
                 return self.persist_active_diagnostic();
             }
         }
@@ -1225,6 +1251,14 @@ impl AppModel {
                 }
                 return self.persist_active_diagnostic();
             }
+            Some(Action::Left | Action::Right)
+                if !running
+                    && self.diagnostics.tool == DiagnosticTool::LinkQuality
+                    && selected == 0 =>
+            {
+                self.switch_link_quality_adapter(if action == Some(Action::Left) { -1 } else { 1 });
+                return self.persist_active_diagnostic();
+            }
             _ => {}
         }
         Vec::new()
@@ -1245,6 +1279,7 @@ impl AppModel {
         match self.diagnostics.tool {
             DiagnosticTool::Ping => 4,
             DiagnosticTool::Trace => 3,
+            DiagnosticTool::LinkQuality => 6,
             _ => 1,
         }
     }
@@ -1253,6 +1288,7 @@ impl AppModel {
         match self.diagnostics.tool {
             DiagnosticTool::Ping => self.diagnostics.ping.config_selected,
             DiagnosticTool::Trace => self.diagnostics.trace.config_selected,
+            DiagnosticTool::LinkQuality => self.diagnostics.link_quality.config_selected,
             _ => 0,
         }
     }
@@ -1262,6 +1298,7 @@ impl AppModel {
         match self.diagnostics.tool {
             DiagnosticTool::Ping => self.diagnostics.ping.config_selected = index,
             DiagnosticTool::Trace => self.diagnostics.trace.config_selected = index,
+            DiagnosticTool::LinkQuality => self.diagnostics.link_quality.config_selected = index,
             _ => {}
         }
         self.diagnostics.cursor = self.active_diagnostic_field().len();
@@ -1288,6 +1325,14 @@ impl AppModel {
                 1 => &self.diagnostics.trace.max_hops_input,
                 _ => &self.diagnostics.trace.timeout_input,
             },
+            DiagnosticTool::LinkQuality => match self.diagnostics.link_quality.config_selected {
+                0 => "",
+                1 => &self.diagnostics.link_quality.params.target,
+                2 => &self.diagnostics.link_quality.params.count,
+                3 => &self.diagnostics.link_quality.params.interval_ms,
+                4 => &self.diagnostics.link_quality.params.timeout_ms,
+                _ => &self.diagnostics.link_quality.params.packet_size,
+            },
             _ => self.diagnostics.active_target(),
         }
     }
@@ -1302,7 +1347,18 @@ impl AppModel {
                 1 => self.diagnostics.trace.max_hops_input = value,
                 _ => self.diagnostics.trace.timeout_input = value,
             },
+            DiagnosticTool::LinkQuality => match self.diagnostics.link_quality.config_selected {
+                1 => self.diagnostics.link_quality.params.target = value,
+                2 => self.diagnostics.link_quality.params.count = value,
+                3 => self.diagnostics.link_quality.params.interval_ms = value,
+                4 => self.diagnostics.link_quality.params.timeout_ms = value,
+                5 => self.diagnostics.link_quality.params.packet_size = value,
+                _ => {}
+            },
             _ => {}
+        }
+        if self.diagnostics.tool == DiagnosticTool::LinkQuality {
+            self.sync_link_quality_request();
         }
     }
 
@@ -1323,6 +1379,151 @@ impl AppModel {
             .clamp(100, 10_000);
     }
 
+    fn sync_link_quality_adapters(&mut self) {
+        self.stash_link_quality_params();
+        let selected_key = self
+            .diagnostics
+            .link_quality
+            .persist
+            .selected
+            .clone()
+            .or_else(|| {
+                self.diagnostics
+                    .link_quality
+                    .request
+                    .adapter
+                    .as_ref()
+                    .map(|adapter| adapter.key.clone())
+            });
+        let adapters = self
+            .adapters
+            .items
+            .iter()
+            .filter(|adapter| {
+                let status = adapter.status.to_ascii_lowercase();
+                adapter.is_physical
+                    && !adapter.ipv4.is_empty()
+                    && adapter.ipv4.parse::<std::net::Ipv4Addr>().is_ok()
+                    && !status.contains("down")
+                    && !status.contains("disconnected")
+                    && !status.contains("standby")
+            })
+            .map(link_quality_adapter)
+            .collect::<Vec<_>>();
+        let selected = selected_key
+            .as_ref()
+            .and_then(|key| adapters.iter().position(|adapter| &adapter.key == key))
+            .unwrap_or(0)
+            .min(adapters.len().saturating_sub(1));
+        self.diagnostics.link_quality.adapters = adapters;
+        self.diagnostics.link_quality.selected_adapter = selected;
+        self.load_selected_link_quality_params();
+    }
+
+    fn switch_link_quality_adapter(&mut self, delta: isize) {
+        self.stash_link_quality_params();
+        let len = self.diagnostics.link_quality.adapters.len();
+        if len > 0 {
+            self.diagnostics.link_quality.selected_adapter =
+                wrap(self.diagnostics.link_quality.selected_adapter, len, delta);
+        }
+        self.load_selected_link_quality_params();
+    }
+
+    fn stash_link_quality_params(&mut self) {
+        let Some(adapter) = self
+            .diagnostics
+            .link_quality
+            .request
+            .adapter
+            .as_ref()
+            .or_else(|| {
+                self.diagnostics
+                    .link_quality
+                    .adapters
+                    .get(self.diagnostics.link_quality.selected_adapter)
+            })
+            .cloned()
+        else {
+            return;
+        };
+        self.diagnostics.link_quality.persist.selected = Some(adapter.key.clone());
+        self.diagnostics
+            .link_quality
+            .persist
+            .adapters
+            .insert(adapter.key, self.diagnostics.link_quality.params.clone());
+    }
+
+    fn load_selected_link_quality_params(&mut self) {
+        let adapter = self
+            .diagnostics
+            .link_quality
+            .adapters
+            .get(self.diagnostics.link_quality.selected_adapter)
+            .cloned();
+        if let Some(adapter) = &adapter {
+            self.diagnostics.link_quality.params = self
+                .diagnostics
+                .link_quality
+                .persist
+                .adapters
+                .get(&adapter.key)
+                .cloned()
+                .unwrap_or_default();
+            self.diagnostics.link_quality.persist.selected = Some(adapter.key.clone());
+        }
+        self.diagnostics.link_quality.request.adapter = adapter;
+        self.sync_link_quality_request();
+    }
+
+    fn sync_link_quality_request(&mut self) {
+        let params = &self.diagnostics.link_quality.params;
+        self.diagnostics.link_quality.request.target = params.target.clone();
+        self.diagnostics.link_quality.request.count =
+            params.count.parse::<u32>().unwrap_or(20).clamp(5, 100);
+        self.diagnostics.link_quality.request.interval_ms = params
+            .interval_ms
+            .parse::<u64>()
+            .unwrap_or(200)
+            .clamp(50, 5_000);
+        self.diagnostics.link_quality.request.timeout_ms = params
+            .timeout_ms
+            .parse::<u64>()
+            .unwrap_or(1_000)
+            .clamp(100, 10_000);
+        self.diagnostics.link_quality.request.packet_size = params
+            .packet_size
+            .parse::<u64>()
+            .unwrap_or(32)
+            .clamp(0, 1_472);
+    }
+
+    fn link_quality_persist(&self) -> crate::LinkQualityPersist {
+        let mut persist = self.diagnostics.link_quality.persist.clone();
+        if let Some(adapter) = self
+            .diagnostics
+            .link_quality
+            .adapters
+            .get(self.diagnostics.link_quality.selected_adapter)
+        {
+            persist.selected = Some(adapter.key.clone());
+            persist.adapters.insert(
+                adapter.key.clone(),
+                self.diagnostics.link_quality.params.clone(),
+            );
+        }
+        persist
+    }
+
+    fn sync_active_diagnostic_request(&mut self) {
+        match self.diagnostics.tool {
+            DiagnosticTool::Trace => self.sync_trace_request(),
+            DiagnosticTool::LinkQuality => self.sync_link_quality_request(),
+            _ => {}
+        }
+    }
+
     fn persist_active_diagnostic(&self) -> Vec<Effect> {
         match self.diagnostics.tool {
             DiagnosticTool::Ping => vec![Effect::PersistSession(crate::SessionUpdate::Ping(
@@ -1340,6 +1541,9 @@ impl AppModel {
                     timeout_ms: self.diagnostics.trace.timeout_input.clone(),
                 },
             ))],
+            DiagnosticTool::LinkQuality => vec![Effect::PersistSession(
+                crate::SessionUpdate::LinkQuality(self.link_quality_persist()),
+            )],
             _ => Vec::new(),
         }
     }
@@ -1394,6 +1598,10 @@ impl AppModel {
             SelectAdapter(index) if !self.adapters.items.is_empty() => {
                 self.adapters.selected = index.min(self.adapters.items.len() - 1)
             }
+            SelectSetting(index) if self.page == Page::Settings => {
+                self.settings_selected = index.min(2);
+                self.settings_just_reset = false;
+            }
             Edit if self.page == Page::Adapters => return self.begin_adapter_edit(),
             Up => {
                 self.navigate(-1);
@@ -1408,12 +1616,13 @@ impl AppModel {
                 }
             }
             Left if self.page == Page::Settings => {
-                self.scan_concurrency = self.scan_concurrency.saturating_sub(10).max(10);
-                return vec![Effect::PersistPreferences(self.preferences())];
+                return self.change_setting(-1, false);
             }
             Right if self.page == Page::Settings => {
-                self.scan_concurrency = (self.scan_concurrency + 10).min(500);
-                return vec![Effect::PersistPreferences(self.preferences())];
+                return self.change_setting(1, false);
+            }
+            Confirm | Toggle if self.page == Page::Settings => {
+                return self.change_setting(1, true);
             }
             Left
             | Right
@@ -1423,6 +1632,7 @@ impl AppModel {
             | History
             | SelectAdapter(_)
             | SelectAdapterField(_, _)
+            | SelectSetting(_)
             | FocusDiagnostic(_)
             | SelectDiagnosticField(_, _) => {}
         }
@@ -1450,8 +1660,63 @@ impl AppModel {
                 let index = wrap(current, DiagnosticTool::ALL.len(), delta);
                 self.diagnostics.tool = DiagnosticTool::from_index(index as u8);
             }
+            Page::Settings => {
+                self.settings_selected = wrap(self.settings_selected, 3, delta);
+                self.settings_just_reset = false;
+            }
             _ => {}
         }
+    }
+
+    fn change_setting(&mut self, direction: isize, activate: bool) -> Vec<Effect> {
+        self.settings_just_reset = false;
+        match self.settings_selected {
+            0 => {
+                self.language = self.language.toggle();
+                vec![Effect::PersistPreferences(self.preferences())]
+            }
+            1 => {
+                if direction < 0 {
+                    self.scan_concurrency = self.scan_concurrency.saturating_sub(10).max(10);
+                } else {
+                    self.scan_concurrency = (self.scan_concurrency + 10).min(500);
+                }
+                vec![Effect::PersistPreferences(self.preferences())]
+            }
+            2 if activate => {
+                self.reset_session_memory();
+                self.settings_just_reset = true;
+                vec![Effect::PersistSession(crate::SessionUpdate::Reset(
+                    crate::UiPersist {
+                        last_tab: self.page as u8,
+                        last_diag_tool: DiagnosticTool::ALL
+                            .iter()
+                            .position(|tool| *tool == self.diagnostics.tool)
+                            .unwrap_or(0) as u8,
+                    },
+                ))]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn reset_session_memory(&mut self) {
+        self.scanner.cidr = ScannerState::default().cidr;
+        self.scanner.editing = false;
+        self.diagnostics.ping.request = crate::PingRequest::default();
+        let trace = crate::TracePersist::default();
+        self.diagnostics.trace.request = crate::TraceRequest::default();
+        self.diagnostics.trace.max_hops_input = trace.max_hops;
+        self.diagnostics.trace.timeout_input = trace.timeout_ms;
+        self.diagnostics.port_scan.request = crate::PortScanRequest::default();
+        self.diagnostics.lan_speed.request = crate::LanSpeedRequest::default();
+        self.diagnostics.link_quality.persist = crate::LinkQualityPersist::default();
+        self.diagnostics.link_quality.params = crate::LinkParams::default();
+        self.sync_link_quality_request();
+        self.diagnostics.target_history.clear();
+        self.diagnostics.history_open = false;
+        self.adapter_edit_persist = crate::AdapterEditPersist::default();
+        self.adapter_history.clear();
     }
 
     fn persist_ui_effect(&self) -> Effect {
@@ -1532,12 +1797,18 @@ impl AppModel {
             return vec![stop_effect(job)];
         }
 
-        if self.diagnostics.tool == DiagnosticTool::Trace {
-            self.sync_trace_request();
-        }
+        self.sync_active_diagnostic_request();
         let target = match self.diagnostics.tool {
             DiagnosticTool::Ping => Some(self.diagnostics.ping.request.target.trim().to_string()),
             DiagnosticTool::Trace => Some(self.diagnostics.trace.request.target.trim().to_string()),
+            DiagnosticTool::LinkQuality => Some(
+                self.diagnostics
+                    .link_quality
+                    .request
+                    .target
+                    .trim()
+                    .to_string(),
+            ),
             _ => None,
         };
         if target.as_ref().is_some_and(String::is_empty) {
@@ -1545,6 +1816,19 @@ impl AppModel {
             let error = crate::RuntimeError::new(
                 crate::RuntimeErrorCode::InvalidRequest,
                 "target cannot be empty",
+            );
+            common.status = TaskStatus::Failed(error.message.clone());
+            common.detail = error.message.clone();
+            common.error = Some(error);
+            return Vec::new();
+        }
+        if self.diagnostics.tool == DiagnosticTool::LinkQuality
+            && self.diagnostics.link_quality.request.adapter.is_none()
+        {
+            let common = self.diagnostics.active_common_mut();
+            let error = crate::RuntimeError::new(
+                crate::RuntimeErrorCode::InvalidRequest,
+                "no active physical IPv4 adapter is available",
             );
             common.status = TaskStatus::Failed(error.message.clone());
             common.detail = error.message.clone();
@@ -1600,6 +1884,7 @@ impl AppModel {
             DiagnosticTool::LinkQuality => {
                 self.diagnostics.link_quality.samples.clear();
                 self.diagnostics.link_quality.summary = None;
+                self.diagnostics.link_quality.snapshot = None;
                 Effect::StartLinkQuality {
                     job,
                     request: self.diagnostics.link_quality.request.clone(),
@@ -1653,7 +1938,10 @@ impl AppModel {
                 self.dashboard.status = TaskStatus::Done;
                 self.dashboard.job = None;
             }
-            RuntimeEvent::AdaptersUpdated(adapters) => self.adapters.items = adapters,
+            RuntimeEvent::AdaptersUpdated(adapters) => {
+                self.adapters.items = adapters;
+                self.sync_link_quality_adapters();
+            }
             RuntimeEvent::TrafficUpdated(rows) => self.traffic.rows = rows,
             RuntimeEvent::AdaptersRefreshFinished { job, adapters }
                 if self.adapters.job == Some(job) =>
@@ -1668,6 +1956,7 @@ impl AppModel {
                     .unwrap_or(0)
                     .min(adapters.len().saturating_sub(1));
                 self.adapters.items = adapters;
+                self.sync_link_quality_adapters();
                 self.adapters.status = TaskStatus::Done;
                 self.adapters.error = None;
                 self.adapters.job = None;
@@ -1904,7 +2193,7 @@ impl AppModel {
                     .checked_div(state.request.max_duration_ms.max(1))
                     .unwrap_or(0)
                     .min(99) as u8;
-                state.common.primary = format!("{} bps", sample.bits_per_second);
+                state.common.primary = format!("{} B/s", sample.bytes_per_second);
                 state.common.detail = format!("{} bytes", sample.bytes);
                 state.samples.push(sample);
             }
@@ -1914,8 +2203,8 @@ impl AppModel {
                 finish_common(
                     &mut self.diagnostics.public_speed.common,
                     format!(
-                        "average {} bps · peak {} bps",
-                        summary.average_bps, summary.peak_bps
+                        "average {} B/s · peak {} B/s",
+                        summary.average_bytes_per_second, summary.peak_bytes_per_second
                     ),
                 );
                 self.diagnostics.public_speed.summary = Some(summary);
@@ -1925,10 +2214,11 @@ impl AppModel {
             {
                 fail_common(&mut self.diagnostics.public_speed.common, error);
             }
-            RuntimeEvent::LinkQualityStarted { job }
+            RuntimeEvent::LinkQualityStarted { job, snapshot }
                 if self.diagnostics.link_quality.common.job == Some(job) =>
             {
                 self.diagnostics.link_quality.common.status = TaskStatus::Running;
+                self.diagnostics.link_quality.snapshot = Some(*snapshot);
             }
             RuntimeEvent::LinkQualitySample { job, sample }
                 if self.diagnostics.link_quality.common.job == Some(job) =>
@@ -1945,6 +2235,10 @@ impl AppModel {
                     "loss={:.1}% · rssi={:?}",
                     sample.loss_percent, sample.rssi_dbm
                 );
+                if let Some(snapshot) = &state.snapshot {
+                    state.summary =
+                        Some(crate::link_quality::summary_from_sample(snapshot, &sample));
+                }
                 state.samples.push(sample);
             }
             RuntimeEvent::LinkQualityFinished { job, summary }
@@ -2022,6 +2316,25 @@ fn fail_common(common: &mut DiagnosticCommonState, error: crate::RuntimeError) {
     common.detail = error.message.clone();
     common.error = Some(error);
     common.job = None;
+}
+
+fn link_quality_adapter(adapter: &AdapterInfo) -> crate::LinkQualityAdapter {
+    let key = if !adapter.guid.is_empty() {
+        adapter.guid.clone()
+    } else if !adapter.mac.is_empty() {
+        adapter.mac.clone()
+    } else {
+        adapter.name.clone()
+    };
+    crate::LinkQualityAdapter {
+        key,
+        name: adapter.name.clone(),
+        guid: adapter.guid.clone(),
+        ipv4: adapter.ipv4.clone(),
+        is_wifi: adapter.kind.to_ascii_lowercase().contains("ieee80211") || adapter.ssid.is_some(),
+        link_speed_bps: adapter.link_speed_bps,
+        mac: adapter.mac.clone(),
+    }
 }
 
 fn wrap(current: usize, len: usize, delta: isize) -> usize {
@@ -2366,6 +2679,11 @@ mod tests {
             page: Page::Settings,
             ..AppModel::default()
         };
+        assert!(
+            app.update(Input(InputEvent::Action(Action::Down)))
+                .is_empty()
+        );
+        assert_eq!(app.settings_selected, 1);
         assert_eq!(
             app.update(Input(InputEvent::Action(Action::Right))),
             [Effect::PersistPreferences(crate::Preferences {
@@ -2382,6 +2700,24 @@ mod tests {
                 scan_concurrency: 60,
             })]
         );
+
+        app.diagnostics.ping.request.target = "remembered.example".into();
+        app.diagnostics.target_history = vec!["remembered.example".into()];
+        app.update(Input(InputEvent::Action(Action::Down)));
+        assert_eq!(app.settings_selected, 2);
+        assert_eq!(
+            app.update(Input(InputEvent::Action(Action::Confirm))),
+            [Effect::PersistSession(crate::SessionUpdate::Reset(
+                crate::UiPersist {
+                    last_tab: Page::Settings as u8,
+                    last_diag_tool: 0,
+                }
+            ))]
+        );
+        assert_eq!(app.diagnostics.ping.request, crate::PingRequest::default());
+        assert!(app.diagnostics.target_history.is_empty());
+        assert!(app.settings_just_reset);
+        assert_eq!(app.page, Page::Settings);
     }
 
     #[test]
@@ -2817,5 +3153,255 @@ mod tests {
         assert_eq!(request.max_hops, 30);
         assert_eq!(request.timeout_ms, 100);
         assert_eq!(request.target, "trace.example");
+    }
+
+    fn shared_link_adapter(guid: &str, name: &str, wifi: bool) -> AdapterInfo {
+        AdapterInfo {
+            name: name.into(),
+            guid: guid.into(),
+            kind: if wifi { "wireless" } else { "wired" }.into(),
+            ipv4: if wifi { "192.168.1.21" } else { "192.168.1.20" }.into(),
+            mac: if wifi {
+                "02:00:00:00:00:21"
+            } else {
+                "02:00:00:00:00:20"
+            }
+            .into(),
+            status: "up".into(),
+            ssid: wifi.then(|| "Lab".into()),
+            is_physical: true,
+            link_speed_bps: Some(if wifi { 866_000_000 } else { 1_000_000_000 }),
+            ..AdapterInfo::default()
+        }
+    }
+
+    #[test]
+    fn link_quality_restores_per_adapter_v031_params_and_validates_request() {
+        let mut app = AppModel::default();
+        let mut config = crate::ConfigData::default();
+        config.session.link_quality.adapters.insert(
+            "eth-guid".into(),
+            crate::LinkParams {
+                target: "1.1.1.1".into(),
+                count: "4".into(),
+                interval_ms: "10".into(),
+                timeout_ms: "99999".into(),
+                packet_size: "9999".into(),
+            },
+        );
+        config.session.link_quality.adapters.insert(
+            "wifi-guid".into(),
+            crate::LinkParams {
+                target: "8.8.4.4".into(),
+                count: "40".into(),
+                interval_ms: "300".into(),
+                timeout_ms: "1200".into(),
+                packet_size: "64".into(),
+            },
+        );
+        config.session.link_quality.selected = Some("wifi-guid".into());
+        app.apply_config(&config);
+        app.update(Runtime(RuntimeEvent::AdaptersUpdated(vec![
+            shared_link_adapter("eth-guid", "Ethernet", false),
+            shared_link_adapter("wifi-guid", "Wi-Fi", true),
+        ])));
+        assert_eq!(
+            app.diagnostics
+                .link_quality
+                .request
+                .adapter
+                .as_ref()
+                .map(|adapter| adapter.key.as_str()),
+            Some("wifi-guid")
+        );
+        assert_eq!(app.diagnostics.link_quality.params.target, "8.8.4.4");
+
+        app.page = Page::Diagnostics;
+        app.diagnostics.tool = DiagnosticTool::LinkQuality;
+        app.diagnostics.focused = true;
+        app.diagnostics.focus = DiagnosticFocus::Config;
+        app.update(Input(InputEvent::Action(Action::SelectDiagnosticField(
+            0, 0,
+        ))));
+        let effects = app.update(Input(InputEvent::Action(Action::Left)));
+        assert_eq!(
+            app.diagnostics
+                .link_quality
+                .request
+                .adapter
+                .as_ref()
+                .map(|adapter| adapter.key.as_str()),
+            Some("eth-guid")
+        );
+        assert_eq!(app.diagnostics.link_quality.params.target, "1.1.1.1");
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::PersistSession(crate::SessionUpdate::LinkQuality(_))]
+        ));
+
+        app.diagnostics.focus = DiagnosticFocus::Main;
+        let effects = app.update(Input(InputEvent::Action(Action::Toggle)));
+        let Effect::StartLinkQuality { request, .. } = &effects[0] else {
+            panic!("expected link-quality start");
+        };
+        assert_eq!(request.count, 5);
+        assert_eq!(request.interval_ms, 50);
+        assert_eq!(request.timeout_ms, 10_000);
+        assert_eq!(request.packet_size, 1_472);
+        assert!(matches!(
+            effects.get(1),
+            Some(Effect::PersistSession(crate::SessionUpdate::TargetHistory(
+                _
+            )))
+        ));
+    }
+
+    #[test]
+    fn public_speed_and_link_quality_lifecycles_are_job_scoped() {
+        let mut app = AppModel {
+            page: Page::Diagnostics,
+            ..AppModel::default()
+        };
+        app.diagnostics.focused = true;
+        app.diagnostics.focus = DiagnosticFocus::Main;
+        app.diagnostics.tool = DiagnosticTool::PublicSpeed;
+        let effects = app.update(Input(InputEvent::Action(Action::Toggle)));
+        let Effect::StartPublicSpeed { job: first, .. } = effects[0] else {
+            panic!("expected public speed start");
+        };
+        app.update(Runtime(RuntimeEvent::PublicSpeedStarted {
+            job: first,
+            server: Some("demo.invalid".into()),
+        }));
+        app.update(Runtime(RuntimeEvent::PublicSpeedSample {
+            job: first,
+            sample: crate::SpeedSample {
+                elapsed_ms: 500,
+                bytes: 2_000_000,
+                bytes_per_second: 4_000_000,
+            },
+        }));
+        assert_eq!(
+            app.update(Input(InputEvent::Action(Action::Toggle))),
+            [Effect::StopPublicSpeed(first)]
+        );
+        let restarted = app.update(Input(InputEvent::Action(Action::Toggle)));
+        let Effect::StartPublicSpeed { job: restarted, .. } = restarted[0] else {
+            panic!("expected public speed restart");
+        };
+        app.update(Runtime(RuntimeEvent::PublicSpeedFailed {
+            job: first,
+            error: crate::RuntimeError::new(crate::RuntimeErrorCode::Network, "stale"),
+        }));
+        assert_eq!(app.diagnostics.public_speed.common.job, Some(restarted));
+        app.update(Runtime(RuntimeEvent::PublicSpeedFinished {
+            job: restarted,
+            summary: crate::SpeedSummary {
+                average_bytes_per_second: 4_000_000,
+                peak_bytes_per_second: 5_000_000,
+                total_bytes: 8_000_000,
+            },
+        }));
+        assert_eq!(app.diagnostics.public_speed.common.status, TaskStatus::Done);
+        let failed = app.update(Input(InputEvent::Action(Action::Toggle)));
+        let Effect::StartPublicSpeed { job: failed, .. } = failed[0] else {
+            panic!("expected public speed retry");
+        };
+        app.update(Runtime(RuntimeEvent::PublicSpeedFailed {
+            job: failed,
+            error: crate::RuntimeError::new(crate::RuntimeErrorCode::Network, "offline"),
+        }));
+        assert_eq!(
+            app.diagnostics.public_speed.common.status,
+            TaskStatus::Failed("offline".into())
+        );
+
+        app.update(Runtime(RuntimeEvent::AdaptersUpdated(vec![
+            shared_link_adapter("wifi-guid", "Wi-Fi", true),
+        ])));
+        app.diagnostics.tool = DiagnosticTool::LinkQuality;
+        let effects = app.update(Input(InputEvent::Action(Action::Toggle)));
+        let Effect::StartLinkQuality { job, request } = effects[0].clone() else {
+            panic!("expected link-quality start");
+        };
+        let snapshot = crate::LinkQualitySnapshot {
+            adapter: request.adapter.expect("adapter selected"),
+            wireless: None,
+        };
+        app.update(Runtime(RuntimeEvent::LinkQualityStarted {
+            job,
+            snapshot: Box::new(snapshot.clone()),
+        }));
+        let sample = crate::LinkQualitySample {
+            sequence: 1,
+            latency_ms: Some(20),
+            sent: 1,
+            received: 1,
+            min_latency_ms: Some(20),
+            average_latency_ms: Some(20.0),
+            max_latency_ms: Some(20),
+            jitter_ms: None,
+            loss_percent: 0.0,
+            rssi_dbm: None,
+            min_rssi_dbm: None,
+            average_rssi_dbm: None,
+            max_rssi_dbm: None,
+            signal_quality: None,
+            min_signal_quality: None,
+            average_signal_quality: None,
+            max_signal_quality: None,
+            link_speed_bps: Some(866_000_000),
+        };
+        app.update(Runtime(RuntimeEvent::LinkQualitySample {
+            job,
+            sample: sample.clone(),
+        }));
+        assert_eq!(app.diagnostics.link_quality.samples.first(), Some(&sample));
+        let summary = app
+            .diagnostics
+            .link_quality
+            .summary
+            .clone()
+            .expect("live summary");
+        assert_eq!(
+            app.update(Input(InputEvent::Action(Action::Toggle))),
+            [Effect::StopLinkQuality(job)]
+        );
+        app.update(Runtime(RuntimeEvent::LinkQualitySample { job, sample }));
+        assert_eq!(app.diagnostics.link_quality.samples.len(), 1);
+        let restarted = app.update(Input(InputEvent::Action(Action::Toggle)));
+        let Effect::StartLinkQuality { job: restarted, .. } = restarted[0] else {
+            panic!("expected link-quality restart");
+        };
+        app.update(Runtime(RuntimeEvent::LinkQualityFinished {
+            job,
+            summary: summary.clone(),
+        }));
+        assert_eq!(app.diagnostics.link_quality.common.job, Some(restarted));
+        app.update(Runtime(RuntimeEvent::LinkQualityFinished {
+            job: restarted,
+            summary,
+        }));
+        assert_eq!(app.diagnostics.link_quality.common.status, TaskStatus::Done);
+        let failed = app.update(Input(InputEvent::Action(Action::Toggle)));
+        let Effect::StartLinkQuality { job: failed, .. } = failed[0] else {
+            panic!("expected link-quality retry");
+        };
+        app.update(Runtime(RuntimeEvent::LinkQualityFailed {
+            job: failed,
+            error: crate::RuntimeError::new(
+                crate::RuntimeErrorCode::PermissionDenied,
+                "permission denied",
+            ),
+        }));
+        assert_eq!(
+            app.diagnostics
+                .link_quality
+                .common
+                .error
+                .as_ref()
+                .map(|error| error.code),
+            Some(crate::RuntimeErrorCode::PermissionDenied)
+        );
     }
 }
