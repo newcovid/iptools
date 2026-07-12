@@ -79,6 +79,12 @@ fn dispatch_effects(
                 match update {
                     iptools_core::SessionUpdate::Ping(value) => config.session.ping = value,
                     iptools_core::SessionUpdate::Trace(value) => config.session.trace = value,
+                    iptools_core::SessionUpdate::PortScan(value) => {
+                        config.session.port_scan = value
+                    }
+                    iptools_core::SessionUpdate::LanSpeed(value) => {
+                        config.session.lan_speed = value
+                    }
                     iptools_core::SessionUpdate::LinkQuality(value) => {
                         config.session.link_quality = value
                     }
@@ -273,6 +279,23 @@ mod tests {
             max_hops: "12".into(),
             timeout_ms: "800".into(),
         };
+        let port_scan = iptools_core::PortScanPersist {
+            target: "ports.example".into(),
+            start_port: "20".into(),
+            end_port: "443".into(),
+            timeout_ms: "250".into(),
+        };
+        let lan_speed = iptools_core::LanSpeedPersist {
+            mode: "client".into(),
+            peer: "lan.example".into(),
+            port: "50505".into(),
+            proto: "udp".into(),
+            direction: "bidir".into(),
+            duration: "10".into(),
+            streams: "2".into(),
+            payload: "1400".into(),
+            rate: "100".into(),
+        };
         let link = iptools_core::LinkQualityPersist {
             adapters: [(
                 "wifi-guid".into(),
@@ -292,6 +315,8 @@ mod tests {
             vec![
                 Effect::PersistSession(iptools_core::SessionUpdate::Ping(ping.clone())),
                 Effect::PersistSession(iptools_core::SessionUpdate::Trace(trace.clone())),
+                Effect::PersistSession(iptools_core::SessionUpdate::PortScan(port_scan.clone())),
+                Effect::PersistSession(iptools_core::SessionUpdate::LanSpeed(lan_speed.clone())),
                 Effect::PersistSession(iptools_core::SessionUpdate::LinkQuality(link.clone())),
                 Effect::PersistSession(iptools_core::SessionUpdate::TargetHistory(vec![
                     "trace.example".into(),
@@ -303,6 +328,8 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(saved.session.ping, ping);
         assert_eq!(saved.session.trace, trace);
+        assert_eq!(saved.session.port_scan, port_scan);
+        assert_eq!(saved.session.lan_speed, lan_speed);
         assert_eq!(saved.session.link_quality, link);
         assert_eq!(
             saved.session.history.targets,
@@ -324,6 +351,14 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(reset.session.ui, keep_ui);
         assert_eq!(reset.session.ping, iptools_core::PingPersist::default());
+        assert_eq!(
+            reset.session.port_scan,
+            iptools_core::PortScanPersist::default()
+        );
+        assert_eq!(
+            reset.session.lan_speed,
+            iptools_core::LanSpeedPersist::default()
+        );
         assert!(reset.session.history.targets.is_empty());
         std::fs::remove_file(path).unwrap();
     }

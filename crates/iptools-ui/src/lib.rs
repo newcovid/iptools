@@ -2,8 +2,8 @@
 
 use iptools_core::{
     Action, AdapterApplyOutcome, AdapterEditPhase, AdapterField, AdapterValidationError, AppModel,
-    DiagnosticFocus, DiagnosticTool, Language, LinkQualityDimensionKind, LinkQualityGrade, Page,
-    RuntimeErrorCode, TaskStatus,
+    DiagnosticFocus, DiagnosticTool, LanDirection, LanSpeedMode, LanSpeedPhase, Language,
+    LinkQualityDimensionKind, LinkQualityGrade, Page, RuntimeErrorCode, TaskStatus,
 };
 use ratatui::{
     Frame,
@@ -1114,27 +1114,7 @@ fn render_diagnostics(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut 
             DiagnosticTool::PortScan => render_port_scan(main_inner, frame, model),
             DiagnosticTool::PublicSpeed => render_public_speed(main_inner, frame, model),
             DiagnosticTool::LinkQuality => render_link_quality(main_inner, frame, model),
-            DiagnosticTool::LanSpeed => {
-                let mut lines = vec![
-                    Line::from(Span::styled(
-                        common.primary.clone(),
-                        Style::default().fg(SECONDARY).add_modifier(Modifier::BOLD),
-                    )),
-                    Line::from(common.detail.clone()),
-                    Line::from(""),
-                ];
-                lines.extend(
-                    common
-                        .log
-                        .iter()
-                        .rev()
-                        .take(main_inner.height.saturating_sub(4) as usize)
-                        .rev()
-                        .cloned()
-                        .map(Line::from),
-                );
-                frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), main_inner);
-            }
+            DiagnosticTool::LanSpeed => render_lan_speed(main_inner, frame, model),
         }
     }
 
@@ -1168,8 +1148,10 @@ fn render_diagnostics(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut 
         let text_editable = match model.diagnostics.tool {
             DiagnosticTool::Ping => index == 0,
             DiagnosticTool::Trace => true,
+            DiagnosticTool::PortScan => true,
             DiagnosticTool::LinkQuality => index >= 1,
-            _ => false,
+            DiagnosticTool::LanSpeed => matches!(index, 1 | 4..),
+            DiagnosticTool::PublicSpeed => false,
         };
         frame.render_widget(
             Paragraph::new(format!("{label}:")).style(Style::default().fg(if selected {
@@ -1490,11 +1472,16 @@ fn render_port_scan(area: Rect, frame: &mut Frame, model: &AppModel) {
         ])),
         stats_area,
     );
-    let ports = state.open_ports.iter().map(|port| {
+    let ports = state.open_ports.iter().enumerate().map(|(index, port)| {
         Row::new(vec![
             Cell::from(port.to_string()),
             Cell::from(well_known_service(*port)).style(Style::default().fg(SECONDARY)),
         ])
+        .style(if index == state.selected {
+            Style::default().bg(SELECTED)
+        } else {
+            Style::default()
+        })
     });
     frame.render_widget(
         Table::new(ports, [Constraint::Length(10), Constraint::Min(0)])
@@ -1525,6 +1512,189 @@ fn render_port_scan(area: Rect, frame: &mut Frame, model: &AppModel) {
         progress_area,
     );
     render_diagnostic_status(frame, status_area, &state.common.status, model.language);
+}
+
+fn render_lan_speed(area: Rect, frame: &mut Frame, model: &AppModel) {
+    let state = &model.diagnostics.lan_speed;
+    let latest = state.samples.last();
+    let status_area = bottom_row(area);
+    let summary_height = status_area.y.saturating_sub(area.y).min(5);
+    let summary_area = Rect::new(
+        area.x,
+        status_area.y.saturating_sub(summary_height),
+        area.width,
+        summary_height,
+    );
+    let endpoint_area = Rect::new(area.x, area.y, area.width, area.height.min(1));
+    let bidirectional = state.request.mode == LanSpeedMode::Client
+        && state.request.direction == LanDirection::Bidirectional;
+    let throughput_height = if bidirectional { 2 } else { 1 };
+    let throughput_area = Rect::new(
+        area.x,
+        endpoint_area.bottom(),
+        area.width,
+        throughput_height.min(summary_area.y.saturating_sub(endpoint_area.bottom())),
+    );
+    let history_area = Rect::new(
+        area.x,
+        throughput_area.bottom(),
+        area.width,
+        summary_area.y.saturating_sub(throughput_area.bottom()),
+    );
+
+    let endpoint = if state.endpoint.is_empty() {
+        match state.request.mode {
+            LanSpeedMode::Server => format!("0.0.0.0:{}", state.request.port),
+            LanSpeedMode::Client => format!("{}:{}", state.request.peer, state.request.port),
+        }
+    } else {
+        state.endpoint.clone()
+    };
+    frame.render_widget(
+        Paragraph::new(format!(
+            "{}: {endpoint}",
+            tr(
+                model.language,
+                if state.request.mode == LanSpeedMode::Server {
+                    "本机"
+                } else {
+                    "对端"
+                },
+                if state.request.mode == LanSpeedMode::Server {
+                    "Local"
+                } else {
+                    "Peer"
+                },
+            )
+        ))
+        .style(Style::default().fg(SECONDARY)),
+        endpoint_area,
+    );
+
+    let tx_bps = latest.map_or(0, |sample| sample.tx_bps);
+    let rx_bps = latest.map_or(0, |sample| sample.rx_bps);
+    let mut throughput = Vec::new();
+    if bidirectional || tx_bps > 0 {
+        throughput.push(Line::from(vec![
+            Span::styled("TX ", Style::default().fg(MUTED)),
+            Span::styled(
+                format_speed_dual(tx_bps),
+                Style::default().fg(PRIMARY).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    }
+    if bidirectional || tx_bps == 0 || rx_bps > 0 {
+        throughput.push(Line::from(vec![
+            Span::styled("RX ", Style::default().fg(MUTED)),
+            Span::styled(
+                format_speed_dual(rx_bps),
+                Style::default().fg(PRIMARY).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    }
+    frame.render_widget(Paragraph::new(throughput), throughput_area);
+
+    let history = if state.samples.iter().any(|sample| sample.tx_bps > 0) {
+        state
+            .samples
+            .iter()
+            .map(|sample| sample.tx_bps)
+            .collect::<Vec<_>>()
+    } else {
+        state
+            .samples
+            .iter()
+            .map(|sample| sample.rx_bps)
+            .collect::<Vec<_>>()
+    };
+    frame.render_widget(
+        Sparkline::default()
+            .block(Block::default().borders(Borders::TOP).title(tr(
+                model.language,
+                "吞吐历史",
+                "Throughput History",
+            )))
+            .data(&history)
+            .style(Style::default().fg(PRIMARY)),
+        history_area,
+    );
+
+    let summary_lines = if let Some(summary) = &state.summary {
+        let mut lines = Vec::new();
+        if summary.tx_bytes > 0 {
+            lines.push(Line::from(format!(
+                "{} {}   {}: {}",
+                tr(model.language, "TX 平均", "TX average"),
+                format_speed_dual(average_bytes_per_second(
+                    summary.tx_bytes,
+                    summary.elapsed_ms
+                )),
+                tr(model.language, "总量", "Total"),
+                format_bytes(summary.tx_bytes),
+            )));
+        }
+        if summary.rx_bytes > 0 {
+            lines.push(Line::from(format!(
+                "{} {}   {}: {}",
+                tr(model.language, "RX 平均", "RX average"),
+                format_speed_dual(average_bytes_per_second(
+                    summary.rx_bytes,
+                    summary.elapsed_ms
+                )),
+                tr(model.language, "总量", "Total"),
+                format_bytes(summary.rx_bytes),
+            )));
+        }
+        lines.push(Line::from(format!(
+            "{}: {:.1}s",
+            tr(model.language, "用时", "Elapsed"),
+            summary.elapsed_ms as f64 / 1_000.0
+        )));
+        if let Some(loss) = summary.loss_percent {
+            lines.push(Line::from(format!(
+                "{}: {:.2}%   {}: {}   {}: {} ms",
+                tr(model.language, "丢包", "Loss"),
+                loss,
+                tr(model.language, "乱序", "Out of order"),
+                summary.out_of_order.unwrap_or_default(),
+                tr(model.language, "抖动", "Jitter"),
+                format_optional_f64(summary.jitter_ms),
+            )));
+        }
+        lines
+    } else {
+        vec![Line::from(Span::styled(
+            tr(model.language, "等待测试结果…", "Waiting for results…"),
+            Style::default().fg(SUBTLE),
+        ))]
+    };
+    frame.render_widget(Paragraph::new(summary_lines), summary_area);
+
+    if state.common.status == TaskStatus::Running {
+        let phase = match state.phase {
+            Some(LanSpeedPhase::Listening) => tr(model.language, "等待客户端", "Listening"),
+            Some(LanSpeedPhase::Connecting) => tr(model.language, "正在连接", "Connecting"),
+            Some(LanSpeedPhase::Connected) => tr(model.language, "测试中", "Connected"),
+            None => tr(model.language, "运行中", "Running"),
+        };
+        frame.render_widget(
+            Paragraph::new(format!(
+                "{phase} | {}",
+                tr(model.language, "Space 停止", "Space to stop")
+            ))
+            .style(Style::default().fg(Color::Green)),
+            status_area,
+        );
+    } else {
+        render_diagnostic_status(frame, status_area, &state.common.status, model.language);
+    }
+}
+
+fn average_bytes_per_second(bytes: u64, elapsed_ms: u64) -> u64 {
+    bytes
+        .saturating_mul(1_000)
+        .checked_div(elapsed_ms)
+        .unwrap_or_default()
 }
 
 fn render_diagnostic_status(
@@ -2011,10 +2181,10 @@ fn score_bar(score: f64, width: usize) -> String {
 }
 
 fn diagnostic_target_index(tool: DiagnosticTool) -> usize {
-    if tool == DiagnosticTool::LinkQuality {
-        1
-    } else {
-        0
+    match tool {
+        DiagnosticTool::LinkQuality => 1,
+        DiagnosticTool::LanSpeed => 4,
+        _ => 0,
     }
 }
 
@@ -2053,8 +2223,10 @@ fn active_diagnostic_config_index(model: &AppModel) -> usize {
     match model.diagnostics.tool {
         DiagnosticTool::Ping => model.diagnostics.ping.config_selected,
         DiagnosticTool::Trace => model.diagnostics.trace.config_selected,
+        DiagnosticTool::PortScan => model.diagnostics.port_scan.config_selected,
         DiagnosticTool::LinkQuality => model.diagnostics.link_quality.config_selected,
-        _ => 0,
+        DiagnosticTool::LanSpeed => model.diagnostics.lan_speed.config_selected,
+        DiagnosticTool::PublicSpeed => 0,
     }
 }
 
@@ -2092,6 +2264,24 @@ fn diagnostic_fields(model: &AppModel) -> Vec<(&'static str, String)> {
                 model.diagnostics.trace.timeout_input.clone(),
             ),
         ],
+        DiagnosticTool::PortScan => {
+            let state = &model.diagnostics.port_scan.persist;
+            vec![
+                (tr(model.language, "目标", "Target"), state.target.clone()),
+                (
+                    tr(model.language, "起始端口", "Start port"),
+                    state.start_port.clone(),
+                ),
+                (
+                    tr(model.language, "结束端口", "End port"),
+                    state.end_port.clone(),
+                ),
+                (
+                    tr(model.language, "超时", "Timeout"),
+                    state.timeout_ms.clone(),
+                ),
+            ]
+        }
         DiagnosticTool::PublicSpeed => vec![(
             tr(model.language, "服务器", "Server"),
             model
@@ -2132,10 +2322,60 @@ fn diagnostic_fields(model: &AppModel) -> Vec<(&'static str, String)> {
                 ),
             ]
         }
-        _ => vec![(
-            tr(model.language, "目标", "Target"),
-            model.diagnostics.active_target().to_string(),
-        )],
+        DiagnosticTool::LanSpeed => {
+            let state = &model.diagnostics.lan_speed.persist;
+            let mut fields = vec![
+                (
+                    tr(model.language, "模式", "Mode"),
+                    tr(
+                        model.language,
+                        if state.mode == "client" {
+                            "客户端"
+                        } else {
+                            "服务端"
+                        },
+                        if state.mode == "client" {
+                            "Client"
+                        } else {
+                            "Server"
+                        },
+                    )
+                    .into(),
+                ),
+                (tr(model.language, "端口", "Port"), state.port.clone()),
+            ];
+            if state.mode == "client" {
+                fields.extend([
+                    (
+                        tr(model.language, "协议", "Protocol"),
+                        state.proto.to_uppercase(),
+                    ),
+                    (
+                        tr(model.language, "方向", "Direction"),
+                        match state.direction.as_str() {
+                            "down" => tr(model.language, "下载", "Download"),
+                            "bidir" => tr(model.language, "双向", "Bidirectional"),
+                            _ => tr(model.language, "上传", "Upload"),
+                        }
+                        .into(),
+                    ),
+                    (tr(model.language, "对端", "Peer"), state.peer.clone()),
+                    (
+                        tr(model.language, "时长", "Duration"),
+                        state.duration.clone(),
+                    ),
+                    (tr(model.language, "流数", "Streams"), state.streams.clone()),
+                    (tr(model.language, "载荷", "Payload"), state.payload.clone()),
+                ]);
+                if state.proto == "udp" {
+                    fields.push((
+                        tr(model.language, "限速 Mbps", "Rate Mbps"),
+                        state.rate.clone(),
+                    ));
+                }
+            }
+            fields
+        }
     }
 }
 
@@ -2554,7 +2794,12 @@ mod tests {
                     model.page = Page::Diagnostics;
                     model.language = language;
                     model.diagnostics.tool = DiagnosticTool::PortScan;
+                    model.diagnostics.port_scan.persist.target = "192.0.2.10".into();
+                    model.diagnostics.port_scan.persist.start_port = "20".into();
+                    model.diagnostics.port_scan.persist.end_port = "443".into();
+                    model.diagnostics.port_scan.persist.timeout_ms = "250".into();
                     model.diagnostics.port_scan.request.target = "192.0.2.10".into();
+                    model.diagnostics.port_scan.selected = 1;
                     model.diagnostics.port_scan.common.status = status;
                     model.diagnostics.port_scan.common.progress = 75;
                     model.diagnostics.port_scan.common.primary = "open: 443".into();
@@ -2578,6 +2823,85 @@ mod tests {
                         assert!(text.contains("HTTPS"));
                     }
                     assert!(ui.diagnostic_main.is_some());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lan_speed_preserves_v031_dynamic_config_and_result_layout() {
+        for (width, height) in [(80, 24), (120, 36), (160, 48)] {
+            for language in [Language::En, Language::Zh] {
+                for mode in [LanSpeedMode::Server, LanSpeedMode::Client] {
+                    let backend = TestBackend::new(width, height);
+                    let mut terminal = Terminal::new(backend).unwrap();
+                    let mut model = AppModel::default();
+                    model.page = Page::Diagnostics;
+                    model.language = language;
+                    model.diagnostics.focused = true;
+                    model.diagnostics.focus = DiagnosticFocus::Config;
+                    model.diagnostics.tool = DiagnosticTool::LanSpeed;
+                    model.diagnostics.lan_speed.request.mode = mode;
+                    model.diagnostics.lan_speed.request.peer = "192.0.2.25".into();
+                    model.diagnostics.lan_speed.request.direction = LanDirection::Bidirectional;
+                    model.diagnostics.lan_speed.persist.mode = match mode {
+                        LanSpeedMode::Server => "server".into(),
+                        LanSpeedMode::Client => "client".into(),
+                    };
+                    model.diagnostics.lan_speed.persist.peer = "192.0.2.25".into();
+                    model.diagnostics.lan_speed.persist.port = "50505".into();
+                    model.diagnostics.lan_speed.persist.proto = "udp".into();
+                    model.diagnostics.lan_speed.persist.direction = "bidir".into();
+                    model.diagnostics.lan_speed.persist.duration = "10".into();
+                    model.diagnostics.lan_speed.persist.streams = "2".into();
+                    model.diagnostics.lan_speed.persist.payload = "1400".into();
+                    model.diagnostics.lan_speed.persist.rate = "100".into();
+                    model.diagnostics.lan_speed.endpoint = "192.0.2.25:50505".into();
+                    model.diagnostics.lan_speed.phase = Some(LanSpeedPhase::Connected);
+                    model.diagnostics.lan_speed.common.status = TaskStatus::Done;
+                    model.diagnostics.lan_speed.samples = vec![iptools_core::LanSpeedSample {
+                        elapsed_ms: 1_000,
+                        tx_bps: 12_500_000,
+                        rx_bps: 11_250_000,
+                        tx_bytes: 12_500_000,
+                        rx_bytes: 11_250_000,
+                        loss_percent: Some(0.25),
+                        jitter_ms: Some(0.8),
+                    }];
+                    model.diagnostics.lan_speed.summary = Some(iptools_core::LanSpeedSummary {
+                        tx_bytes: 12_500_000,
+                        rx_bytes: 11_250_000,
+                        elapsed_ms: 1_000,
+                        loss_percent: Some(0.25),
+                        jitter_ms: Some(0.8),
+                        out_of_order: Some(2),
+                    });
+                    let mut ui = UiState::default();
+
+                    terminal
+                        .draw(|frame| render(frame, &model, &mut ui))
+                        .unwrap();
+                    let text = terminal.backend().to_string();
+                    assert!(text.contains("192.0.2.25:50505"), "{text}");
+                    assert!(text.contains("100.00 Mbps"), "{text}");
+                    assert!(text.contains("90.00 Mbps"), "{text}");
+                    assert!(text.contains("0.25%"), "{text}");
+                    if mode == LanSpeedMode::Server {
+                        assert!(!text.contains(if language == Language::Zh {
+                            "数据块"
+                        } else {
+                            "Payload"
+                        }));
+                    } else {
+                        assert!(text.contains("1400"), "{text}");
+                        assert!(text.contains(if language == Language::Zh {
+                            "双向"
+                        } else {
+                            "Bidirectional"
+                        }));
+                    }
+                    assert!(ui.diagnostic_main.is_some());
+                    assert!(ui.diagnostic_fields.len() >= 2);
                 }
             }
         }

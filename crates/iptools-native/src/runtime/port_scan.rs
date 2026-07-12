@@ -128,7 +128,7 @@ impl NativeRuntime {
 mod tests {
     use iptools_core::{
         Action, AppModel, DiagnosticFocus, DiagnosticTool, Effect, InputEvent, Message, Page,
-        TaskStatus, ToolKind,
+        RuntimeErrorCode, RuntimeEvent, TaskStatus, ToolKind,
     };
 
     use super::*;
@@ -157,17 +157,15 @@ mod tests {
         model.diagnostics.focused = true;
         model.diagnostics.focus = DiagnosticFocus::Main;
         model.diagnostics.tool = DiagnosticTool::PortScan;
-        model.diagnostics.port_scan.request = PortScanRequest {
-            target: "127.0.0.1".into(),
-            start_port: 9,
-            end_port: 9,
-            timeout_ms: 20,
-            concurrency: 1,
-        };
-        let [effect] = model
+        model.diagnostics.port_scan.persist.target = "127.0.0.1".into();
+        model.diagnostics.port_scan.persist.start_port = "9".into();
+        model.diagnostics.port_scan.persist.end_port = "9".into();
+        model.diagnostics.port_scan.persist.timeout_ms = "20".into();
+        let effect = model
             .update(Message::Input(InputEvent::Action(Action::Toggle)))
-            .try_into()
-            .expect("port scan should emit one effect");
+            .into_iter()
+            .find(|effect| matches!(effect, Effect::StartPortScan { .. }))
+            .expect("port scan should emit a start effect");
         let mut runtime = NativeRuntime::new();
         runtime.dispatch(effect).unwrap();
         drive_until_terminal(&mut model, &mut runtime).await;
@@ -179,29 +177,38 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_request_returns_typed_failure() {
-        let mut model = AppModel::default();
-        model.page = Page::Diagnostics;
-        model.diagnostics.focused = true;
-        model.diagnostics.focus = DiagnosticFocus::Main;
-        model.diagnostics.tool = DiagnosticTool::PortScan;
-        model.diagnostics.port_scan.request = PortScanRequest {
-            target: String::new(),
-            start_port: 0,
-            end_port: 0,
-            timeout_ms: 20,
-            concurrency: 1,
+        let job = JobId {
+            tool: ToolKind::PortScan,
+            generation: 1,
         };
-        let [effect] = model
-            .update(Message::Input(InputEvent::Action(Action::Toggle)))
-            .try_into()
-            .unwrap();
         let mut runtime = NativeRuntime::new();
-        runtime.dispatch(effect).unwrap();
-        drive_until_terminal(&mut model, &mut runtime).await;
-
+        runtime
+            .dispatch(Effect::StartPortScan {
+                job,
+                request: PortScanRequest {
+                    target: String::new(),
+                    start_port: 0,
+                    end_port: 0,
+                    timeout_ms: 20,
+                    concurrency: 1,
+                },
+            })
+            .unwrap();
+        let event = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                runtime.reap_finished();
+                if let Some(event) = runtime.try_recv() {
+                    break event;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("invalid request should fail without network I/O");
         assert!(matches!(
-            model.diagnostics.port_scan.common.status,
-            TaskStatus::Failed(_)
+            event,
+            RuntimeEvent::PortScanFailed { job: current, error }
+                if current == job && error.code == RuntimeErrorCode::InvalidRequest
         ));
         runtime.shutdown().await;
     }
