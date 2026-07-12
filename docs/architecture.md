@@ -53,13 +53,13 @@ Web 和 native `--demo` 使用 `iptools-demo::DemoRuntime` 的固定 seed 与定
 
 真实原生页面的既有网络算法暂时保留在 `iptools-native/src/modules` 和 `utils` 中，作为兼容迁移桥；新增跨端行为必须进入 core/ui/runtime 边界，不能继续增加 detached spawn 或无界通道。迁移桥删除前，真实网络算法行为不得因 Web 展览而改变。
 
-Scanner 与 Port Scan 已进入阶段 3 的垂直切片：ARP/主机名解析以及 TCP 连接扫描算法已从旧页面对象移到 `NativeRuntime::dispatch(Effect)`；旧原生页仅作为兼容 UI 适配器消费相同 `RuntimeEvent`，共享 `AppModel` 可直接由这些 native handler 驱动。
+Scanner、Port Scan 与 Dashboard 已进入阶段 3 的垂直切片：ARP/主机名解析、TCP 连接扫描，以及 Dashboard 的系统/网卡采样、代理探测和多公网端点回退已移到 `NativeRuntime::dispatch(Effect)`。Dashboard 使用强类型 `DashboardRequest/DashboardSnapshot` 与 JobId；刷新会取消旧 generation，core 丢弃迟到结果。旧原生页继续作为兼容迁移桥，共享 `AppModel` 已可直接由这些 native handler 驱动。
 
 错误策略：binary 顶层可用 `anyhow`，领域与 runtime 边界使用强类型错误；结构化日志使用 `tracing`，core 不依赖 tracing。
 
 ## 配置
 
-可序列化的 `ConfigData`、会话参数、快捷键文本映射和公网端点定义位于 `iptools-core`，保持现有 Serde schema 与默认值。native 只负责路径、首次运行系统语言检测和 `FsConfigStore` 原子保存。共享 Settings reducer 通过 `Effect::PersistPreferences` 显式请求保存语言与扫描并发数；native Demo 写入 `ConfigData`，Web 写入 `iptools.web.v1.*` LocalStorage。Web 不读写原生配置，也不执行适配器变更。
+可序列化的 `ConfigData`、会话参数、快捷键文本映射和公网端点定义位于 `iptools-core`，保持现有 Serde schema 与默认值。native 只负责路径、首次运行系统语言检测和 `FsConfigStore` 原子保存。共享 Settings reducer 通过 `Effect::PersistPreferences` 显式请求保存语言与扫描并发数；Dashboard reducer 从同一 `ConfigData` 构造公网查询请求。native Demo 写入 `ConfigData`，Web 写入 `iptools.web.v1.*` LocalStorage。Web 不读写原生配置，也不执行适配器变更或真实 Dashboard 请求。
 
 ## Web、字体与 PWA
 

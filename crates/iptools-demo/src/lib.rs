@@ -3,10 +3,11 @@
 use std::{collections::VecDeque, str::FromStr};
 
 use iptools_core::{
-    AdapterInfo, Effect, JobId, LanSpeedRequest, LanSpeedSample, LanSpeedSummary,
-    LinkQualityRequest, LinkQualitySample, LinkQualitySummary, PingRequest, PingSample,
-    PingSummary, PortScanRequest, PublicSpeedRequest, RuntimeEvent, ScanHost, SpeedSample,
-    SpeedSummary, ToolKind, TraceHop, TraceRequest, TrafficRow,
+    AdapterInfo, DashboardInterface, DashboardSnapshot, Effect, JobId, LanSpeedRequest,
+    LanSpeedSample, LanSpeedSummary, LinkQualityRequest, LinkQualitySample, LinkQualitySummary,
+    PingRequest, PingSample, PingSummary, PortScanRequest, PublicIpInfo, PublicSpeedRequest,
+    RuntimeEvent, ScanHost, SpeedSample, SpeedSummary, ToolKind, TraceHop, TraceRequest,
+    TrafficRow,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -100,12 +101,7 @@ impl DemoRuntime {
 
     pub fn bootstrap(&self) -> Vec<RuntimeEvent> {
         vec![
-            RuntimeEvent::DashboardUpdated {
-                hostname: self.scenario.hostname.clone(),
-                public_ip: self.scenario.public_ip.clone(),
-                download_bps: self.scenario.download_bps,
-                upload_bps: self.scenario.upload_bps,
-            },
+            RuntimeEvent::DashboardUpdated(Box::new(self.dashboard_snapshot())),
             RuntimeEvent::AdaptersUpdated(self.scenario.adapters.clone()),
             RuntimeEvent::TrafficUpdated(self.traffic_rows()),
         ]
@@ -114,7 +110,12 @@ impl DemoRuntime {
     pub fn dispatch(&mut self, effect: Effect) -> Vec<RuntimeEvent> {
         match effect {
             Effect::PersistPreferences(_) => Vec::new(),
-            Effect::RefreshDashboard => vec![self.bootstrap()[0].clone()],
+            Effect::RefreshDashboard { job, .. } => {
+                vec![RuntimeEvent::DashboardRefreshFinished {
+                    job,
+                    snapshot: Box::new(self.dashboard_snapshot()),
+                }]
+            }
             Effect::RefreshAdapters => vec![RuntimeEvent::AdaptersUpdated(
                 self.scenario.adapters.clone(),
             )],
@@ -182,6 +183,40 @@ impl DemoRuntime {
                 self.cancel_job(job);
                 vec![cancelled_event(job)]
             }
+        }
+    }
+
+    fn dashboard_snapshot(&self) -> DashboardSnapshot {
+        let active_interface = self
+            .scenario
+            .adapters
+            .first()
+            .map(|adapter| DashboardInterface {
+                name: adapter.name.clone(),
+                description: adapter.kind.clone(),
+                ipv4: adapter.ipv4.clone(),
+                ssid: None,
+                is_physical: true,
+                dhcp_enabled: true,
+            });
+        DashboardSnapshot {
+            observed_at: "2026-01-15 10:24:00".into(),
+            hostname: self.scenario.hostname.clone(),
+            os_name: "iptools demo".into(),
+            os_version: "0.4".into(),
+            active_interface,
+            proxy: None,
+            public_info: Some(PublicIpInfo {
+                ip: self.scenario.public_ip.clone(),
+                city: "Demo City".into(),
+                region: "Lab".into(),
+                country: "TEST".into(),
+                isp: "Simulated network".into(),
+            }),
+            download_bps: self.scenario.download_bps,
+            upload_bps: self.scenario.upload_bps,
+            total_download: self.scenario.download_bps.saturating_mul(3_600),
+            total_upload: self.scenario.upload_bps.saturating_mul(3_600),
         }
     }
 
@@ -435,7 +470,10 @@ impl DemoRuntime {
 
 fn event_job(event: &RuntimeEvent) -> Option<JobId> {
     match event {
-        RuntimeEvent::ScanStarted { job, .. }
+        RuntimeEvent::DashboardRefreshFinished { job, .. }
+        | RuntimeEvent::DashboardRefreshFailed { job, .. }
+        | RuntimeEvent::DashboardRefreshCancelled { job }
+        | RuntimeEvent::ScanStarted { job, .. }
         | RuntimeEvent::ScanProgress { job, .. }
         | RuntimeEvent::ScanHostFound { job, .. }
         | RuntimeEvent::ScanFinished { job }
@@ -471,6 +509,7 @@ fn event_job(event: &RuntimeEvent) -> Option<JobId> {
 
 fn cancelled_event(job: JobId) -> RuntimeEvent {
     match job.tool {
+        ToolKind::Dashboard => RuntimeEvent::DashboardRefreshCancelled { job },
         ToolKind::Scanner => RuntimeEvent::ScanCancelled { job },
         ToolKind::Ping => RuntimeEvent::PingFinished {
             job,
