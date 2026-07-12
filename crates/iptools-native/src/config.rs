@@ -10,11 +10,39 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub use iptools_core::{ConfigData, Endpoint, PublicIpConfig};
+pub use iptools_core::ConfigData;
 
-use crate::{keymap::KeyMap, utils::i18n::detect_system_language};
+use crate::keymap::KeyMap;
 
 const DEFAULT_CONFIG_PATH: &str = "config.json";
+
+fn detect_system_language() -> iptools_core::Language {
+    let tag = system_locale_tag().to_lowercase();
+    if tag.starts_with("zh") {
+        iptools_core::Language::Zh
+    } else {
+        iptools_core::Language::En
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn system_locale_tag() -> String {
+    use windows::Win32::Globalization::GetUserDefaultLocaleName;
+    let mut buffer = [0_u16; 85];
+    let length = unsafe { GetUserDefaultLocaleName(&mut buffer) };
+    if length <= 0 {
+        return String::new();
+    }
+    String::from_utf16_lossy(&buffer[..(length as usize).saturating_sub(1)])
+}
+
+#[cfg(not(target_os = "windows"))]
+fn system_locale_tag() -> String {
+    std::env::var("LC_ALL")
+        .or_else(|_| std::env::var("LC_MESSAGES"))
+        .or_else(|_| std::env::var("LANG"))
+        .unwrap_or_default()
+}
 
 #[derive(Debug, Clone)]
 pub struct FsConfigStore {

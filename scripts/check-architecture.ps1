@@ -19,4 +19,39 @@ foreach ($crate in $forbidden.Keys) {
     if ($bad.Count -gt 0) { throw "$crate has forbidden dependencies: $($bad -join ', ')" }
 }
 
-Write-Host "crate dependency boundaries passed"
+$nativeRoot = Join-Path $PSScriptRoot "../crates/iptools-native/src"
+$removedLegacyFiles = @(
+    "app.rs",
+    "tui.rs",
+    "modules/adapter.rs",
+    "modules/dashboard.rs",
+    "modules/scanner.rs",
+    "modules/settings.rs",
+    "modules/traffic.rs",
+    "modules/diagnostics/port_scan.rs"
+)
+foreach ($relative in $removedLegacyFiles) {
+    if (Test-Path (Join-Path $nativeRoot $relative)) {
+        throw "legacy native state/UI file still exists: $relative"
+    }
+}
+
+$nativeSources = Get-ChildItem $nativeRoot -Recurse -Filter *.rs
+$forbiddenNativePatterns = @(
+    "unbounded_channel",
+    "Arc<Mutex<bool>>",
+    "AtomicBool"
+)
+foreach ($pattern in $forbiddenNativePatterns) {
+    $matches = @($nativeSources | Select-String -SimpleMatch $pattern)
+    if ($matches.Count -gt 0) {
+        throw "native source still contains forbidden lifecycle pattern '$pattern': $($matches[0].Path):$($matches[0].LineNumber)"
+    }
+}
+
+$main = Get-Content -Raw (Join-Path $nativeRoot "main.rs")
+if (-not $main.Contains("native_app::run(args.config).await?")) {
+    throw "default native entry is not using the shared AppModel runner"
+}
+
+Write-Host "crate dependency and native lifecycle boundaries passed"

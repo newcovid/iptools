@@ -6,7 +6,6 @@
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-pub const DEFAULT_PORT: u16 = 50505;
 pub const UDP_HEADER_LEN: usize = 18; // u16 stream_id + u64 seq + u64 send_ts_nanos
 /// 注册报文哨兵 seq（不计入统计，仅用于让服务端学习客户端地址）。
 pub const REG_SEQ: u64 = u64::MAX;
@@ -162,7 +161,8 @@ pub enum LanEvent {
 }
 
 /// 平均吞吐（字节/秒）；elapsed_ms=0 时返回 0。
-pub fn avg_bytes_per_sec(total_bytes: u64, elapsed_ms: u64) -> u64 {
+#[cfg(test)]
+fn avg_bytes_per_sec(total_bytes: u64, elapsed_ms: u64) -> u64 {
     if elapsed_ms == 0 {
         return 0;
     }
@@ -262,6 +262,7 @@ use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 const RECV_BUF: usize = 64 * 1024;
 
@@ -271,7 +272,7 @@ pub(crate) async fn run_tcp_session(
     role: Role,
     spec: TestSpec,
     tx: mpsc::Sender<LanEvent>,
-    abort: Arc<Mutex<bool>>,
+    abort: CancellationToken,
 ) {
     let tx_bytes = Arc::new(AtomicU64::new(0));
     let rx_bytes = Arc::new(AtomicU64::new(0));
@@ -295,7 +296,7 @@ pub(crate) async fn run_tcp_session(
             let (mut last_tx, mut last_rx) = (0u64, 0u64);
             loop {
                 tokio::time::sleep(Duration::from_millis(250)).await;
-                if *rabort.lock().unwrap() || Instant::now() >= deadline {
+                if rabort.is_cancelled() || Instant::now() >= deadline {
                     break;
                 }
                 let now = Instant::now();
@@ -366,7 +367,7 @@ async fn tcp_conn_worker(
     deadline: Instant,
     tx_bytes: Arc<AtomicU64>,
     rx_bytes: Arc<AtomicU64>,
-    abort: Arc<Mutex<bool>>,
+    abort: CancellationToken,
 ) {
     let (rd, wr) = stream.into_split();
     match role {
@@ -387,11 +388,11 @@ async fn tcp_send_half(
     payload: usize,
     deadline: Instant,
     tx_bytes: Arc<AtomicU64>,
-    abort: Arc<Mutex<bool>>,
+    abort: CancellationToken,
 ) {
     let buf = vec![0u8; payload];
     loop {
-        if *abort.lock().unwrap() {
+        if abort.is_cancelled() {
             break;
         }
         // 先发一次再判 deadline：保证每条流至少写一个 payload，
@@ -413,11 +414,11 @@ async fn tcp_recv_half(
     mut rd: OwnedReadHalf,
     deadline: Instant,
     rx_bytes: Arc<AtomicU64>,
-    abort: Arc<Mutex<bool>>,
+    abort: CancellationToken,
 ) {
     let mut buf = vec![0u8; RECV_BUF];
     loop {
-        if *abort.lock().unwrap() {
+        if abort.is_cancelled() {
             break;
         }
         // 先收一次（带 500ms 超时）再判 deadline：即便本 worker 启动偏晚，
@@ -439,9 +440,9 @@ async fn tcp_recv_half(
 use tokio::net::TcpListener;
 
 /// 接受一条连接，期间轮询 abort；中止或出错返回 None。
-async fn accept_with_abort(listener: &TcpListener, abort: &Arc<Mutex<bool>>) -> Option<TcpStream> {
+async fn accept_with_abort(listener: &TcpListener, abort: &CancellationToken) -> Option<TcpStream> {
     loop {
-        if *abort.lock().unwrap() {
+        if abort.is_cancelled() {
             return None;
         }
         match tokio::time::timeout(Duration::from_millis(500), listener.accept()).await {
@@ -454,7 +455,7 @@ async fn accept_with_abort(listener: &TcpListener, abort: &Arc<Mutex<bool>>) -> 
 
 /// 服务端：监听端口，第一条连接是控制连接（读 spec、回 Ack），
 /// 随后按 spec.proto 建数据通道并跑会话。
-pub async fn run_server(port: u16, tx: mpsc::Sender<LanEvent>, abort: Arc<Mutex<bool>>) {
+pub async fn run_server(port: u16, tx: mpsc::Sender<LanEvent>, abort: CancellationToken) {
     let listener = match TcpListener::bind(("0.0.0.0", port)).await {
         Ok(l) => l,
         Err(_) => {
@@ -512,7 +513,7 @@ pub async fn run_client(
     port: u16,
     spec: TestSpec,
     tx: mpsc::Sender<LanEvent>,
-    abort: Arc<Mutex<bool>>,
+    abort: CancellationToken,
 ) {
     if peer.is_empty() {
         let _ = tx.send(LanEvent::Error("diag_lan_err".into())).await;
@@ -582,7 +583,7 @@ pub(crate) async fn run_udp_server_socket(
     sock: UdpSocket,
     spec: TestSpec,
     tx: mpsc::Sender<LanEvent>,
-    abort: Arc<Mutex<bool>>,
+    abort: CancellationToken,
 ) {
     let role = role_for(true, spec.direction);
     run_udp_session(sock, role, spec, None, tx, abort).await;
@@ -594,7 +595,7 @@ pub async fn run_udp_client(
     port: u16,
     spec: TestSpec,
     tx: mpsc::Sender<LanEvent>,
-    abort: Arc<Mutex<bool>>,
+    abort: CancellationToken,
 ) {
     let sock = match UdpSocket::bind("0.0.0.0:0").await {
         Ok(s) => s,
@@ -631,7 +632,7 @@ async fn run_udp_session(
     spec: TestSpec,
     dest: Option<SocketAddr>,
     tx: mpsc::Sender<LanEvent>,
-    abort: Arc<Mutex<bool>>,
+    abort: CancellationToken,
 ) {
     let sock = Arc::new(sock);
     let tx_bytes = Arc::new(AtomicU64::new(0));
@@ -676,7 +677,7 @@ async fn run_udp_session(
         tokio::spawn(async move {
             let mut buf = vec![0u8; 1 << 16];
             loop {
-                if *abort.lock().unwrap() {
+                if abort.is_cancelled() {
                     break;
                 }
                 match tokio::time::timeout(Duration::from_millis(500), sock.recv_from(&mut buf))
@@ -734,7 +735,7 @@ async fn run_udp_session(
                 let mut buf = vec![0u8; payload];
                 let mut seq = 0u64;
                 loop {
-                    if *abort.lock().unwrap() {
+                    if abort.is_cancelled() {
                         break;
                     }
                     write_udp_header(&mut buf, sid, seq, now_nanos());
@@ -767,7 +768,7 @@ async fn run_udp_session(
             let (mut last_tx, mut last_rx) = (0u64, 0u64);
             loop {
                 tokio::time::sleep(Duration::from_millis(250)).await;
-                if *rabort.lock().unwrap() || Instant::now() >= deadline {
+                if rabort.is_cancelled() || Instant::now() >= deadline {
                     break;
                 }
                 let now = Instant::now();
@@ -830,7 +831,6 @@ async fn run_udp_session(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
     use tokio::net::{TcpListener, TcpStream, UdpSocket};
     use tokio::sync::mpsc;
 
@@ -863,7 +863,7 @@ mod tests {
                 conns.push(listener.accept().await.unwrap().0);
             }
             let (tx, mut rx) = mpsc::channel(256);
-            let abort = Arc::new(Mutex::new(false));
+            let abort = CancellationToken::new();
             run_tcp_session(conns, role_for(true, Direction::Up), sspec, tx, abort).await;
             drain_summary(&mut rx).await
         });
@@ -873,7 +873,7 @@ mod tests {
             conns.push(TcpStream::connect(addr).await.unwrap());
         }
         let (ctx, _crx) = mpsc::channel(256);
-        let cabort = Arc::new(Mutex::new(false));
+        let cabort = CancellationToken::new();
         run_tcp_session(conns, role_for(false, Direction::Up), spec, ctx, cabort).await;
 
         let summary = server.await.unwrap().unwrap();
@@ -896,7 +896,7 @@ mod tests {
         let server = tokio::spawn(async move {
             let conn = listener.accept().await.unwrap().0;
             let (tx, mut rx) = mpsc::channel(256);
-            let abort = Arc::new(Mutex::new(false));
+            let abort = CancellationToken::new();
             run_tcp_session(
                 vec![conn],
                 role_for(true, Direction::Bidir),
@@ -909,7 +909,7 @@ mod tests {
         });
         let conn = TcpStream::connect(addr).await.unwrap();
         let (ctx, mut crx) = mpsc::channel(256);
-        let cabort = Arc::new(Mutex::new(false));
+        let cabort = CancellationToken::new();
         run_tcp_session(
             vec![conn],
             role_for(false, Direction::Bidir),
@@ -1020,13 +1020,13 @@ mod tests {
         let sspec = spec.clone();
         let server = tokio::spawn(async move {
             let (tx, mut rx) = mpsc::channel(512);
-            let abort = Arc::new(Mutex::new(false));
+            let abort = CancellationToken::new();
             run_udp_server_socket(srv, sspec, tx, abort).await;
             drain_summary(&mut rx).await
         });
 
         let (ctx, _crx) = mpsc::channel(512);
-        let cabort = Arc::new(Mutex::new(false));
+        let cabort = CancellationToken::new();
         run_udp_client(
             srv_addr.ip().to_string(),
             srv_addr.port(),
@@ -1057,13 +1057,13 @@ mod tests {
         let sspec = spec.clone();
         let server = tokio::spawn(async move {
             let (tx, mut rx) = mpsc::channel(1024);
-            let abort = Arc::new(Mutex::new(false));
+            let abort = CancellationToken::new();
             run_udp_server_socket(srv, sspec, tx, abort).await;
             drain_summary(&mut rx).await
         });
 
         let (ctx, mut crx) = mpsc::channel(1024);
-        let cabort = Arc::new(Mutex::new(false));
+        let cabort = CancellationToken::new();
         run_udp_client(
             srv_addr.ip().to_string(),
             srv_addr.port(),
