@@ -8,7 +8,7 @@
   "adapters": [
     {
       "name": "Wi-Fi", "description": "Wi-Fi 6 wireless adapter", "guid": "field-wifi",
-      "kind": "wireless", "ipv4": "192.168.50.37", "mac": "02:22:33:44:55:01", "status": "weak · -79 dBm",
+      "kind": "wireless", "ipv4": "192.168.50.37", "cidr": "192.168.50.37/24", "mac": "02:22:33:44:55:01", "status": "weak · -79 dBm",
       "ssid": "Field-Mesh", "dhcp_enabled": true, "is_physical": true, "link_speed_bps": 72000000,
       "download_bps": 786432, "upload_bps": 196608, "total_download": 2147483648, "total_upload": 536870912
     },

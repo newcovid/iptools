@@ -74,6 +74,37 @@ try {
     fullPage: false,
   });
 
+  // Adapter Edit uses the same reducer and renderer as native demo, but its
+  // runtime is deterministic and must never call browser or network APIs.
+  await page.keyboard.press("e");
+  await page.waitForFunction(() =>
+    document.getElementById("terminal")?.textContent?.includes("编辑适配器"),
+  );
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("Home");
+  for (let index = 0; index < 15; index += 1) {
+    await page.keyboard.press("Delete");
+  }
+  await page.keyboard.type("10.20.30.40");
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() =>
+    document.getElementById("terminal")?.textContent?.includes("确认应用此网络配置"),
+  );
+  await page.screenshot({
+    path: "../../target/playwright-web-adapter-edit-zh.png",
+    fullPage: false,
+  });
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() =>
+    document.getElementById("terminal")?.textContent?.includes("模拟配置已应用"),
+  );
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => {
+    const text = document.getElementById("terminal")?.textContent ?? "";
+    return text.includes("10.20.30.40") && text.includes("完成");
+  });
+
   await page.keyboard.press("Tab");
   await page.keyboard.press("Space");
   await page.waitForTimeout(900);

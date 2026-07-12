@@ -3,11 +3,11 @@
 use std::{collections::VecDeque, str::FromStr};
 
 use iptools_core::{
-    AdapterInfo, DashboardInterface, DashboardSnapshot, Effect, JobId, LanSpeedRequest,
-    LanSpeedSample, LanSpeedSummary, LinkQualityRequest, LinkQualitySample, LinkQualitySummary,
-    PingRequest, PingSample, PingSummary, PortScanRequest, PublicIpInfo, PublicSpeedRequest,
-    RuntimeEvent, ScanHost, SpeedSample, SpeedSummary, ToolKind, TraceHop, TraceRequest,
-    TrafficRow,
+    AdapterApplyOutcome, AdapterInfo, DashboardInterface, DashboardSnapshot, Effect, JobId,
+    LanSpeedRequest, LanSpeedSample, LanSpeedSummary, LinkQualityRequest, LinkQualitySample,
+    LinkQualitySummary, PingRequest, PingSample, PingSummary, PortScanRequest, PublicIpInfo,
+    PublicSpeedRequest, RuntimeError, RuntimeErrorCode, RuntimeEvent, ScanHost, SpeedSample,
+    SpeedSummary, ToolKind, TraceHop, TraceRequest, TrafficRow,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -109,7 +109,7 @@ impl DemoRuntime {
 
     pub fn dispatch(&mut self, effect: Effect) -> Vec<RuntimeEvent> {
         match effect {
-            Effect::PersistPreferences(_) => Vec::new(),
+            Effect::PersistPreferences(_) | Effect::PersistAdapterEdit { .. } => Vec::new(),
             Effect::RefreshDashboard { job, .. } => {
                 vec![RuntimeEvent::DashboardRefreshFinished {
                     job,
@@ -126,9 +126,43 @@ impl DemoRuntime {
                 job,
                 rows: self.traffic_rows(),
             }],
-            Effect::ApplyAdapterConfig(config) => vec![RuntimeEvent::AdapterConfigApplied(Ok(
-                format!("simulated configuration applied to {}", config.name),
-            ))],
+            Effect::ApplyAdapterConfig { job, request } => {
+                let mut events = vec![RuntimeEvent::AdapterConfigStarted { job }];
+                let result = self
+                    .scenario
+                    .adapters
+                    .iter_mut()
+                    .find(|adapter| adapter.guid == request.guid);
+                match result {
+                    Some(adapter) if !adapter.status.eq_ignore_ascii_case("disconnected") => {
+                        adapter.dhcp_enabled = request.use_dhcp;
+                        if !request.use_dhcp {
+                            adapter.ipv4 = request.ip;
+                            adapter.cidr = mask_prefix(&request.mask)
+                                .map(|prefix| format!("{}/{prefix}", adapter.ipv4));
+                        }
+                        events.push(RuntimeEvent::AdapterConfigFinished {
+                            job,
+                            outcome: AdapterApplyOutcome::Simulated,
+                        });
+                    }
+                    Some(_) => events.push(RuntimeEvent::AdapterConfigFailed {
+                        job,
+                        error: RuntimeError::new(
+                            RuntimeErrorCode::Network,
+                            "simulated adapter is disconnected",
+                        ),
+                    }),
+                    None => events.push(RuntimeEvent::AdapterConfigFailed {
+                        job,
+                        error: RuntimeError::new(
+                            RuntimeErrorCode::InvalidRequest,
+                            "simulated adapter was not found",
+                        ),
+                    }),
+                }
+                events
+            }
             Effect::StartScan { job, .. } => {
                 self.cancel_job(job);
                 let total = 254;
@@ -488,6 +522,9 @@ fn event_job(event: &RuntimeEvent) -> Option<JobId> {
         | RuntimeEvent::TrafficRefreshFinished { job, .. }
         | RuntimeEvent::TrafficRefreshFailed { job, .. }
         | RuntimeEvent::TrafficRefreshCancelled { job }
+        | RuntimeEvent::AdapterConfigStarted { job }
+        | RuntimeEvent::AdapterConfigFinished { job, .. }
+        | RuntimeEvent::AdapterConfigFailed { job, .. }
         | RuntimeEvent::ScanStarted { job, .. }
         | RuntimeEvent::ScanProgress { job, .. }
         | RuntimeEvent::ScanHostFound { job, .. }
@@ -526,6 +563,13 @@ fn cancelled_event(job: JobId) -> RuntimeEvent {
     match job.tool {
         ToolKind::Dashboard => RuntimeEvent::DashboardRefreshCancelled { job },
         ToolKind::Adapters => RuntimeEvent::AdaptersRefreshCancelled { job },
+        ToolKind::AdapterEdit => RuntimeEvent::AdapterConfigFailed {
+            job,
+            error: RuntimeError::new(
+                RuntimeErrorCode::Cancelled,
+                "adapter configuration cancelled",
+            ),
+        },
         ToolKind::Traffic => RuntimeEvent::TrafficRefreshCancelled { job },
         ToolKind::Scanner => RuntimeEvent::ScanCancelled { job },
         ToolKind::Ping => RuntimeEvent::PingFinished {
@@ -576,10 +620,22 @@ fn cancelled_event(job: JobId) -> RuntimeEvent {
     }
 }
 
+fn mask_prefix(mask: &str) -> Option<u32> {
+    let value = mask.parse::<std::net::Ipv4Addr>().ok().map(u32::from)?;
+    let prefix = value.leading_ones();
+    (value
+        == if prefix == 0 {
+            0
+        } else {
+            u32::MAX << (32 - prefix)
+        })
+    .then_some(prefix)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iptools_core::{Effect, JobId, PingRequest, ScanRequest};
+    use iptools_core::{AdapterConfigRequest, Effect, JobId, PingRequest, ScanRequest};
 
     #[test]
     fn all_scenarios_parse() {
@@ -658,5 +714,60 @@ mod tests {
         for delta in [0, 320, 640, 1_000, 2_000] {
             assert_eq!(native_demo.advance(delta), web_demo.advance(delta));
         }
+    }
+
+    #[test]
+    fn adapter_edit_is_simulated_and_updates_only_demo_state() {
+        let mut runtime = DemoRuntime::new(ScenarioId::HomeNetwork).unwrap();
+        let job = JobId {
+            tool: ToolKind::AdapterEdit,
+            generation: 4,
+        };
+        let events = runtime.dispatch(Effect::ApplyAdapterConfig {
+            job,
+            request: AdapterConfigRequest {
+                guid: "demo-ethernet".into(),
+                name: "Ethernet".into(),
+                use_dhcp: false,
+                ip: "10.20.30.40".into(),
+                mask: "255.255.255.0".into(),
+                gateway: Some("10.20.30.1".into()),
+                dns: vec!["1.1.1.1".into()],
+            },
+        });
+        assert!(matches!(
+            events.as_slice(),
+            [
+                RuntimeEvent::AdapterConfigStarted { .. },
+                RuntimeEvent::AdapterConfigFinished {
+                    outcome: AdapterApplyOutcome::Simulated,
+                    ..
+                }
+            ]
+        ));
+        let RuntimeEvent::AdaptersUpdated(adapters) = &runtime.bootstrap()[1] else {
+            panic!()
+        };
+        assert_eq!(adapters[0].ipv4, "10.20.30.40");
+        assert_eq!(adapters[0].cidr.as_deref(), Some("10.20.30.40/24"));
+
+        let failed = runtime.dispatch(Effect::ApplyAdapterConfig {
+            job: JobId {
+                generation: 5,
+                ..job
+            },
+            request: AdapterConfigRequest {
+                guid: "missing".into(),
+                name: "Missing".into(),
+                use_dhcp: true,
+                ip: String::new(),
+                mask: String::new(),
+                gateway: None,
+                dns: Vec::new(),
+            },
+        });
+        assert!(
+            matches!(failed.last(), Some(RuntimeEvent::AdapterConfigFailed { error, .. }) if error.code == RuntimeErrorCode::InvalidRequest)
+        );
     }
 }

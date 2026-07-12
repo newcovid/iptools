@@ -1,6 +1,9 @@
 //! Backend-independent Ratatui rendering for iptools.
 
-use iptools_core::{Action, AppModel, DiagnosticTool, Language, Page, TaskStatus};
+use iptools_core::{
+    Action, AdapterApplyOutcome, AdapterEditPhase, AdapterField, AdapterValidationError, AppModel,
+    DiagnosticTool, Language, Page, TaskStatus,
+};
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -22,10 +25,27 @@ pub struct UiState {
     diagnostic_regions: Vec<(Rect, DiagnosticTool)>,
     scanner_action: Option<Rect>,
     diagnostic_action: Option<Rect>,
+    adapter_regions: Vec<(Rect, usize)>,
+    adapter_fields: Vec<(Rect, AdapterField, u16)>,
 }
 
 impl UiState {
     pub fn hit_test(&self, column: u16, row: u16) -> Option<Action> {
+        if let Some((area, field, value_x)) = self
+            .adapter_fields
+            .iter()
+            .find(|(area, _, _)| contains(*area, column, row))
+        {
+            let cursor = column.saturating_sub(*value_x).min(area.width) as usize;
+            return Some(Action::SelectAdapterField(*field, cursor));
+        }
+        if let Some((_, index)) = self
+            .adapter_regions
+            .iter()
+            .find(|(area, _)| contains(*area, column, row))
+        {
+            return Some(Action::SelectAdapter(*index));
+        }
         if let Some((_, page)) = self
             .page_regions
             .iter()
@@ -68,7 +88,7 @@ pub fn render(frame: &mut Frame, model: &AppModel, ui: &mut UiState) {
     render_tabs(frame, areas[0], model, ui);
     match model.page {
         Page::Dashboard => render_dashboard(frame, areas[1], model),
-        Page::Adapters => render_adapters(frame, areas[1], model),
+        Page::Adapters => render_adapters(frame, areas[1], model, ui),
         Page::Scanner => render_scanner(frame, areas[1], model, ui),
         Page::Traffic => render_traffic(frame, areas[1], model),
         Page::Diagnostics => render_diagnostics(frame, areas[1], model, ui),
@@ -240,9 +260,30 @@ fn render_dashboard(frame: &mut Frame, area: Rect, model: &AppModel) {
     );
 }
 
-fn render_adapters(frame: &mut Frame, area: Rect, model: &AppModel) {
+fn render_adapters(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut UiState) {
+    if let Some(edit) = &model.adapters.edit {
+        render_adapter_edit(frame, area, model, edit, ui);
+        return;
+    }
     let areas =
         Layout::vertical([Constraint::Percentage(58), Constraint::Percentage(42)]).split(area);
+    let table_inner = Block::bordered().inner(areas[0]);
+    for index in 0..model
+        .adapters
+        .items
+        .len()
+        .min(table_inner.height.saturating_sub(1) as usize)
+    {
+        ui.adapter_regions.push((
+            Rect::new(
+                table_inner.x,
+                table_inner.y + 1 + index as u16,
+                table_inner.width,
+                1,
+            ),
+            index,
+        ));
+    }
     let rows = model
         .adapters
         .items
@@ -348,6 +389,242 @@ fn render_adapters(frame: &mut Frame, area: Rect, model: &AppModel) {
             .wrap(Wrap { trim: true }),
         areas[1],
     );
+}
+
+fn render_adapter_edit(
+    frame: &mut Frame,
+    area: Rect,
+    model: &AppModel,
+    edit: &iptools_core::AdapterEditState,
+    ui: &mut UiState,
+) {
+    let block = Block::bordered().title(format!(
+        " {} — {} ",
+        tr(model.language, "编辑适配器", "Edit Adapter"),
+        edit.name
+    ));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let rows = Layout::vertical([
+        Constraint::Length(6),
+        Constraint::Min(3),
+        Constraint::Length(2),
+    ])
+    .split(inner);
+
+    let labels = [
+        tr(model.language, "模式", "Mode"),
+        "IPv4",
+        tr(model.language, "子网掩码", "Subnet mask"),
+        tr(model.language, "网关", "Gateway"),
+        tr(model.language, "首选 DNS", "Primary DNS"),
+        tr(model.language, "备用 DNS", "Secondary DNS"),
+    ];
+    for (index, field) in AdapterField::ALL.into_iter().enumerate() {
+        let row = Rect::new(rows[0].x, rows[0].y + index as u16, rows[0].width, 1);
+        let label_width = 18.min(row.width);
+        let value_x = row.x.saturating_add(label_width);
+        if edit.phase == AdapterEditPhase::Editing {
+            ui.adapter_fields.push((row, field, value_x));
+        }
+        let selected = field == edit.selected;
+        let enabled = field == AdapterField::Mode || !edit.params.use_dhcp;
+        let style = if !enabled {
+            Style::default().fg(MUTED)
+        } else if selected {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        let value = match field {
+            AdapterField::Mode => tr(
+                model.language,
+                if edit.params.use_dhcp {
+                    "自动 (DHCP)"
+                } else {
+                    "手动 (静态)"
+                },
+                if edit.params.use_dhcp {
+                    "Automatic (DHCP)"
+                } else {
+                    "Manual (static)"
+                },
+            )
+            .to_string(),
+            _ => edit.value(field).to_string(),
+        };
+        let label_area = Rect::new(row.x, row.y, label_width, 1);
+        let value_area = Rect::new(value_x, row.y, row.right().saturating_sub(value_x), 1);
+        frame.render_widget(
+            Paragraph::new(format!(
+                "{} {}",
+                if selected { ">" } else { " " },
+                labels[index]
+            ))
+            .style(if selected {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default().fg(MUTED)
+            }),
+            label_area,
+        );
+        let value_widget = if selected
+            && enabled
+            && field != AdapterField::Mode
+            && edit.phase == AdapterEditPhase::Editing
+        {
+            let raw = edit.value(field);
+            let suffix = edit.history.iter().find_map(|candidate| {
+                (!raw.is_empty()
+                    && edit.cursor == raw.len()
+                    && candidate.starts_with(raw)
+                    && candidate.len() > raw.len())
+                .then(|| candidate[raw.len()..].to_string())
+            });
+            let before = &raw[..edit.cursor.min(raw.len())];
+            let after = &raw[edit.cursor.min(raw.len())..];
+            let mut spans = vec![
+                Span::styled(before.to_string(), style),
+                Span::styled("█", style),
+                Span::styled(after.to_string(), style),
+            ];
+            if let Some(suffix) = suffix {
+                spans.push(Span::styled(suffix, Style::default().fg(MUTED)));
+            }
+            Paragraph::new(Line::from(spans))
+        } else {
+            Paragraph::new(if value.is_empty() {
+                "—".into()
+            } else {
+                value
+            })
+            .style(style)
+        };
+        frame.render_widget(value_widget, value_area);
+    }
+
+    let validation = edit.validation_error.map(|error| match error {
+        AdapterValidationError::Ipv4 => {
+            tr(model.language, "IPv4 地址无效。", "Invalid IPv4 address.")
+        }
+        AdapterValidationError::Mask => tr(
+            model.language,
+            "子网掩码必须连续，且不能是 /0 或 /32。",
+            "Subnet mask must be contiguous and cannot be /0 or /32.",
+        ),
+        AdapterValidationError::Gateway => {
+            tr(model.language, "网关地址无效。", "Invalid gateway address.")
+        }
+        AdapterValidationError::Dns => tr(model.language, "DNS 地址无效。", "Invalid DNS address."),
+    });
+    let status = match &edit.phase {
+        AdapterEditPhase::Editing => validation.unwrap_or(tr(
+            model.language,
+            "静态模式下可编辑地址；Ctrl+R 打开历史。",
+            "Address fields are editable in static mode; Ctrl+R opens history.",
+        )),
+        AdapterEditPhase::Confirming => tr(
+            model.language,
+            "确认应用此网络配置？Enter 应用，Esc 返回。",
+            "Apply this network configuration? Enter applies; Esc returns.",
+        ),
+        AdapterEditPhase::Applying => tr(
+            model.language,
+            "正在应用，请稍候…",
+            "Applying; please wait…",
+        ),
+        AdapterEditPhase::Succeeded(AdapterApplyOutcome::Persistent) => tr(
+            model.language,
+            "配置已永久应用。按任意键返回。",
+            "Configuration applied persistently. Press any key to return.",
+        ),
+        AdapterEditPhase::Succeeded(AdapterApplyOutcome::RuntimeOnly) => tr(
+            model.language,
+            "配置仅在本次运行中生效，重启后可能恢复。按任意键返回。",
+            "Configuration is runtime-only and may reset after reboot. Press any key to return.",
+        ),
+        AdapterEditPhase::Succeeded(AdapterApplyOutcome::Simulated) => tr(
+            model.language,
+            "模拟配置已应用；未修改真实系统。按任意键返回。",
+            "Simulated configuration applied; no real system was changed. Press any key to return.",
+        ),
+        AdapterEditPhase::Failed(error) => &error.message,
+    };
+    let status_style = match edit.phase {
+        AdapterEditPhase::Failed(_) => Style::default().fg(Color::Red),
+        AdapterEditPhase::Succeeded(AdapterApplyOutcome::RuntimeOnly) => {
+            Style::default().fg(Color::Yellow)
+        }
+        AdapterEditPhase::Succeeded(_) => Style::default().fg(Color::Green),
+        _ => Style::default().fg(PRIMARY),
+    };
+    frame.render_widget(
+        Paragraph::new(status)
+            .style(status_style)
+            .wrap(Wrap { trim: true }),
+        rows[1],
+    );
+    frame.render_widget(
+        Paragraph::new(tr(
+            model.language,
+            " [↑↓] 字段  [←→] 光标/模式  [Enter] 确认  [Esc] 取消 ",
+            " [↑↓] Fields  [←→] Cursor/mode  [Enter] Confirm  [Esc] Cancel ",
+        ))
+        .style(Style::default().fg(MUTED)),
+        rows[2],
+    );
+
+    if edit.history_open {
+        let popup = centered(area, 52, 45);
+        frame.render_widget(Clear, popup);
+        let items = edit
+            .history
+            .iter()
+            .take(8)
+            .enumerate()
+            .map(|(index, value)| {
+                ListItem::new(value.clone()).style(if index == edit.history_selected {
+                    Style::default().bg(SELECTED).fg(Color::White)
+                } else {
+                    Style::default()
+                })
+            });
+        frame.render_widget(
+            List::new(items).block(Block::bordered().title(tr(
+                model.language,
+                " 输入历史 ",
+                " Input history ",
+            ))),
+            popup,
+        );
+    }
+
+    if edit.phase == AdapterEditPhase::Confirming {
+        let popup = centered(area, 64, 30);
+        frame.render_widget(Clear, popup);
+        let warning = if model.demo {
+            tr(
+                model.language,
+                "只会修改当前模拟场景，不会触及真实系统。\n\nEnter / Space  确认模拟应用\nEsc            返回检查",
+                "Only the current simulation will change; the real system is untouched.\n\nEnter / Space  apply simulation\nEsc            review",
+            )
+        } else {
+            tr(
+                model.language,
+                "即将修改系统网络配置。\n\nEnter / Space  确认应用\nEsc            返回检查",
+                "The system network configuration is about to change.\n\nEnter / Space  apply\nEsc            review",
+            )
+        };
+        frame.render_widget(
+            Paragraph::new(warning)
+                .block(Block::bordered().title(tr(model.language, " 确认应用 ", " Confirm apply ")))
+                .alignment(Alignment::Center)
+                .wrap(Wrap { trim: true }),
+            popup,
+        );
+    }
 }
 
 fn render_scanner(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut UiState) {
@@ -812,6 +1089,7 @@ mod tests {
                 let text = terminal.backend().to_string();
                 assert!(text.contains("192.168.1.20"), "{text}");
                 assert!(text.contains("Wireless LAN"), "{text}");
+                assert_eq!(ui.hit_test(2, 5), Some(Action::SelectAdapter(0)));
 
                 model.page = Page::Traffic;
                 model.traffic.rows = vec![iptools_core::TrafficRow {
@@ -830,6 +1108,58 @@ mod tests {
                 let text = terminal.backend().to_string();
                 assert!(text.contains("Wi-Fi"));
                 assert!(text.contains("1.0 MiB/s"));
+            }
+        }
+    }
+
+    #[test]
+    fn adapter_edit_phases_render_and_mouse_fields_use_fixed_display_columns() {
+        for (width, height) in [(80, 24), (120, 36)] {
+            for language in [Language::En, Language::Zh] {
+                let backend = TestBackend::new(width, height);
+                let mut terminal = Terminal::new(backend).unwrap();
+                let mut model = AppModel::default();
+                model.page = Page::Adapters;
+                model.language = language;
+                model.adapters.items.push(iptools_core::AdapterInfo {
+                    name: "Ethernet".into(),
+                    guid: "demo-ethernet".into(),
+                    ipv4: "192.168.1.20".into(),
+                    cidr: Some("192.168.1.20/24".into()),
+                    dhcp_enabled: false,
+                    ..iptools_core::AdapterInfo::default()
+                });
+                model.update(iptools_core::Message::Input(
+                    iptools_core::InputEvent::Action(Action::Edit),
+                ));
+                let mut ui = UiState::default();
+                for phase in [
+                    AdapterEditPhase::Editing,
+                    AdapterEditPhase::Confirming,
+                    AdapterEditPhase::Applying,
+                    AdapterEditPhase::Succeeded(AdapterApplyOutcome::RuntimeOnly),
+                    AdapterEditPhase::Failed(iptools_core::RuntimeError::new(
+                        iptools_core::RuntimeErrorCode::PermissionDenied,
+                        "administrator required",
+                    )),
+                ] {
+                    let editing = phase == AdapterEditPhase::Editing;
+                    model.adapters.edit.as_mut().unwrap().phase = phase;
+                    terminal
+                        .draw(|frame| render(frame, &model, &mut ui))
+                        .unwrap();
+                    let text = terminal.backend().to_string();
+                    assert!(text.contains("192.168.1.20"), "{text}");
+                    assert!(text.contains("255.255.255.0"), "{text}");
+                    if editing {
+                        assert_eq!(
+                            ui.hit_test(20, 5),
+                            Some(Action::SelectAdapterField(AdapterField::Ipv4, 1))
+                        );
+                    } else {
+                        assert_eq!(ui.hit_test(20, 5), None);
+                    }
+                }
             }
         }
     }

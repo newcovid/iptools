@@ -135,7 +135,7 @@ cd crates/iptools-web
 trunk serve
 ```
 
-浏览器端以 Ratzilla 0.3.1 为基础。项目携带三个小型可审计补丁：Canvas 按 Unicode 双宽裁剪，DOM 在 resize 交接帧跳过越界单元，并在全宽字符被替换时恢复隐藏续格；中文字体是 OFL-1.1 的 Maple Mono CN 约 326 KiB 可重复字形子集，许可证、固定源文件哈希和生成脚本说明位于 `crates/iptools-web/assets/fonts/`。
+浏览器端以 Ratzilla 0.3.1 为基础。项目携带三个小型可审计补丁：Canvas 按 Unicode 双宽裁剪，DOM 在 resize 交接帧跳过越界单元，并在全宽字符被替换时恢复隐藏续格；中文字体是 OFL-1.1 的 Maple Mono CN 约 334 KiB 可重复字形子集，许可证、固定源文件哈希和生成脚本说明位于 `crates/iptools-web/assets/fonts/`。
 
 UI 和真实网络写入仍需要在目标系统上手动验证。新增界面文案时必须同时更新 `assets/locales/en-US.json` 和 `assets/locales/zh-CN.json`，并重新生成 Web 字体子集；测试会检查语言包和浏览器字体加载。
 

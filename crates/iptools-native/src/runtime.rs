@@ -1,5 +1,6 @@
 //! Structured lifecycle management for native background jobs.
 
+mod adapter_edit;
 mod dashboard;
 mod network_read;
 mod port_scan;
@@ -92,6 +93,10 @@ impl NativeRuntime {
             }
             Effect::RefreshTraffic { job } => {
                 self.spawn_traffic_refresh(job);
+                Ok(())
+            }
+            Effect::ApplyAdapterConfig { job, request } => {
+                self.spawn_adapter_config(job, request);
                 Ok(())
             }
             Effect::StartScan { job, request } => {
@@ -213,10 +218,11 @@ impl NativeRuntime {
 fn effect_name(effect: &Effect) -> &'static str {
     match effect {
         Effect::PersistPreferences(_) => "persist-preferences",
+        Effect::PersistAdapterEdit { .. } => "persist-adapter-edit",
         Effect::RefreshDashboard { .. } => "refresh-dashboard",
         Effect::RefreshAdapters { .. } => "refresh-adapters",
         Effect::RefreshTraffic { .. } => "refresh-traffic",
-        Effect::ApplyAdapterConfig(_) => "apply-adapter-config",
+        Effect::ApplyAdapterConfig { .. } => "apply-adapter-config",
         Effect::StartScan { .. } => "start-scan",
         Effect::CancelScan(_) => "cancel-scan",
         Effect::StartPing { .. } => "start-ping",

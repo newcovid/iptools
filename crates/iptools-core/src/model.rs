@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Action, Effect, InputEvent, JobId, KeyCode, Message::*, RuntimeEvent, ScanRequest, ToolKind,
+    Action, AdapterEditParams, AdapterValidationError, Effect, InputEvent, JobId, KeyCode,
+    Message::*, RuntimeEvent, ScanRequest, ToolKind,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -106,6 +107,7 @@ pub struct AdapterInfo {
     pub guid: String,
     pub kind: String,
     pub ipv4: String,
+    pub cidr: Option<String>,
     pub ipv6: Vec<String>,
     pub mac: String,
     pub status: String,
@@ -126,15 +128,91 @@ pub struct AdaptersState {
     pub status: TaskStatus,
     pub error: Option<crate::RuntimeError>,
     pub job: Option<JobId>,
+    pub edit: Option<AdapterEditState>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct AdapterConfig {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum AdapterField {
+    #[default]
+    Mode,
+    Ipv4,
+    Mask,
+    Gateway,
+    Dns1,
+    Dns2,
+}
+
+impl AdapterField {
+    pub const ALL: [Self; 6] = [
+        Self::Mode,
+        Self::Ipv4,
+        Self::Mask,
+        Self::Gateway,
+        Self::Dns1,
+        Self::Dns2,
+    ];
+
+    fn index(self) -> usize {
+        self as usize
+    }
+
+    fn from_index(index: usize) -> Self {
+        Self::ALL[index.min(Self::ALL.len() - 1)]
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AdapterEditPhase {
+    Editing,
+    Confirming,
+    Applying,
+    Succeeded(crate::AdapterApplyOutcome),
+    Failed(crate::RuntimeError),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdapterEditState {
+    pub guid: String,
     pub name: String,
-    pub ipv4: String,
-    pub gateway: String,
-    pub dns: String,
-    pub dhcp: bool,
+    pub params: AdapterEditParams,
+    pub selected: AdapterField,
+    pub cursor: usize,
+    pub phase: AdapterEditPhase,
+    pub validation_error: Option<AdapterValidationError>,
+    pub history: Vec<String>,
+    pub history_open: bool,
+    pub history_selected: usize,
+    pub job: Option<JobId>,
+}
+
+impl AdapterEditState {
+    pub fn value(&self, field: AdapterField) -> &str {
+        match field {
+            AdapterField::Mode => {
+                if self.params.use_dhcp {
+                    "DHCP"
+                } else {
+                    "Static"
+                }
+            }
+            AdapterField::Ipv4 => &self.params.ip,
+            AdapterField::Mask => &self.params.mask,
+            AdapterField::Gateway => &self.params.gateway,
+            AdapterField::Dns1 => &self.params.dns1,
+            AdapterField::Dns2 => &self.params.dns2,
+        }
+    }
+
+    fn value_mut(&mut self, field: AdapterField) -> Option<&mut String> {
+        match field {
+            AdapterField::Mode => None,
+            AdapterField::Ipv4 => Some(&mut self.params.ip),
+            AdapterField::Mask => Some(&mut self.params.mask),
+            AdapterField::Gateway => Some(&mut self.params.gateway),
+            AdapterField::Dns1 => Some(&mut self.params.dns1),
+            AdapterField::Dns2 => Some(&mut self.params.dns2),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -406,6 +484,8 @@ pub struct AppModel {
     pub scan_concurrency: usize,
     #[serde(default)]
     public_ip_config: crate::PublicIpConfig,
+    adapter_edit_persist: crate::AdapterEditPersist,
+    adapter_history: Vec<String>,
     generation: u64,
 }
 
@@ -425,6 +505,8 @@ impl Default for AppModel {
             diagnostics: DiagnosticsState::default(),
             scan_concurrency: 50,
             public_ip_config: crate::PublicIpConfig::default(),
+            adapter_edit_persist: crate::AdapterEditPersist::default(),
+            adapter_history: Vec::new(),
             generation: 0,
         }
     }
@@ -435,6 +517,8 @@ impl AppModel {
         self.language = config.language;
         self.scan_concurrency = config.scan_concurrency.clamp(10, 500);
         self.public_ip_config = config.public_ip.clone();
+        self.adapter_edit_persist = config.session.adapter_edit.clone();
+        self.adapter_history = config.session.history.adapter.clone();
     }
 
     pub const fn preferences(&self) -> crate::Preferences {
@@ -459,6 +543,28 @@ impl AppModel {
     }
 
     fn handle_input(&mut self, input: InputEvent) -> Vec<Effect> {
+        if self.page == Page::Adapters && self.adapters.edit.is_some() {
+            let global = match &input {
+                InputEvent::Action(action) => Some(*action),
+                InputEvent::Key(key) => key.action(),
+                InputEvent::Mouse(_) => None,
+            };
+            if matches!(
+                global,
+                Some(
+                    Action::Quit
+                        | Action::ToggleLanguage
+                        | Action::Help
+                        | Action::NextPage
+                        | Action::PreviousPage
+                        | Action::SelectPage(_)
+                        | Action::ResetDemo
+                )
+            ) {
+                return self.handle_action(global.expect("matched global action"));
+            }
+            return self.handle_adapter_edit_input(input);
+        }
         if let InputEvent::Key(key) = input
             && self.page == Page::Scanner
             && self.scanner.editing
@@ -489,6 +595,322 @@ impl AppModel {
             _ => {}
         }
         Vec::new()
+    }
+
+    fn begin_adapter_edit(&mut self) -> Vec<Effect> {
+        let Some(adapter) = self.adapters.items.get(self.adapters.selected).cloned() else {
+            return Vec::new();
+        };
+        if adapter.guid.is_empty() {
+            return Vec::new();
+        }
+
+        let params = self
+            .adapter_edit_persist
+            .adapters
+            .get(&adapter.guid)
+            .cloned()
+            .unwrap_or_else(|| adapter_defaults(&adapter));
+        self.adapters.edit = Some(AdapterEditState {
+            guid: adapter.guid,
+            name: adapter.name,
+            params,
+            selected: AdapterField::Mode,
+            cursor: 0,
+            phase: AdapterEditPhase::Editing,
+            validation_error: None,
+            history: self.adapter_history.clone(),
+            history_open: false,
+            history_selected: 0,
+            job: None,
+        });
+        Vec::new()
+    }
+
+    fn handle_adapter_edit_input(&mut self, input: InputEvent) -> Vec<Effect> {
+        let phase = self.adapters.edit.as_ref().map(|edit| edit.phase.clone());
+        match phase {
+            Some(AdapterEditPhase::Applying) => return Vec::new(),
+            Some(AdapterEditPhase::Succeeded(_)) => {
+                self.adapters.edit = None;
+                return self.refresh_adapters();
+            }
+            Some(AdapterEditPhase::Failed(_)) => {
+                if let Some(edit) = self.adapters.edit.as_mut() {
+                    edit.phase = AdapterEditPhase::Editing;
+                    edit.validation_error = None;
+                }
+                return Vec::new();
+            }
+            _ => {}
+        }
+
+        let action = match input {
+            InputEvent::Action(action) => Some(action),
+            InputEvent::Key(key) => {
+                let history_was_open = self
+                    .adapters
+                    .edit
+                    .as_ref()
+                    .is_some_and(|edit| edit.history_open);
+                if self.handle_adapter_edit_key(key.code, key.modifiers.control) {
+                    return self.persist_adapter_edit();
+                }
+                if history_was_open
+                    && matches!(
+                        key.code,
+                        KeyCode::Up
+                            | KeyCode::Down
+                            | KeyCode::Enter
+                            | KeyCode::Right
+                            | KeyCode::Esc
+                    )
+                {
+                    return Vec::new();
+                }
+                key.action()
+            }
+            InputEvent::Mouse(_) => None,
+        };
+
+        match action {
+            Some(Action::Back) => {
+                if let Some(edit) = self.adapters.edit.as_mut()
+                    && edit.phase == AdapterEditPhase::Confirming
+                {
+                    edit.phase = AdapterEditPhase::Editing;
+                } else {
+                    self.adapters.edit = None;
+                }
+                Vec::new()
+            }
+            Some(Action::Confirm | Action::Toggle) => self.confirm_adapter_edit(),
+            Some(Action::Up) => {
+                self.navigate_adapter_edit(-1);
+                Vec::new()
+            }
+            Some(Action::Down) => {
+                self.navigate_adapter_edit(1);
+                Vec::new()
+            }
+            Some(Action::Left | Action::Right) => {
+                if let Some(edit) = self.adapters.edit.as_mut()
+                    && edit.selected == AdapterField::Mode
+                {
+                    edit.params.use_dhcp = !edit.params.use_dhcp;
+                    return self.persist_adapter_edit();
+                }
+                Vec::new()
+            }
+            Some(Action::History) => {
+                if let Some(edit) = self.adapters.edit.as_mut()
+                    && edit.selected != AdapterField::Mode
+                    && !edit.history.is_empty()
+                {
+                    edit.history_open = !edit.history_open;
+                    edit.history_selected = 0;
+                }
+                Vec::new()
+            }
+            Some(Action::SelectAdapterField(field, cursor)) => {
+                if let Some(edit) = self.adapters.edit.as_mut() {
+                    edit.selected = field;
+                    edit.cursor = cursor.min(edit.value(field).len());
+                    edit.history_open = false;
+                }
+                Vec::new()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Returns true when persistent form data changed.
+    fn handle_adapter_edit_key(&mut self, code: KeyCode, control: bool) -> bool {
+        let Some(edit) = self.adapters.edit.as_mut() else {
+            return false;
+        };
+        if edit.phase != AdapterEditPhase::Editing || control {
+            return false;
+        }
+
+        if edit.history_open {
+            match code {
+                KeyCode::Up => {
+                    edit.history_selected = edit.history_selected.saturating_sub(1);
+                    return false;
+                }
+                KeyCode::Down => {
+                    edit.history_selected = (edit.history_selected + 1)
+                        .min(edit.history.len().min(8).saturating_sub(1));
+                    return false;
+                }
+                KeyCode::Enter | KeyCode::Right => {
+                    if let Some(value) = edit.history.get(edit.history_selected).cloned() {
+                        let field = edit.selected;
+                        edit.cursor = value.len();
+                        if let Some(target) = edit.value_mut(field) {
+                            *target = value;
+                        }
+                        edit.history_open = false;
+                        edit.validation_error = None;
+                        return true;
+                    }
+                }
+                KeyCode::Esc => {
+                    edit.history_open = false;
+                    return false;
+                }
+                _ => {}
+            }
+        }
+
+        let field = edit.selected;
+        if field == AdapterField::Mode {
+            if matches!(code, KeyCode::Left | KeyCode::Right) {
+                edit.params.use_dhcp = !edit.params.use_dhcp;
+                return true;
+            }
+            return false;
+        }
+        if edit.params.use_dhcp {
+            return false;
+        }
+
+        let len = edit.value(field).len();
+        if code == KeyCode::Right
+            && len > 0
+            && edit.cursor == len
+            && let Some(value) = edit
+                .history
+                .iter()
+                .find(|candidate| candidate.starts_with(edit.value(field)) && candidate.len() > len)
+                .cloned()
+        {
+            edit.cursor = value.len();
+            *edit.value_mut(field).expect("text field") = value;
+            edit.validation_error = None;
+            return true;
+        }
+        match code {
+            KeyCode::Left => edit.cursor = edit.cursor.saturating_sub(1),
+            KeyCode::Right => edit.cursor = (edit.cursor + 1).min(len),
+            KeyCode::Home => edit.cursor = 0,
+            KeyCode::End => edit.cursor = len,
+            KeyCode::Backspace if edit.cursor > 0 => {
+                edit.cursor -= 1;
+                let cursor = edit.cursor;
+                edit.value_mut(field).expect("text field").remove(cursor);
+                edit.validation_error = None;
+                return true;
+            }
+            KeyCode::Delete if edit.cursor < len => {
+                let cursor = edit.cursor;
+                edit.value_mut(field).expect("text field").remove(cursor);
+                edit.validation_error = None;
+                return true;
+            }
+            KeyCode::Char(c) if (c.is_ascii_digit() || c == '.') && len < 15 => {
+                let cursor = edit.cursor;
+                edit.value_mut(field).expect("text field").insert(cursor, c);
+                edit.cursor += 1;
+                edit.validation_error = None;
+                return true;
+            }
+            _ => {}
+        }
+        false
+    }
+
+    fn navigate_adapter_edit(&mut self, delta: isize) {
+        let Some(edit) = self.adapters.edit.as_mut() else {
+            return;
+        };
+        if edit.phase != AdapterEditPhase::Editing {
+            return;
+        }
+        let index = wrap(edit.selected.index(), AdapterField::ALL.len(), delta);
+        edit.selected = AdapterField::from_index(index);
+        edit.cursor = edit.value(edit.selected).len();
+        edit.history_open = false;
+    }
+
+    fn confirm_adapter_edit(&mut self) -> Vec<Effect> {
+        let Some(edit) = self.adapters.edit.as_mut() else {
+            return Vec::new();
+        };
+        if edit.phase == AdapterEditPhase::Confirming {
+            let request = crate::AdapterConfigRequest {
+                guid: edit.guid.clone(),
+                name: edit.name.clone(),
+                use_dhcp: edit.params.use_dhcp,
+                ip: edit.params.ip.clone(),
+                mask: edit.params.mask.clone(),
+                gateway: non_empty(&edit.params.gateway),
+                dns: [&edit.params.dns1, &edit.params.dns2]
+                    .into_iter()
+                    .filter_map(|value| non_empty(value))
+                    .collect(),
+            };
+            let params = edit.params.clone();
+            let guid = edit.guid.clone();
+            if !params.use_dhcp {
+                for value in [
+                    &params.ip,
+                    &params.mask,
+                    &params.gateway,
+                    &params.dns1,
+                    &params.dns2,
+                ] {
+                    if !value.is_empty() {
+                        self.adapter_history.retain(|old| old != value);
+                        self.adapter_history.insert(0, value.clone());
+                    }
+                }
+            }
+            self.adapter_history.truncate(20);
+            let history = self.adapter_history.clone();
+            self.adapter_edit_persist
+                .adapters
+                .insert(guid.clone(), params.clone());
+            let job = self.next_job(ToolKind::AdapterEdit);
+            let edit = self.adapters.edit.as_mut().expect("edit remains open");
+            edit.phase = AdapterEditPhase::Applying;
+            edit.job = Some(job);
+            edit.history = history.clone();
+            return vec![
+                Effect::PersistAdapterEdit {
+                    guid,
+                    params,
+                    history,
+                },
+                Effect::ApplyAdapterConfig { job, request },
+            ];
+        }
+
+        match validate_adapter_params(&edit.params) {
+            Ok(()) => {
+                edit.validation_error = None;
+                edit.phase = AdapterEditPhase::Confirming;
+            }
+            Err(error) => edit.validation_error = Some(error),
+        }
+        Vec::new()
+    }
+
+    fn persist_adapter_edit(&mut self) -> Vec<Effect> {
+        let Some(edit) = self.adapters.edit.as_ref() else {
+            return Vec::new();
+        };
+        let guid = edit.guid.clone();
+        let params = edit.params.clone();
+        self.adapter_edit_persist
+            .adapters
+            .insert(guid.clone(), params.clone());
+        vec![Effect::PersistAdapterEdit {
+            guid,
+            params,
+            history: self.adapter_history.clone(),
+        }]
     }
 
     fn handle_action(&mut self, action: Action) -> Vec<Effect> {
@@ -522,6 +944,10 @@ impl AppModel {
                 return self.toggle_diagnostic();
             }
             SelectDiagnostic(index) => self.diagnostics.tool = DiagnosticTool::from_index(index),
+            SelectAdapter(index) if !self.adapters.items.is_empty() => {
+                self.adapters.selected = index.min(self.adapters.items.len() - 1)
+            }
+            Edit if self.page == Page::Adapters => return self.begin_adapter_edit(),
             Up => self.navigate(-1),
             Down => self.navigate(1),
             Left if self.page == Page::Settings => {
@@ -532,7 +958,14 @@ impl AppModel {
                 self.scan_concurrency = (self.scan_concurrency + 10).min(500);
                 return vec![Effect::PersistPreferences(self.preferences())];
             }
-            Left | Right | Edit | Confirm | Toggle => {}
+            Left
+            | Right
+            | Edit
+            | Confirm
+            | Toggle
+            | History
+            | SelectAdapter(_)
+            | SelectAdapterField(_, _) => {}
         }
         Vec::new()
     }
@@ -772,7 +1205,29 @@ impl AppModel {
                 self.traffic.status = TaskStatus::Done;
                 self.traffic.job = None;
             }
-            RuntimeEvent::AdapterConfigApplied(_) => {}
+            RuntimeEvent::AdapterConfigStarted { job }
+                if self.adapters.edit.as_ref().and_then(|edit| edit.job) == Some(job) =>
+            {
+                if let Some(edit) = self.adapters.edit.as_mut() {
+                    edit.phase = AdapterEditPhase::Applying;
+                }
+            }
+            RuntimeEvent::AdapterConfigFinished { job, outcome }
+                if self.adapters.edit.as_ref().and_then(|edit| edit.job) == Some(job) =>
+            {
+                if let Some(edit) = self.adapters.edit.as_mut() {
+                    edit.phase = AdapterEditPhase::Succeeded(outcome);
+                    edit.job = None;
+                }
+            }
+            RuntimeEvent::AdapterConfigFailed { job, error }
+                if self.adapters.edit.as_ref().and_then(|edit| edit.job) == Some(job) =>
+            {
+                if let Some(edit) = self.adapters.edit.as_mut() {
+                    edit.phase = AdapterEditPhase::Failed(error);
+                    edit.job = None;
+                }
+            }
             RuntimeEvent::ScanStarted { job, total } if self.scanner.job == Some(job) => {
                 self.scanner.total = total;
                 self.scanner.status = TaskStatus::Running;
@@ -1060,7 +1515,7 @@ fn wrap(current: usize, len: usize, delta: isize) -> usize {
 fn stop_effect(job: JobId) -> Effect {
     match job.tool {
         ToolKind::Dashboard => unreachable!("dashboard refreshes are not diagnostic jobs"),
-        ToolKind::Adapters | ToolKind::Traffic => {
+        ToolKind::Adapters | ToolKind::AdapterEdit | ToolKind::Traffic => {
             unreachable!("read-only refreshes are not diagnostic jobs")
         }
         ToolKind::Ping => Effect::StopPing(job),
@@ -1071,6 +1526,66 @@ fn stop_effect(job: JobId) -> Effect {
         ToolKind::LanSpeed => Effect::StopLanSpeed(job),
         ToolKind::Scanner => Effect::CancelScan(job),
     }
+}
+
+fn non_empty(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn adapter_defaults(adapter: &AdapterInfo) -> AdapterEditParams {
+    let prefix = adapter
+        .cidr
+        .as_deref()
+        .and_then(|cidr| cidr.rsplit_once('/'))
+        .and_then(|(_, prefix)| prefix.parse::<u8>().ok());
+    let mask = prefix.and_then(prefix_to_mask).unwrap_or_default();
+    let gateway = adapter
+        .ipv4
+        .parse::<std::net::Ipv4Addr>()
+        .ok()
+        .map(|ip| {
+            let mut octets = ip.octets();
+            octets[3] = 1;
+            std::net::Ipv4Addr::from(octets).to_string()
+        })
+        .unwrap_or_default();
+    AdapterEditParams {
+        use_dhcp: adapter.dhcp_enabled,
+        ip: adapter.ipv4.clone(),
+        mask,
+        gateway,
+        dns1: "8.8.8.8".into(),
+        dns2: "8.8.4.4".into(),
+    }
+}
+
+fn prefix_to_mask(prefix: u8) -> Option<String> {
+    if prefix > 32 {
+        return None;
+    }
+    let value = if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix)
+    };
+    Some(std::net::Ipv4Addr::from(value).to_string())
+}
+
+fn validate_adapter_params(params: &AdapterEditParams) -> Result<(), AdapterValidationError> {
+    crate::AdapterConfigRequest {
+        guid: "validation-only".into(),
+        name: String::new(),
+        use_dhcp: params.use_dhcp,
+        ip: params.ip.clone(),
+        mask: params.mask.clone(),
+        gateway: non_empty(&params.gateway),
+        dns: [&params.dns1, &params.dns2]
+            .into_iter()
+            .filter_map(|value| non_empty(value))
+            .collect(),
+    }
+    .validate()
 }
 
 #[cfg(test)]
@@ -1385,5 +1900,198 @@ mod tests {
         app.apply_config(&config);
         assert_eq!(app.language, Language::Zh);
         assert_eq!(app.scan_concurrency, 120);
+    }
+
+    fn adapter_app() -> AppModel {
+        let mut app = AppModel {
+            page: Page::Adapters,
+            ..AppModel::default()
+        };
+        app.adapters.items.push(AdapterInfo {
+            name: "Ethernet".into(),
+            guid: "adapter-guid".into(),
+            ipv4: "192.168.50.20".into(),
+            cidr: Some("192.168.50.20/24".into()),
+            dhcp_enabled: false,
+            status: "up".into(),
+            ..AdapterInfo::default()
+        });
+        app
+    }
+
+    #[test]
+    fn adapter_edit_preserves_v031_defaults_and_validates_static_fields() {
+        let mut app = adapter_app();
+        assert!(
+            app.update(Input(InputEvent::Action(Action::Edit)))
+                .is_empty()
+        );
+        let edit = app.adapters.edit.as_ref().unwrap();
+        assert_eq!(edit.params.ip, "192.168.50.20");
+        assert_eq!(edit.params.mask, "255.255.255.0");
+        assert_eq!(edit.params.gateway, "192.168.50.1");
+        assert_eq!(edit.params.dns1, "8.8.8.8");
+        assert_eq!(edit.selected, AdapterField::Mode);
+
+        app.adapters.edit.as_mut().unwrap().params.mask = "255.0.255.0".into();
+        app.update(Input(InputEvent::Action(Action::Confirm)));
+        let edit = app.adapters.edit.as_ref().unwrap();
+        assert_eq!(edit.phase, AdapterEditPhase::Editing);
+        assert_eq!(edit.validation_error, Some(AdapterValidationError::Mask));
+
+        app.adapters.edit.as_mut().unwrap().params.mask = "255.255.255.0".into();
+        app.update(Input(InputEvent::Action(Action::Confirm)));
+        assert_eq!(
+            app.adapters.edit.as_ref().unwrap().phase,
+            AdapterEditPhase::Confirming
+        );
+    }
+
+    #[test]
+    fn adapter_apply_is_job_scoped_and_runtime_only_is_not_reported_as_failure() {
+        let mut app = adapter_app();
+        app.update(Input(InputEvent::Action(Action::Edit)));
+        app.update(Input(InputEvent::Action(Action::Confirm)));
+        let effects = app.update(Input(InputEvent::Action(Action::Confirm)));
+        assert!(matches!(effects[0], Effect::PersistAdapterEdit { .. }));
+        let Effect::ApplyAdapterConfig { job, ref request } = effects[1] else {
+            panic!("expected typed adapter apply effect");
+        };
+        assert_eq!(request.guid, "adapter-guid");
+        assert_eq!(request.gateway.as_deref(), Some("192.168.50.1"));
+
+        app.update(Input(InputEvent::Action(Action::Back)));
+        assert_eq!(
+            app.adapters.edit.as_ref().unwrap().phase,
+            AdapterEditPhase::Applying
+        );
+        app.update(Runtime(RuntimeEvent::AdapterConfigFinished {
+            job: JobId {
+                generation: job.generation + 1,
+                ..job
+            },
+            outcome: crate::AdapterApplyOutcome::Persistent,
+        }));
+        assert_eq!(
+            app.adapters.edit.as_ref().unwrap().phase,
+            AdapterEditPhase::Applying
+        );
+        app.update(Runtime(RuntimeEvent::AdapterConfigFinished {
+            job,
+            outcome: crate::AdapterApplyOutcome::RuntimeOnly,
+        }));
+        assert_eq!(
+            app.adapters.edit.as_ref().unwrap().phase,
+            AdapterEditPhase::Succeeded(crate::AdapterApplyOutcome::RuntimeOnly)
+        );
+        let effects = app.update(Input(InputEvent::Key(KeyEvent::plain(KeyCode::Enter))));
+        assert!(app.adapters.edit.is_none());
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::RefreshAdapters { .. }]
+        ));
+    }
+
+    #[test]
+    fn adapter_failure_returns_to_form_and_cursor_edits_emit_persistence() {
+        let mut app = adapter_app();
+        app.update(Input(InputEvent::Action(Action::Edit)));
+        app.update(Input(InputEvent::Action(Action::Confirm)));
+        let effects = app.update(Input(InputEvent::Action(Action::Confirm)));
+        let Effect::ApplyAdapterConfig { job, .. } = effects[1] else {
+            panic!()
+        };
+        app.update(Runtime(RuntimeEvent::AdapterConfigFailed {
+            job,
+            error: crate::RuntimeError::new(
+                crate::RuntimeErrorCode::PermissionDenied,
+                "administrator required",
+            ),
+        }));
+        assert!(matches!(
+            app.adapters.edit.as_ref().unwrap().phase,
+            AdapterEditPhase::Failed(_)
+        ));
+        app.update(Input(InputEvent::Key(KeyEvent::plain(KeyCode::Enter))));
+        assert_eq!(
+            app.adapters.edit.as_ref().unwrap().phase,
+            AdapterEditPhase::Editing
+        );
+
+        app.update(Input(InputEvent::Action(Action::SelectAdapterField(
+            AdapterField::Ipv4,
+            0,
+        ))));
+        let effects = app.update(Input(InputEvent::Key(KeyEvent::plain(KeyCode::Char('1')))));
+        assert_eq!(
+            app.adapters.edit.as_ref().unwrap().params.ip,
+            "1192.168.50.20"
+        );
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::PersistAdapterEdit { .. }]
+        ));
+    }
+
+    #[test]
+    fn adapter_edit_loads_guid_scoped_persistence_and_history_escape_is_local() {
+        let mut app = adapter_app();
+        let params = AdapterEditParams {
+            use_dhcp: false,
+            ip: "10.0.0.8".into(),
+            mask: "255.255.255.0".into(),
+            gateway: "10.0.0.1".into(),
+            dns1: "1.1.1.1".into(),
+            dns2: String::new(),
+        };
+        let mut config = crate::ConfigData::default();
+        config
+            .session
+            .adapter_edit
+            .adapters
+            .insert("adapter-guid".into(), params.clone());
+        config.session.history.adapter = vec!["9.9.9.9".into()];
+        app.apply_config(&config);
+        app.update(Input(InputEvent::Action(Action::Edit)));
+        assert_eq!(app.adapters.edit.as_ref().unwrap().params, params);
+        app.update(Input(InputEvent::Action(Action::SelectAdapterField(
+            AdapterField::Ipv4,
+            0,
+        ))));
+        app.update(Input(InputEvent::Action(Action::History)));
+        assert!(app.adapters.edit.as_ref().unwrap().history_open);
+        app.update(Input(InputEvent::Key(KeyEvent::plain(KeyCode::Esc))));
+        assert!(!app.adapters.edit.as_ref().unwrap().history_open);
+        assert!(app.adapters.edit.is_some());
+
+        let edit = app.adapters.edit.as_mut().unwrap();
+        edit.params.ip = "9.".into();
+        edit.selected = AdapterField::Ipv4;
+        edit.cursor = 2;
+        let effects = app.update(Input(InputEvent::Key(KeyEvent::plain(KeyCode::Right))));
+        assert_eq!(app.adapters.edit.as_ref().unwrap().params.ip, "9.9.9.9");
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::PersistAdapterEdit { .. }]
+        ));
+    }
+
+    #[test]
+    fn adapter_edit_keeps_v031_global_shortcuts_available() {
+        let mut app = adapter_app();
+        app.update(Input(InputEvent::Action(Action::Edit)));
+        assert!(app.adapters.edit.is_some());
+
+        app.update(Input(InputEvent::Key(KeyEvent::plain(KeyCode::Tab))));
+        assert_eq!(app.page, Page::Scanner);
+        app.page = Page::Adapters;
+        let effects = app.update(Input(InputEvent::Action(Action::ToggleLanguage)));
+        assert_eq!(app.language, Language::Zh);
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::PersistPreferences(_)]
+        ));
+        app.update(Input(InputEvent::Action(Action::Quit)));
+        assert!(!app.running);
     }
 }
