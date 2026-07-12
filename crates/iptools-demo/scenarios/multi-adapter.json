@@ -6,10 +6,30 @@
   "upload_bps": 7340032,
   "latency_ms": 7,
   "adapters": [
-    { "name": "Ethernet 2.5G", "kind": "wired", "ipv4": "172.16.10.24", "mac": "02:33:44:55:66:01", "status": "up · 2.5 Gbps" },
-    { "name": "Wi-Fi 6E", "kind": "wireless", "ipv4": "192.168.8.24", "mac": "02:33:44:55:66:02", "status": "up · Lab-6G" },
-    { "name": "WireGuard", "kind": "virtual", "ipv4": "10.13.0.2", "mac": "02:33:44:55:66:03", "status": "up" },
-    { "name": "Hyper-V", "kind": "virtual", "ipv4": "172.28.32.1", "mac": "02:33:44:55:66:04", "status": "internal" }
+    {
+      "name": "Ethernet 2.5G", "description": "Realtek 2.5GbE Controller", "guid": "lab-ethernet",
+      "kind": "wired", "ipv4": "172.16.10.24", "mac": "02:33:44:55:66:01", "status": "up · 2.5 Gbps",
+      "dhcp_enabled": false, "is_physical": true, "link_speed_bps": 2500000000,
+      "download_bps": 18874368, "upload_bps": 5242880, "total_download": 68719476736, "total_upload": 17179869184
+    },
+    {
+      "name": "Wi-Fi 6E", "description": "Tri-band Wi-Fi 6E adapter", "guid": "lab-wifi",
+      "kind": "wireless", "ipv4": "192.168.8.24", "mac": "02:33:44:55:66:02", "status": "up · Lab-6G",
+      "ssid": "Lab-6G", "dhcp_enabled": true, "is_physical": true, "link_speed_bps": 1200000000,
+      "download_bps": 5242880, "upload_bps": 1572864, "total_download": 25769803776, "total_upload": 6442450944
+    },
+    {
+      "name": "WireGuard", "description": "WireGuard development tunnel", "guid": "lab-wireguard",
+      "kind": "virtual", "ipv4": "10.13.0.2", "mac": "02:33:44:55:66:03", "status": "up",
+      "dhcp_enabled": false, "is_physical": false, "download_bps": 524288, "upload_bps": 524288,
+      "total_download": 4294967296, "total_upload": 3221225472
+    },
+    {
+      "name": "Hyper-V", "description": "Hyper-V internal switch", "guid": "lab-hyperv",
+      "kind": "virtual", "ipv4": "172.28.32.1", "mac": "02:33:44:55:66:04", "status": "internal",
+      "dhcp_enabled": false, "is_physical": false, "download_bps": 262144, "upload_bps": 131072,
+      "total_download": 2147483648, "total_upload": 1073741824
+    }
   ],
   "scan_hosts": [
     { "ip": "172.16.10.1", "mac": "02:CC:00:00:00:01", "hostname": "core-router.demo" },

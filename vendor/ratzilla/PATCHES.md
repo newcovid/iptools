@@ -11,7 +11,12 @@ an upstream release contains equivalent behavior:
    the previous dimensions may contain positions outside the newly rebuilt DOM
    grid; those transient cells are skipped and the next autoresized frame
    repaints the complete grid.
+3. DOM drawing tracks fullwidth lead cells and restores the hidden continuation
+   span when a CJK glyph is replaced. Ratatui does not resend an unchanged blank
+   continuation cell, so without this restoration each page transition can
+   permanently remove one `ch` and shift the rest of that row left. A fullwidth
+   glyph in the last column also no longer hides the first cell of the next row.
 
 `cargo test --manifest-path vendor/ratzilla/Cargo.toml --lib` covers the pure
-width and resize-index decisions. Browser behavior is additionally covered by
+width, resize-index and continuation-boundary decisions. Browser behavior is additionally covered by
 `crates/iptools-web/tests/e2e.mjs`.

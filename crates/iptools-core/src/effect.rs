@@ -20,6 +20,8 @@ pub struct JobId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ToolKind {
     Dashboard,
+    Adapters,
+    Traffic,
     Scanner,
     Ping,
     Trace,
@@ -204,7 +206,12 @@ pub enum Effect {
         job: JobId,
         request: DashboardRequest,
     },
-    RefreshAdapters,
+    RefreshAdapters {
+        job: JobId,
+    },
+    RefreshTraffic {
+        job: JobId,
+    },
     ApplyAdapterConfig(AdapterConfig),
     StartScan {
         job: JobId,
@@ -361,6 +368,28 @@ pub enum RuntimeEvent {
     },
     AdaptersUpdated(Vec<AdapterInfo>),
     TrafficUpdated(Vec<TrafficRow>),
+    AdaptersRefreshFinished {
+        job: JobId,
+        adapters: Vec<AdapterInfo>,
+    },
+    AdaptersRefreshFailed {
+        job: JobId,
+        error: RuntimeError,
+    },
+    AdaptersRefreshCancelled {
+        job: JobId,
+    },
+    TrafficRefreshFinished {
+        job: JobId,
+        rows: Vec<TrafficRow>,
+    },
+    TrafficRefreshFailed {
+        job: JobId,
+        error: RuntimeError,
+    },
+    TrafficRefreshCancelled {
+        job: JobId,
+    },
     AdapterConfigApplied(Result<String, String>),
     ScanStarted {
         job: JobId,

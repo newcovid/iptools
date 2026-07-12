@@ -21,6 +21,11 @@ fn checked_cell_position(cell_count: usize, width: u16, x: u16, y: u16) -> Optio
     (position < cell_count).then_some(position)
 }
 
+fn continuation_position(cell_count: usize, width: u16, lead: usize) -> Option<usize> {
+    let next = lead.checked_add(1)?;
+    (next < cell_count && next % width as usize != 0).then_some(next)
+}
+
 use crate::{
     backend::{
         cell_sized::CellSized,
@@ -85,6 +90,8 @@ pub struct DomBackend {
     initialized: Rc<RefCell<bool>>,
     /// Cells.
     cells: Vec<Element>,
+    /// Cells whose following span is hidden as a fullwidth continuation.
+    wide_leads: Vec<bool>,
     /// Grid element.
     grid: Element,
     /// The parent of the grid element.
@@ -169,6 +176,7 @@ impl DomBackend {
         let mut backend = Self {
             initialized,
             cells: vec![],
+            wide_leads: vec![],
             grid: document.create_element("div")?,
             grid_parent,
             options,
@@ -240,6 +248,7 @@ impl DomBackend {
         self.grid = self.document.create_element("div")?;
         self.grid.set_attribute("id", &self.options.grid_id())?;
         self.cells.clear();
+        self.wide_leads.clear();
         Ok(())
     }
 
@@ -268,6 +277,21 @@ impl DomBackend {
 
             // Append the <pre> to the grid
             self.grid.append_child(&pre)?;
+        }
+        self.wide_leads.resize(self.cells.len(), false);
+        Ok(())
+    }
+
+    fn restore_wide_continuation(&mut self, lead: usize) -> Result<(), Error> {
+        if !self.wide_leads.get(lead).copied().unwrap_or(false) {
+            return Ok(());
+        }
+        self.wide_leads[lead] = false;
+        if let Some(next) = continuation_position(self.cells.len(), self.size.width, lead) {
+            let next_elem = &self.cells[next];
+            let blank = Cell::default();
+            next_elem.set_inner_html(blank.symbol());
+            next_elem.set_attribute("style", &get_cell_style_as_css(&blank))?;
         }
         Ok(())
     }
@@ -333,6 +357,12 @@ impl Backend for DomBackend {
             // Ratatui's frame still has the previous dimensions. The next
             // frame autoresizes; skip the transient overflow instead of
             // panicking in this single hand-off frame.
+            // If this cell used to contain a fullwidth glyph, Ratatui may not
+            // include its unchanged blank continuation in `content`. Restore
+            // that span explicitly before replacing the lead, otherwise the
+            // row permanently loses one `ch` and later cells drift left.
+            self.restore_wide_continuation(cell_position)
+                .map_err(IoError::from)?;
             let elem = &self.cells[cell_position];
 
             elem.set_inner_html(cell.symbol());
@@ -341,8 +371,13 @@ impl Backend for DomBackend {
 
             // don't display the next cell if a fullwidth glyph preceeds it
             if cell.symbol().len() > 1 && cell.symbol().width() == 2 {
-                if (cell_position + 1) < self.cells.len() {
-                    let next_elem = &self.cells[cell_position + 1];
+                if let Some(next) =
+                    continuation_position(self.cells.len(), self.size.width, cell_position)
+                {
+                    self.restore_wide_continuation(next)
+                        .map_err(IoError::from)?;
+                    self.wide_leads[cell_position] = true;
+                    let next_elem = &self.cells[next];
                     next_elem.set_inner_html("");
                     next_elem
                         .set_attribute("style", &get_cell_style_as_css(&Cell::new("")))
@@ -457,13 +492,20 @@ impl Backend for DomBackend {
 
 #[cfg(test)]
 mod iptools_regression_tests {
-    use super::checked_cell_position;
+    use super::{checked_cell_position, continuation_position};
 
     #[test]
     fn resize_handoff_skips_old_frame_overflow() {
         assert_eq!(checked_cell_position(80, 10, 9, 7), Some(79));
         assert_eq!(checked_cell_position(80, 10, 0, 8), None);
         assert_eq!(checked_cell_position(80, 10, 10, 7), None);
+    }
+
+    #[test]
+    fn fullwidth_continuation_never_crosses_a_row_boundary() {
+        assert_eq!(continuation_position(20, 10, 8), Some(9));
+        assert_eq!(continuation_position(20, 10, 9), None);
+        assert_eq!(continuation_position(20, 10, 19), None);
     }
 }
 
