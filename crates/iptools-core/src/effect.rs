@@ -363,6 +363,8 @@ pub enum Effect {
 pub enum SessionUpdate {
     Ping(crate::PingPersist),
     Trace(crate::TracePersist),
+    PortScan(crate::PortScanPersist),
+    LanSpeed(crate::LanSpeedPersist),
     LinkQuality(crate::LinkQualityPersist),
     TargetHistory(Vec<String>),
     Ui(crate::UiPersist),
@@ -515,6 +517,8 @@ pub struct LanSpeedSample {
     pub elapsed_ms: u64,
     pub tx_bps: u64,
     pub rx_bps: u64,
+    pub tx_bytes: u64,
+    pub rx_bytes: u64,
     pub loss_percent: Option<f64>,
     pub jitter_ms: Option<f64>,
 }
@@ -526,6 +530,14 @@ pub struct LanSpeedSummary {
     pub elapsed_ms: u64,
     pub loss_percent: Option<f64>,
     pub jitter_ms: Option<f64>,
+    pub out_of_order: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LanSpeedPhase {
+    Listening,
+    Connecting,
+    Connected,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -684,6 +696,11 @@ pub enum RuntimeEvent {
     },
     LanSpeedStarted {
         job: JobId,
+        endpoint: String,
+    },
+    LanSpeedStatus {
+        job: JobId,
+        phase: LanSpeedPhase,
     },
     LanSpeedSample {
         job: JobId,

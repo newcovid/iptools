@@ -4,11 +4,11 @@ use std::{collections::VecDeque, str::FromStr};
 
 use iptools_core::{
     AdapterApplyOutcome, AdapterInfo, DashboardInterface, DashboardSnapshot, Effect, JobId,
-    LanSpeedRequest, LanSpeedSample, LanSpeedSummary, LinkQualityAdapter, LinkQualityGrade,
-    LinkQualityRequest, LinkQualitySample, LinkQualitySnapshot, LinkQualitySummary, PingRequest,
-    PingSample, PingSummary, PortScanRequest, PublicIpInfo, PublicSpeedRequest, RuntimeError,
-    RuntimeErrorCode, RuntimeEvent, ScanHost, SpeedSample, SpeedSummary, ToolKind, TraceHop,
-    TraceRequest, TrafficRow, WirelessSnapshot,
+    LanSpeedMode, LanSpeedPhase, LanSpeedRequest, LanSpeedSample, LanSpeedSummary,
+    LinkQualityAdapter, LinkQualityGrade, LinkQualityRequest, LinkQualitySample,
+    LinkQualitySnapshot, LinkQualitySummary, PingRequest, PingSample, PingSummary, PortScanRequest,
+    PublicIpInfo, PublicSpeedRequest, RuntimeError, RuntimeErrorCode, RuntimeEvent, ScanHost,
+    SpeedSample, SpeedSummary, ToolKind, TraceHop, TraceRequest, TrafficRow, WirelessSnapshot,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -540,7 +540,30 @@ impl DemoRuntime {
 
     fn start_lan_speed(&mut self, job: JobId, request: LanSpeedRequest) {
         self.cancel_job(job);
-        self.schedule(0, RuntimeEvent::LanSpeedStarted { job });
+        let endpoint = if request.mode == LanSpeedMode::Server {
+            format!("192.168.1.20:{}", request.port)
+        } else {
+            format!("{}:{}", request.peer, request.port)
+        };
+        self.schedule(0, RuntimeEvent::LanSpeedStarted { job, endpoint });
+        self.schedule(
+            40,
+            RuntimeEvent::LanSpeedStatus {
+                job,
+                phase: if request.mode == LanSpeedMode::Server {
+                    LanSpeedPhase::Listening
+                } else {
+                    LanSpeedPhase::Connecting
+                },
+            },
+        );
+        self.schedule(
+            120,
+            RuntimeEvent::LanSpeedStatus {
+                job,
+                phase: LanSpeedPhase::Connected,
+            },
+        );
         for step in 1..=8 {
             let elapsed_ms = request
                 .duration_secs
@@ -555,6 +578,8 @@ impl DemoRuntime {
                         elapsed_ms,
                         tx_bps: (144 + step * 24) * 1_000_000,
                         rx_bps: (132 + step * 22) * 1_000_000,
+                        tx_bytes: 45_000_000 * step,
+                        rx_bytes: 41_250_000 * step,
                         loss_percent: Some(0.2),
                         jitter_ms: Some(1.4),
                     },
@@ -571,6 +596,7 @@ impl DemoRuntime {
                     elapsed_ms: request.duration_secs * 1_000,
                     loss_percent: Some(0.2),
                     jitter_ms: Some(1.4),
+                    out_of_order: Some(2),
                 },
             },
         );
@@ -652,7 +678,8 @@ fn event_job(event: &RuntimeEvent) -> Option<JobId> {
         | RuntimeEvent::LinkQualitySample { job, .. }
         | RuntimeEvent::LinkQualityFinished { job, .. }
         | RuntimeEvent::LinkQualityFailed { job, .. }
-        | RuntimeEvent::LanSpeedStarted { job }
+        | RuntimeEvent::LanSpeedStarted { job, .. }
+        | RuntimeEvent::LanSpeedStatus { job, .. }
         | RuntimeEvent::LanSpeedSample { job, .. }
         | RuntimeEvent::LanSpeedFinished { job, .. }
         | RuntimeEvent::LanSpeedFailed { job, .. } => Some(*job),
@@ -730,6 +757,7 @@ fn cancelled_event(job: JobId) -> RuntimeEvent {
                 elapsed_ms: 0,
                 loss_percent: None,
                 jitter_ms: None,
+                out_of_order: None,
             },
         },
     }
@@ -750,7 +778,10 @@ fn mask_prefix(mask: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iptools_core::{AdapterConfigRequest, Effect, JobId, PingRequest, ScanRequest};
+    use iptools_core::{
+        AdapterConfigRequest, Effect, JobId, LanSpeedMode, LanSpeedRequest, PingRequest,
+        ScanRequest,
+    };
 
     #[test]
     fn all_scenarios_parse() {
@@ -849,6 +880,58 @@ mod tests {
         for delta in [0, 320, 640, 1_000, 2_000] {
             assert_eq!(native_demo.advance(delta), web_demo.advance(delta));
         }
+    }
+
+    #[test]
+    fn lan_speed_timeline_is_typed_deterministic_and_cancellable() {
+        let mut first = DemoRuntime::new(ScenarioId::HomeNetwork).unwrap();
+        let mut second = DemoRuntime::new(ScenarioId::HomeNetwork).unwrap();
+        let job = JobId {
+            tool: ToolKind::LanSpeed,
+            generation: 11,
+        };
+        let effect = Effect::StartLanSpeed {
+            job,
+            request: LanSpeedRequest {
+                mode: LanSpeedMode::Client,
+                peer: "192.0.2.25".into(),
+                duration_secs: 1,
+                ..LanSpeedRequest::default()
+            },
+        };
+        assert_eq!(first.dispatch(effect.clone()), second.dispatch(effect));
+        let first_events = first.advance(1_500);
+        let second_events = second.advance(1_500);
+        assert_eq!(first_events, second_events);
+        assert!(first_events.iter().any(|event| matches!(
+            event,
+            RuntimeEvent::LanSpeedStarted { job: current, .. } if *current == job
+        )));
+        assert!(first_events.iter().any(|event| matches!(
+            event,
+            RuntimeEvent::LanSpeedSample { job: current, sample }
+                if *current == job && sample.tx_bytes > 0 && sample.rx_bytes > 0
+        )));
+
+        let restarted = JobId {
+            generation: 12,
+            ..job
+        };
+        first.dispatch(Effect::StartLanSpeed {
+            job: restarted,
+            request: LanSpeedRequest::default(),
+        });
+        assert!(matches!(
+            first.dispatch(Effect::StopLanSpeed(restarted)).as_slice(),
+            [RuntimeEvent::LanSpeedFinished { job: current, summary }]
+                if *current == restarted && summary.elapsed_ms == 0
+        ));
+        assert!(
+            first
+                .advance(10_000)
+                .iter()
+                .all(|event| event_job(event) != Some(restarted))
+        );
     }
 
     #[test]

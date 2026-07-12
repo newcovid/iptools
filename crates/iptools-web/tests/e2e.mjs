@@ -353,8 +353,23 @@ try {
     path: "../../target/playwright-web-ping-trace-zh.png",
     fullPage: false,
   });
+  // Port Scan keeps the v0.3.1 stats/table/progress/status layout while the
+  // deterministic Web runtime supplies typed progress and open-port events.
   await diagnosticsPage.keyboard.press("Shift+Tab");
   await diagnosticsPage.keyboard.press("ArrowDown");
+  await diagnosticsPage.keyboard.press("Tab");
+  await diagnosticsPage.keyboard.press("Space");
+  await diagnosticsPage.waitForFunction(() => {
+    const text = document.getElementById("terminal")?.textContent ?? "";
+    return text.includes("443") && text.includes("HTTPS") && text.includes("完成");
+  });
+  await waitForStableTerminal(diagnosticsPage);
+  await diagnosticsPage.screenshot({
+    path: "../../target/playwright-web-port-scan-zh.png",
+    fullPage: false,
+  });
+
+  await diagnosticsPage.keyboard.press("Shift+Tab");
   await diagnosticsPage.keyboard.press("ArrowDown");
   await diagnosticsPage.keyboard.press("Tab");
   await diagnosticsPage.keyboard.press("Tab");
@@ -381,6 +396,32 @@ try {
   await waitForStableTerminal(diagnosticsPage);
   await diagnosticsPage.screenshot({
     path: "../../target/playwright-web-public-link-zh.png",
+    fullPage: false,
+  });
+  // LAN Speed exercises its v0.3.1 dynamic client configuration (mode and
+  // peer editing) before starting the same reducer/render path as native demo.
+  await diagnosticsPage.keyboard.press("Shift+Tab");
+  await diagnosticsPage.keyboard.press("ArrowDown");
+  await diagnosticsPage.keyboard.press("Tab");
+  await diagnosticsPage.keyboard.press("Tab");
+  await diagnosticsPage.keyboard.press("ArrowRight");
+  for (let index = 0; index < 4; index += 1) {
+    await diagnosticsPage.keyboard.press("ArrowDown");
+  }
+  await diagnosticsPage.keyboard.press("Home");
+  for (let index = 0; index < 32; index += 1) {
+    await diagnosticsPage.keyboard.press("Delete");
+  }
+  await diagnosticsPage.keyboard.type("192.0.2.25");
+  await diagnosticsPage.keyboard.press("Shift+Tab");
+  await diagnosticsPage.keyboard.press("Space");
+  await diagnosticsPage.waitForFunction(() => {
+    const text = document.getElementById("terminal")?.textContent ?? "";
+    return text.includes("192.0.2.25:50505") && text.includes("Mbps") && text.includes("完成");
+  });
+  await waitForStableTerminal(diagnosticsPage);
+  await diagnosticsPage.screenshot({
+    path: "../../target/playwright-web-lan-speed-zh.png",
     fullPage: false,
   });
   await diagnosticsPage.close();

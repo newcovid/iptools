@@ -441,6 +441,9 @@ impl Default for TraceState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct PortScanState {
     pub request: crate::PortScanRequest,
+    pub persist: crate::PortScanPersist,
+    pub config_selected: usize,
+    pub selected: usize,
     pub common: DiagnosticCommonState,
     pub scanned: u64,
     pub total: u64,
@@ -473,6 +476,10 @@ pub struct LinkQualityState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct LanSpeedState {
     pub request: crate::LanSpeedRequest,
+    pub persist: crate::LanSpeedPersist,
+    pub config_selected: usize,
+    pub endpoint: String,
+    pub phase: Option<crate::LanSpeedPhase>,
     pub common: DiagnosticCommonState,
     pub samples: Vec<crate::LanSpeedSample>,
     pub summary: Option<crate::LanSpeedSummary>,
@@ -617,6 +624,10 @@ impl AppModel {
         self.diagnostics.trace.max_hops_input = config.session.trace.max_hops.clone();
         self.diagnostics.trace.timeout_input = config.session.trace.timeout_ms.clone();
         self.sync_trace_request();
+        self.diagnostics.port_scan.persist = config.session.port_scan.clone();
+        self.sync_port_scan_request();
+        self.diagnostics.lan_speed.persist = config.session.lan_speed.clone();
+        self.sync_lan_speed_request();
         self.diagnostics.link_quality.persist = config.session.link_quality.clone();
         self.diagnostics.link_quality.params = self
             .diagnostics
@@ -1121,6 +1132,20 @@ impl AppModel {
                             wrap(self.diagnostics.trace.selected, len, 1);
                     }
                 }
+                Some(Action::Up) if self.diagnostics.tool == DiagnosticTool::PortScan => {
+                    let len = self.diagnostics.port_scan.open_ports.len();
+                    if len > 0 {
+                        self.diagnostics.port_scan.selected =
+                            wrap(self.diagnostics.port_scan.selected, len, -1);
+                    }
+                }
+                Some(Action::Down) if self.diagnostics.tool == DiagnosticTool::PortScan => {
+                    let len = self.diagnostics.port_scan.open_ports.len();
+                    if len > 0 {
+                        self.diagnostics.port_scan.selected =
+                            wrap(self.diagnostics.port_scan.selected, len, 1);
+                    }
+                }
                 _ => {}
             },
             DiagnosticFocus::Config => return self.handle_diagnostic_config(key, action),
@@ -1137,7 +1162,11 @@ impl AppModel {
         let selected = self.active_diagnostic_config_index();
         let target_field = matches!(
             (self.diagnostics.tool, selected),
-            (DiagnosticTool::Ping | DiagnosticTool::Trace, 0) | (DiagnosticTool::LinkQuality, 1)
+            (
+                DiagnosticTool::Ping | DiagnosticTool::Trace | DiagnosticTool::PortScan,
+                0
+            ) | (DiagnosticTool::LinkQuality, 1)
+                | (DiagnosticTool::LanSpeed, 4)
         );
 
         if action == Some(Action::History) && target_field && !running {
@@ -1212,7 +1241,10 @@ impl AppModel {
         } else if !running
             && matches!(
                 (self.diagnostics.tool, selected),
-                (DiagnosticTool::Trace, 1..) | (DiagnosticTool::LinkQuality, 2..)
+                (DiagnosticTool::Trace, 1..)
+                    | (DiagnosticTool::PortScan, 1..)
+                    | (DiagnosticTool::LinkQuality, 2..)
+                    | (DiagnosticTool::LanSpeed, 1 | 5..)
             )
             && let Some(key) = key
         {
@@ -1259,6 +1291,41 @@ impl AppModel {
                 self.switch_link_quality_adapter(if action == Some(Action::Left) { -1 } else { 1 });
                 return self.persist_active_diagnostic();
             }
+            Some(Action::Left | Action::Right)
+                if !running && self.diagnostics.tool == DiagnosticTool::LanSpeed =>
+            {
+                let forward = action == Some(Action::Right);
+                let persist = &mut self.diagnostics.lan_speed.persist;
+                match selected {
+                    0 => {
+                        persist.mode = if persist.mode == "client" {
+                            "server"
+                        } else {
+                            "client"
+                        }
+                        .into();
+                    }
+                    2 => {
+                        persist.proto = if persist.proto == "udp" { "tcp" } else { "udp" }.into();
+                    }
+                    3 => {
+                        persist.direction = match (persist.direction.as_str(), forward) {
+                            ("up", true) => "down",
+                            ("down", true) => "bidir",
+                            ("bidir", true) => "up",
+                            ("up", false) => "bidir",
+                            ("down", false) => "up",
+                            _ => "down",
+                        }
+                        .into();
+                    }
+                    _ => return Vec::new(),
+                }
+                self.sync_lan_speed_request();
+                let count = self.diagnostic_config_count();
+                self.diagnostics.lan_speed.config_selected = selected.min(count.saturating_sub(1));
+                return self.persist_active_diagnostic();
+            }
             _ => {}
         }
         Vec::new()
@@ -1279,8 +1346,10 @@ impl AppModel {
         match self.diagnostics.tool {
             DiagnosticTool::Ping => 4,
             DiagnosticTool::Trace => 3,
+            DiagnosticTool::PortScan => 4,
             DiagnosticTool::LinkQuality => 6,
-            _ => 1,
+            DiagnosticTool::LanSpeed => self.lan_speed_config_count(),
+            DiagnosticTool::PublicSpeed => 1,
         }
     }
 
@@ -1288,8 +1357,10 @@ impl AppModel {
         match self.diagnostics.tool {
             DiagnosticTool::Ping => self.diagnostics.ping.config_selected,
             DiagnosticTool::Trace => self.diagnostics.trace.config_selected,
+            DiagnosticTool::PortScan => self.diagnostics.port_scan.config_selected,
             DiagnosticTool::LinkQuality => self.diagnostics.link_quality.config_selected,
-            _ => 0,
+            DiagnosticTool::LanSpeed => self.diagnostics.lan_speed.config_selected,
+            DiagnosticTool::PublicSpeed => 0,
         }
     }
 
@@ -1298,8 +1369,10 @@ impl AppModel {
         match self.diagnostics.tool {
             DiagnosticTool::Ping => self.diagnostics.ping.config_selected = index,
             DiagnosticTool::Trace => self.diagnostics.trace.config_selected = index,
+            DiagnosticTool::PortScan => self.diagnostics.port_scan.config_selected = index,
             DiagnosticTool::LinkQuality => self.diagnostics.link_quality.config_selected = index,
-            _ => {}
+            DiagnosticTool::LanSpeed => self.diagnostics.lan_speed.config_selected = index,
+            DiagnosticTool::PublicSpeed => {}
         }
         self.diagnostics.cursor = self.active_diagnostic_field().len();
         self.diagnostics.history_open = false;
@@ -1325,6 +1398,12 @@ impl AppModel {
                 1 => &self.diagnostics.trace.max_hops_input,
                 _ => &self.diagnostics.trace.timeout_input,
             },
+            DiagnosticTool::PortScan => match self.diagnostics.port_scan.config_selected {
+                0 => &self.diagnostics.port_scan.persist.target,
+                1 => &self.diagnostics.port_scan.persist.start_port,
+                2 => &self.diagnostics.port_scan.persist.end_port,
+                _ => &self.diagnostics.port_scan.persist.timeout_ms,
+            },
             DiagnosticTool::LinkQuality => match self.diagnostics.link_quality.config_selected {
                 0 => "",
                 1 => &self.diagnostics.link_quality.params.target,
@@ -1333,7 +1412,16 @@ impl AppModel {
                 4 => &self.diagnostics.link_quality.params.timeout_ms,
                 _ => &self.diagnostics.link_quality.params.packet_size,
             },
-            _ => self.diagnostics.active_target(),
+            DiagnosticTool::LanSpeed => match self.diagnostics.lan_speed.config_selected {
+                1 => &self.diagnostics.lan_speed.persist.port,
+                4 => &self.diagnostics.lan_speed.persist.peer,
+                5 => &self.diagnostics.lan_speed.persist.duration,
+                6 => &self.diagnostics.lan_speed.persist.streams,
+                7 => &self.diagnostics.lan_speed.persist.payload,
+                8 => &self.diagnostics.lan_speed.persist.rate,
+                _ => "",
+            },
+            DiagnosticTool::PublicSpeed => "",
         }
     }
 
@@ -1342,10 +1430,17 @@ impl AppModel {
             DiagnosticTool::Ping if self.diagnostics.ping.config_selected == 0 => {
                 self.diagnostics.ping.request.target = value;
             }
+            DiagnosticTool::Ping => {}
             DiagnosticTool::Trace => match self.diagnostics.trace.config_selected {
                 0 => self.diagnostics.trace.request.target = value,
                 1 => self.diagnostics.trace.max_hops_input = value,
                 _ => self.diagnostics.trace.timeout_input = value,
+            },
+            DiagnosticTool::PortScan => match self.diagnostics.port_scan.config_selected {
+                0 => self.diagnostics.port_scan.persist.target = value,
+                1 => self.diagnostics.port_scan.persist.start_port = value,
+                2 => self.diagnostics.port_scan.persist.end_port = value,
+                _ => self.diagnostics.port_scan.persist.timeout_ms = value,
             },
             DiagnosticTool::LinkQuality => match self.diagnostics.link_quality.config_selected {
                 1 => self.diagnostics.link_quality.params.target = value,
@@ -1355,11 +1450,18 @@ impl AppModel {
                 5 => self.diagnostics.link_quality.params.packet_size = value,
                 _ => {}
             },
-            _ => {}
+            DiagnosticTool::LanSpeed => match self.diagnostics.lan_speed.config_selected {
+                1 => self.diagnostics.lan_speed.persist.port = value,
+                4 => self.diagnostics.lan_speed.persist.peer = value,
+                5 => self.diagnostics.lan_speed.persist.duration = value,
+                6 => self.diagnostics.lan_speed.persist.streams = value,
+                7 => self.diagnostics.lan_speed.persist.payload = value,
+                8 => self.diagnostics.lan_speed.persist.rate = value,
+                _ => {}
+            },
+            DiagnosticTool::PublicSpeed => {}
         }
-        if self.diagnostics.tool == DiagnosticTool::LinkQuality {
-            self.sync_link_quality_request();
-        }
+        self.sync_active_diagnostic_request();
     }
 
     fn sync_trace_request(&mut self) {
@@ -1377,6 +1479,68 @@ impl AppModel {
             .parse::<u64>()
             .unwrap_or(1_000)
             .clamp(100, 10_000);
+    }
+
+    fn sync_port_scan_request(&mut self) {
+        let persist = &self.diagnostics.port_scan.persist;
+        self.diagnostics.port_scan.request = crate::PortScanRequest {
+            target: persist.target.trim().to_string(),
+            start_port: persist.start_port.parse::<u16>().unwrap_or_default(),
+            end_port: persist.end_port.parse::<u16>().unwrap_or_default(),
+            timeout_ms: persist
+                .timeout_ms
+                .parse::<u64>()
+                .unwrap_or(300)
+                .clamp(20, 10_000),
+            concurrency: self.scan_concurrency.clamp(1, 1_024),
+        };
+    }
+
+    fn lan_speed_config_count(&self) -> usize {
+        if self.diagnostics.lan_speed.persist.mode != "client" {
+            2
+        } else if self.diagnostics.lan_speed.persist.proto == "udp" {
+            9
+        } else {
+            8
+        }
+    }
+
+    fn sync_lan_speed_request(&mut self) {
+        let persist = &self.diagnostics.lan_speed.persist;
+        let protocol = if persist.proto == "udp" {
+            crate::LanProtocol::Udp
+        } else {
+            crate::LanProtocol::Tcp
+        };
+        let payload_max = if protocol == crate::LanProtocol::Udp {
+            65_507
+        } else {
+            1_048_576
+        };
+        self.diagnostics.lan_speed.request = crate::LanSpeedRequest {
+            mode: if persist.mode == "client" {
+                crate::LanSpeedMode::Client
+            } else {
+                crate::LanSpeedMode::Server
+            },
+            peer: persist.peer.trim().to_string(),
+            port: persist.port.parse::<u16>().unwrap_or_default(),
+            protocol,
+            direction: match persist.direction.as_str() {
+                "down" => crate::LanDirection::Download,
+                "bidir" => crate::LanDirection::Bidirectional,
+                _ => crate::LanDirection::Upload,
+            },
+            duration_secs: persist.duration.parse::<u64>().unwrap_or(10).clamp(1, 600),
+            streams: persist.streams.parse::<u16>().unwrap_or(1).clamp(1, 32),
+            payload_size: persist
+                .payload
+                .parse::<u32>()
+                .unwrap_or(65_536)
+                .clamp(64, payload_max),
+            rate_mbps: persist.rate.parse::<u32>().unwrap_or_default().min(100_000),
+        };
     }
 
     fn sync_link_quality_adapters(&mut self) {
@@ -1519,7 +1683,9 @@ impl AppModel {
     fn sync_active_diagnostic_request(&mut self) {
         match self.diagnostics.tool {
             DiagnosticTool::Trace => self.sync_trace_request(),
+            DiagnosticTool::PortScan => self.sync_port_scan_request(),
             DiagnosticTool::LinkQuality => self.sync_link_quality_request(),
+            DiagnosticTool::LanSpeed => self.sync_lan_speed_request(),
             _ => {}
         }
     }
@@ -1541,8 +1707,14 @@ impl AppModel {
                     timeout_ms: self.diagnostics.trace.timeout_input.clone(),
                 },
             ))],
+            DiagnosticTool::PortScan => vec![Effect::PersistSession(
+                crate::SessionUpdate::PortScan(self.diagnostics.port_scan.persist.clone()),
+            )],
             DiagnosticTool::LinkQuality => vec![Effect::PersistSession(
                 crate::SessionUpdate::LinkQuality(self.link_quality_persist()),
+            )],
+            DiagnosticTool::LanSpeed => vec![Effect::PersistSession(
+                crate::SessionUpdate::LanSpeed(self.diagnostics.lan_speed.persist.clone()),
             )],
             _ => Vec::new(),
         }
@@ -1708,8 +1880,10 @@ impl AppModel {
         self.diagnostics.trace.request = crate::TraceRequest::default();
         self.diagnostics.trace.max_hops_input = trace.max_hops;
         self.diagnostics.trace.timeout_input = trace.timeout_ms;
-        self.diagnostics.port_scan.request = crate::PortScanRequest::default();
-        self.diagnostics.lan_speed.request = crate::LanSpeedRequest::default();
+        self.diagnostics.port_scan.persist = crate::PortScanPersist::default();
+        self.sync_port_scan_request();
+        self.diagnostics.lan_speed.persist = crate::LanSpeedPersist::default();
+        self.sync_lan_speed_request();
         self.diagnostics.link_quality.persist = crate::LinkQualityPersist::default();
         self.diagnostics.link_quality.params = crate::LinkParams::default();
         self.sync_link_quality_request();
@@ -1801,6 +1975,9 @@ impl AppModel {
         let target = match self.diagnostics.tool {
             DiagnosticTool::Ping => Some(self.diagnostics.ping.request.target.trim().to_string()),
             DiagnosticTool::Trace => Some(self.diagnostics.trace.request.target.trim().to_string()),
+            DiagnosticTool::PortScan => {
+                Some(self.diagnostics.port_scan.request.target.trim().to_string())
+            }
             DiagnosticTool::LinkQuality => Some(
                 self.diagnostics
                     .link_quality
@@ -1809,6 +1986,11 @@ impl AppModel {
                     .trim()
                     .to_string(),
             ),
+            DiagnosticTool::LanSpeed
+                if self.diagnostics.lan_speed.request.mode == crate::LanSpeedMode::Client =>
+            {
+                Some(self.diagnostics.lan_speed.request.peer.trim().to_string())
+            }
             _ => None,
         };
         if target.as_ref().is_some_and(String::is_empty) {
@@ -1829,6 +2011,36 @@ impl AppModel {
             let error = crate::RuntimeError::new(
                 crate::RuntimeErrorCode::InvalidRequest,
                 "no active physical IPv4 adapter is available",
+            );
+            common.status = TaskStatus::Failed(error.message.clone());
+            common.detail = error.message.clone();
+            common.error = Some(error);
+            return Vec::new();
+        }
+        if self.diagnostics.tool == DiagnosticTool::PortScan {
+            let request = &self.diagnostics.port_scan.request;
+            if request.start_port == 0
+                || request.end_port == 0
+                || request.start_port > request.end_port
+            {
+                let common = self.diagnostics.active_common_mut();
+                let error = crate::RuntimeError::new(
+                    crate::RuntimeErrorCode::InvalidRequest,
+                    "port range must be between 1 and 65535 and start must not exceed end",
+                );
+                common.status = TaskStatus::Failed(error.message.clone());
+                common.detail = error.message.clone();
+                common.error = Some(error);
+                return Vec::new();
+            }
+        }
+        if self.diagnostics.tool == DiagnosticTool::LanSpeed
+            && self.diagnostics.lan_speed.request.port == 0
+        {
+            let common = self.diagnostics.active_common_mut();
+            let error = crate::RuntimeError::new(
+                crate::RuntimeErrorCode::InvalidRequest,
+                "LAN speed port must be between 1 and 65535",
             );
             common.status = TaskStatus::Failed(error.message.clone());
             common.detail = error.message.clone();
@@ -1893,6 +2105,8 @@ impl AppModel {
             DiagnosticTool::LanSpeed => {
                 self.diagnostics.lan_speed.samples.clear();
                 self.diagnostics.lan_speed.summary = None;
+                self.diagnostics.lan_speed.endpoint.clear();
+                self.diagnostics.lan_speed.phase = None;
                 Effect::StartLanSpeed {
                     job,
                     request: self.diagnostics.lan_speed.request.clone(),
@@ -2258,10 +2472,17 @@ impl AppModel {
             {
                 fail_common(&mut self.diagnostics.link_quality.common, error);
             }
-            RuntimeEvent::LanSpeedStarted { job }
+            RuntimeEvent::LanSpeedStarted { job, endpoint }
                 if self.diagnostics.lan_speed.common.job == Some(job) =>
             {
-                self.diagnostics.lan_speed.common.status = TaskStatus::Running;
+                let state = &mut self.diagnostics.lan_speed;
+                state.common.status = TaskStatus::Running;
+                state.endpoint = endpoint;
+            }
+            RuntimeEvent::LanSpeedStatus { job, phase }
+                if self.diagnostics.lan_speed.common.job == Some(job) =>
+            {
+                self.diagnostics.lan_speed.phase = Some(phase);
             }
             RuntimeEvent::LanSpeedSample { job, sample }
                 if self.diagnostics.lan_speed.common.job == Some(job) =>
@@ -2292,6 +2513,7 @@ impl AppModel {
                     ),
                 );
                 self.diagnostics.lan_speed.summary = Some(summary);
+                self.diagnostics.lan_speed.phase = None;
             }
             RuntimeEvent::LanSpeedFailed { job, error }
                 if self.diagnostics.lan_speed.common.job == Some(job) =>
@@ -2657,12 +2879,11 @@ mod tests {
         app.diagnostics.focus = DiagnosticFocus::Main;
         app.diagnostics.tool = DiagnosticTool::PortScan;
         app.scan_concurrency = 64;
-        app.diagnostics.port_scan.request = crate::PortScanRequest {
+        app.diagnostics.port_scan.persist = crate::PortScanPersist {
             target: "192.0.2.10".into(),
-            start_port: 20,
-            end_port: 443,
-            timeout_ms: 250,
-            concurrency: 64,
+            start_port: "20".into(),
+            end_port: "443".into(),
+            timeout_ms: "250".into(),
         };
         let effects = app.update(Input(InputEvent::Action(Action::Toggle)));
         let Effect::StartPortScan { request, .. } = &effects[0] else {
@@ -3403,5 +3624,142 @@ mod tests {
                 .map(|error| error.code),
             Some(crate::RuntimeErrorCode::PermissionDenied)
         );
+    }
+
+    #[test]
+    fn port_scan_and_lan_speed_keep_v031_raw_config_and_validate_at_execution() {
+        let mut config = crate::ConfigData::default();
+        config.session.port_scan = crate::PortScanPersist {
+            target: "scan.example".into(),
+            start_port: "200".into(),
+            end_port: "100".into(),
+            timeout_ms: "1".into(),
+        };
+        config.session.lan_speed = crate::LanSpeedPersist {
+            mode: "client".into(),
+            peer: "peer.example".into(),
+            port: "50505".into(),
+            proto: "udp".into(),
+            direction: "bidir".into(),
+            duration: "999".into(),
+            streams: "99".into(),
+            payload: "999999".into(),
+            rate: "999999".into(),
+        };
+        let mut app = AppModel::default();
+        app.apply_config(&config);
+        assert_eq!(app.diagnostics.port_scan.persist.end_port, "100");
+        assert_eq!(app.diagnostics.port_scan.request.timeout_ms, 20);
+        assert_eq!(app.diagnostics.lan_speed.persist.duration, "999");
+        assert_eq!(app.diagnostics.lan_speed.request.duration_secs, 600);
+        assert_eq!(app.diagnostics.lan_speed.request.streams, 32);
+        assert_eq!(app.diagnostics.lan_speed.request.payload_size, 65_507);
+        assert_eq!(app.diagnostics.lan_speed.request.rate_mbps, 100_000);
+
+        app.page = Page::Diagnostics;
+        app.diagnostics.focused = true;
+        app.diagnostics.focus = DiagnosticFocus::Main;
+        app.diagnostics.tool = DiagnosticTool::PortScan;
+        assert!(
+            app.update(Input(InputEvent::Action(Action::Toggle)))
+                .is_empty()
+        );
+        assert!(matches!(
+            app.diagnostics
+                .port_scan
+                .common
+                .error
+                .as_ref()
+                .map(|error| error.code),
+            Some(crate::RuntimeErrorCode::InvalidRequest)
+        ));
+        app.diagnostics.port_scan.persist.end_port = "220".into();
+        app.sync_port_scan_request();
+        let effects = app.update(Input(InputEvent::Action(Action::Toggle)));
+        assert!(
+            matches!(effects.first(), Some(Effect::StartPortScan { request, .. }) if request.start_port == 200 && request.end_port == 220)
+        );
+
+        app.diagnostics.tool = DiagnosticTool::LanSpeed;
+        app.diagnostics.focus = DiagnosticFocus::Config;
+        app.diagnostics.lan_speed.config_selected = 2;
+        let effects = app.update(Input(InputEvent::Action(Action::Left)));
+        assert_eq!(app.diagnostics.lan_speed.persist.proto, "tcp");
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::PersistSession(crate::SessionUpdate::LanSpeed(_))]
+        ));
+    }
+
+    #[test]
+    fn lan_speed_lifecycle_is_typed_cancellable_and_generation_scoped() {
+        let mut app = AppModel {
+            page: Page::Diagnostics,
+            ..AppModel::default()
+        };
+        app.diagnostics.focused = true;
+        app.diagnostics.focus = DiagnosticFocus::Main;
+        app.diagnostics.tool = DiagnosticTool::LanSpeed;
+        app.diagnostics.lan_speed.persist = crate::LanSpeedPersist {
+            mode: "client".into(),
+            peer: "127.0.0.1".into(),
+            duration: "1".into(),
+            ..crate::LanSpeedPersist::default()
+        };
+        app.sync_lan_speed_request();
+        let effects = app.update(Input(InputEvent::Action(Action::Toggle)));
+        let Effect::StartLanSpeed { job, request } = effects[0].clone() else {
+            panic!("expected LAN speed start")
+        };
+        assert_eq!(request.mode, crate::LanSpeedMode::Client);
+        app.update(Runtime(RuntimeEvent::LanSpeedStarted {
+            job,
+            endpoint: "127.0.0.1:50505".into(),
+        }));
+        app.update(Runtime(RuntimeEvent::LanSpeedStatus {
+            job,
+            phase: crate::LanSpeedPhase::Connected,
+        }));
+        let sample = crate::LanSpeedSample {
+            elapsed_ms: 250,
+            tx_bps: 10_000_000,
+            rx_bps: 9_000_000,
+            tx_bytes: 2_500_000,
+            rx_bytes: 2_250_000,
+            loss_percent: None,
+            jitter_ms: None,
+        };
+        app.update(Runtime(RuntimeEvent::LanSpeedSample {
+            job,
+            sample: sample.clone(),
+        }));
+        assert_eq!(app.diagnostics.lan_speed.samples, [sample]);
+        assert_eq!(
+            app.update(Input(InputEvent::Action(Action::Toggle))),
+            [Effect::StopLanSpeed(job)]
+        );
+        let restarted = app.update(Input(InputEvent::Action(Action::Toggle)));
+        let Effect::StartLanSpeed { job: restarted, .. } = restarted[0] else {
+            panic!("expected LAN speed restart")
+        };
+        let summary = crate::LanSpeedSummary {
+            tx_bytes: 10_000_000,
+            rx_bytes: 9_000_000,
+            elapsed_ms: 1_000,
+            loss_percent: Some(0.1),
+            jitter_ms: Some(0.5),
+            out_of_order: Some(1),
+        };
+        app.update(Runtime(RuntimeEvent::LanSpeedFinished {
+            job,
+            summary: summary.clone(),
+        }));
+        assert_eq!(app.diagnostics.lan_speed.common.job, Some(restarted));
+        app.update(Runtime(RuntimeEvent::LanSpeedFinished {
+            job: restarted,
+            summary: summary.clone(),
+        }));
+        assert_eq!(app.diagnostics.lan_speed.summary, Some(summary));
+        assert_eq!(app.diagnostics.lan_speed.common.status, TaskStatus::Done);
     }
 }

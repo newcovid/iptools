@@ -144,6 +144,14 @@ impl NativeRuntime {
                 self.cancel(job);
                 Ok(())
             }
+            Effect::StartLanSpeed { job, request } => {
+                self.spawn_lan_speed(job, request);
+                Ok(())
+            }
+            Effect::StopLanSpeed(job) => {
+                self.cancel(job);
+                Ok(())
+            }
             Effect::StopPortScan(job) => {
                 self.cancel(job);
                 Ok(())
