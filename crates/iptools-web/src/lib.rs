@@ -1,3 +1,5 @@
+#![allow(linker_messages)] // MSVC emits a harmless import-library notice for the cdylib test build.
+
 //! Browser entry point for the interactive iptools exhibit.
 
 #[cfg(target_arch = "wasm32")]

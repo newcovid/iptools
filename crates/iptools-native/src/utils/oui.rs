@@ -1,8 +1,8 @@
 //! MAC 厂商（OUI）查询。
 //!
-//! 内嵌一份小而高置信度的常见 OUI 前缀表（虚拟化平台 / 树莓派 / Apple /
-//! Cisco / Google 等），覆盖开发局域网里最常见的设备。查不到返回 `None`，
-//! 由调用方显示 "-"。宁缺勿错：只收录把握较大的前缀。
+//! 优先查询随程序离线打包的 IEEE MA-L/MA-M/MA-S/CID/IAB 数据库；少量
+//! 非 IEEE 的虚拟化前缀保持兼容。查不到但属于本地管理地址时，明确标记
+//! 为随机/私有 MAC，而不是误报成厂商缺失。
 
 /// 按 MAC 的前 3 个字节（OUI）查厂商。
 /// 接受任意分隔符（`:`、`-` 或无）与大小写。
@@ -16,7 +16,7 @@ pub fn lookup(mac: &str) -> Option<&'static str> {
     if hex.len() < 6 {
         return None;
     }
-    let v = match hex.as_str() {
+    let legacy = match hex.as_str() {
         // 虚拟化 / 虚拟网卡
         "000C29" | "005056" | "000569" | "001C14" => "VMware",
         "080027" | "0A0027" => "VirtualBox",
@@ -32,9 +32,22 @@ pub fn lookup(mac: &str) -> Option<&'static str> {
         "00000C" | "001121" => "Cisco",
         // Google / Nest
         "F4F5E8" | "3C5AB4" | "A47733" => "Google",
-        _ => return None,
+        _ => "",
     };
-    Some(v)
+    if !legacy.is_empty() {
+        return Some(legacy);
+    }
+    if let Some(record) = oui_data::lookup(mac) {
+        let organization = record.organization().trim();
+        if !organization.is_empty() {
+            return Some(organization);
+        }
+    }
+    let first = u8::from_str_radix(&hex[..2], 16).ok()?;
+    if first & 0x01 != 0 {
+        return None;
+    }
+    (first & 0x02 != 0).then_some("Local / randomized MAC")
 }
 
 #[cfg(test)]
@@ -46,6 +59,10 @@ mod tests {
         assert_eq!(lookup("08:00:27:ab:cd:ef"), Some("VirtualBox"));
         assert_eq!(lookup("00:0c:29:11:22:33"), Some("VMware"));
         assert_eq!(lookup("b8-27-eb-00-00-00"), Some("Raspberry Pi"));
+        assert_eq!(
+            lookup("1c-d5-e2-31-3f-be"),
+            Some("Shenzhen YOUHUA Technology Co., Ltd")
+        );
     }
 
     #[test]
@@ -57,6 +74,7 @@ mod tests {
     #[test]
     fn unknown_or_malformed_is_none() {
         assert_eq!(lookup("ff:ff:ff:00:00:00"), None);
+        assert_eq!(lookup("12:a2:34:85:0a:a4"), Some("Local / randomized MAC"));
         assert_eq!(lookup("xx"), None);
         assert_eq!(lookup(""), None);
     }

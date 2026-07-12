@@ -1,3 +1,5 @@
+#![allow(linker_messages)] // MSVC prints a harmless localized import-library notice for test bins.
+
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use iptools_demo::ScenarioId;

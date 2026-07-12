@@ -10,7 +10,9 @@ use std::{
 };
 
 use futures::{StreamExt, stream};
-use iptools_core::{JobId, PortScanRequest, RuntimeError, RuntimeErrorCode, RuntimeEvent};
+use iptools_core::{
+    JobId, PortScanRequest, PortScanResult, RuntimeError, RuntimeErrorCode, RuntimeEvent,
+};
 
 use super::NativeRuntime;
 
@@ -89,7 +91,13 @@ impl NativeRuntime {
                             tokio::time::timeout(Duration::from_millis(request.timeout_ms), connect)
                                 .await
                         {
-                            let _ = events.send(RuntimeEvent::PortScanOpen { job, port }).await;
+                            let result = PortScanResult {
+                                port,
+                                service: crate::utils::services::tcp_service(port),
+                            };
+                            let _ = events
+                                .send(RuntimeEvent::PortScanOpen { job, result })
+                                .await;
                         }
                         scanned.fetch_add(1, Ordering::Relaxed);
                     }

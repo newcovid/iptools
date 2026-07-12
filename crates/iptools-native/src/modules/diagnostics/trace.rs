@@ -1,6 +1,6 @@
 //! Native IPv4 trace-route algorithm for the structured runtime.
 
-use std::net::Ipv4Addr;
+use std::{future::Future, net::Ipv4Addr};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -26,7 +26,7 @@ pub(crate) async fn run_shared(
     cancellation: CancellationToken,
     events: mpsc::Sender<iptools_core::RuntimeEvent>,
 ) -> Result<(), String> {
-    use iptools_core::{RuntimeError, RuntimeErrorCode, RuntimeEvent, TraceHop};
+    use iptools_core::{RuntimeError, RuntimeErrorCode, RuntimeEvent};
 
     if request.target.trim().is_empty() {
         events
@@ -45,7 +45,7 @@ pub(crate) async fn run_shared(
         .send(RuntimeEvent::TraceStarted { job })
         .await
         .map_err(|error| error.to_string())?;
-    let (tx, mut rx) = mpsc::channel(16);
+    let (tx, rx) = mpsc::channel(16);
     let worker_cancellation = cancellation.child_token();
     let worker = run_trace(
         request.target.trim().to_string(),
@@ -54,18 +54,46 @@ pub(crate) async fn run_shared(
         tx,
         worker_cancellation.clone(),
     );
+    forward_trace_events(job, cancellation, worker_cancellation, events, rx, worker).await
+}
+
+async fn forward_trace_events<F>(
+    job: iptools_core::JobId,
+    cancellation: CancellationToken,
+    worker_cancellation: CancellationToken,
+    events: mpsc::Sender<iptools_core::RuntimeEvent>,
+    mut rx: mpsc::Receiver<TraceEvent>,
+    worker: F,
+) -> Result<(), String>
+where
+    F: Future<Output = ()>,
+{
+    use iptools_core::{RuntimeError, RuntimeErrorCode, RuntimeEvent, TraceHop};
+
     tokio::pin!(worker);
+    let mut worker_done = false;
     let mut hops = 0u8;
     loop {
         tokio::select! {
             biased;
             _ = cancellation.cancelled() => {
                 worker_cancellation.cancel();
-                worker.await;
+                if !worker_done {
+                    worker.await;
+                }
                 return Ok(());
             }
             event = rx.recv() => {
-                let Some(event) = event else { return Ok(()); };
+                let Some(event) = event else {
+                    events.send(RuntimeEvent::TraceFailed {
+                        job,
+                        error: RuntimeError::new(
+                            RuntimeErrorCode::Internal,
+                            "trace worker ended without a terminal event",
+                        ),
+                    }).await.map_err(|error| error.to_string())?;
+                    return Ok(());
+                };
                 match event {
                     TraceEvent::Hop(hop) => {
                         hops = hops.max(hop.ttl);
@@ -82,7 +110,9 @@ pub(crate) async fn run_shared(
                     TraceEvent::Done => {
                         events.send(RuntimeEvent::TraceFinished { job, hops }).await.map_err(|error| error.to_string())?;
                         worker_cancellation.cancel();
-                        worker.await;
+                        if !worker_done {
+                            worker.await;
+                        }
                         return Ok(());
                     }
                     TraceEvent::Error(message) => {
@@ -96,12 +126,19 @@ pub(crate) async fn run_shared(
                             error: RuntimeError::new(RuntimeErrorCode::ResolveTarget, message),
                         }).await.map_err(|error| error.to_string())?;
                         worker_cancellation.cancel();
-                        worker.await;
+                        if !worker_done {
+                            worker.await;
+                        }
                         return Ok(());
                     }
                 }
             }
-            _ = &mut worker => return Ok(()),
+            _ = &mut worker, if !worker_done => {
+                // The worker can enqueue Hop + Done and complete in a single
+                // poll (especially for a one-hop LAN target). Keep draining
+                // the channel instead of dropping those buffered events.
+                worker_done = true;
+            },
         }
     }
 }
@@ -191,4 +228,52 @@ async fn run_trace(
     }
 
     let _ = tx.send(TraceEvent::Done).await;
+}
+
+#[cfg(test)]
+mod bridge_tests {
+    use super::*;
+    use iptools_core::{JobId, RuntimeEvent, ToolKind};
+
+    #[tokio::test]
+    async fn worker_completion_does_not_drop_buffered_hop_and_done_events() {
+        let job = JobId {
+            tool: ToolKind::Trace,
+            generation: 7,
+        };
+        let (inner_tx, inner_rx) = mpsc::channel(4);
+        let worker = async move {
+            inner_tx
+                .send(TraceEvent::Hop(Hop {
+                    ttl: 1,
+                    addr: Some(Ipv4Addr::new(192, 168, 1, 1)),
+                    rtt_ms: Some(2),
+                    host: Some("router.local".into()),
+                }))
+                .await
+                .unwrap();
+            inner_tx.send(TraceEvent::Done).await.unwrap();
+        };
+        let (events_tx, mut events_rx) = mpsc::channel(4);
+        forward_trace_events(
+            job,
+            CancellationToken::new(),
+            CancellationToken::new(),
+            events_tx,
+            inner_rx,
+            worker,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(RuntimeEvent::TraceHop { job: current, hop })
+                if current == job && hop.ttl == 1
+        ));
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(RuntimeEvent::TraceFinished { job: current, hops: 1 }) if current == job
+        ));
+    }
 }

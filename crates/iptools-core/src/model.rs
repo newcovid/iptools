@@ -9,6 +9,7 @@ use crate::{
 pub enum Message {
     Input(InputEvent),
     Tick(u64),
+    Clock(String),
     Runtime(RuntimeEvent),
 }
 
@@ -482,7 +483,7 @@ pub struct PortScanState {
     pub common: DiagnosticCommonState,
     pub scanned: u64,
     pub total: u64,
-    pub open_ports: Vec<u16>,
+    pub open_ports: Vec<crate::PortScanResult>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -708,6 +709,10 @@ impl AppModel {
                 self.elapsed_ms = self.elapsed_ms.saturating_add(delta);
                 Vec::new()
             }
+            Clock(observed_at) => {
+                self.dashboard.snapshot.observed_at = observed_at;
+                Vec::new()
+            }
             Runtime(event) => {
                 self.handle_runtime(event);
                 Vec::new()
@@ -737,6 +742,9 @@ impl AppModel {
 
         if self.page == Page::Diagnostics {
             let action = input.action();
+            if let Some(Action::SelectDiagnostic(index)) = action {
+                return self.handle_action(Action::SelectDiagnostic(index));
+            }
             if let Some(Action::SelectDiagnosticHistory(index)) = action {
                 if let Some(value) = self.diagnostics.target_history.get(index).cloned() {
                     self.set_active_diagnostic_field(value);
@@ -2513,8 +2521,31 @@ impl AppModel {
                 if self.diagnostics.ping.common.job == Some(job) =>
             {
                 let primary = sample.latency_ms.map_or_else(
-                    || format!("sequence {} timed out", sample.sequence),
-                    |latency| format!("reply {}: {latency} ms", sample.sequence),
+                    || {
+                        format!(
+                            "seq={} {}",
+                            sample.sequence,
+                            if self.language == Language::Zh {
+                                "请求超时"
+                            } else {
+                                "request timed out"
+                            }
+                        )
+                    },
+                    |latency| {
+                        format!(
+                            "{} seq={} bytes={} ttl={} time={}ms",
+                            if self.language == Language::Zh {
+                                "回复"
+                            } else {
+                                "Reply"
+                            },
+                            sample.sequence,
+                            sample.size,
+                            sample.ttl.map_or_else(|| "—".into(), |ttl| ttl.to_string()),
+                            latency
+                        )
+                    },
                 );
                 let common = &mut self.diagnostics.ping.common;
                 common.progress = (sample.sequence.saturating_add(1) * 12).min(99) as u8;
@@ -2609,14 +2640,17 @@ impl AppModel {
                 state.common.primary = format!("scanned {scanned} ports");
                 state.common.detail = format!("{} open", state.open_ports.len());
             }
-            RuntimeEvent::PortScanOpen { job, port }
+            RuntimeEvent::PortScanOpen { job, result }
                 if self.diagnostics.port_scan.common.job == Some(job) =>
             {
                 let state = &mut self.diagnostics.port_scan;
-                if let Err(index) = state.open_ports.binary_search(&port) {
-                    state.open_ports.insert(index, port);
+                if let Err(index) = state
+                    .open_ports
+                    .binary_search_by_key(&result.port, |entry| entry.port)
+                {
+                    state.open_ports.insert(index, result.clone());
                 }
-                let line = format!("open: {port}");
+                let line = format!("open: {} ({})", result.port, result.service);
                 state.common.primary = line.clone();
                 state.common.log.push(line);
             }
@@ -3066,6 +3100,10 @@ mod tests {
             sample: sample.clone(),
         }));
         assert_eq!(app.diagnostics.ping.samples.first(), Some(&sample));
+        assert_eq!(
+            app.diagnostics.ping.common.log.last().map(String::as_str),
+            Some("Reply seq=1 bytes=32 ttl=64 time=12ms")
+        );
 
         assert_eq!(
             app.update(Input(InputEvent::Action(Action::Toggle))),
@@ -3330,6 +3368,14 @@ mod tests {
             app.dashboard.error.as_ref().unwrap().code,
             crate::RuntimeErrorCode::Network
         );
+    }
+
+    #[test]
+    fn clock_messages_refresh_the_dashboard_without_network_io() {
+        let mut app = AppModel::default();
+        let effects = app.update(Clock("2026-07-12 20:30:45".into()));
+        assert!(effects.is_empty());
+        assert_eq!(app.dashboard.snapshot.observed_at, "2026-07-12 20:30:45");
     }
 
     #[test]
@@ -3687,6 +3733,24 @@ mod tests {
 
         app.update(Input(InputEvent::Key(KeyEvent::plain(KeyCode::Esc))));
         assert!(!app.diagnostics.focused);
+    }
+
+    #[test]
+    fn clicking_a_diagnostic_row_switches_tool_even_when_already_focused() {
+        let mut app = AppModel {
+            page: Page::Diagnostics,
+            ..AppModel::default()
+        };
+        app.diagnostics.focused = true;
+        app.diagnostics.focus = DiagnosticFocus::Config;
+
+        let effects = app.update(Input(InputEvent::Action(Action::SelectDiagnostic(
+            DiagnosticTool::Trace as u8,
+        ))));
+
+        assert_eq!(app.diagnostics.tool, DiagnosticTool::Trace);
+        assert_eq!(app.diagnostics.focus, DiagnosticFocus::Menu);
+        assert!(matches!(effects.as_slice(), [Effect::PersistSession(_)]));
     }
 
     #[test]

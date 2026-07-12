@@ -20,6 +20,8 @@ ipnetwork.workspace = true
 iptools-core.workspace = true
 iptools-demo.workspace = true
 iptools-ui.workspace = true
+oui-data = "0.2.1"
+port-desc = "0.1.1"
 ratatui = { workspace = true, features = ["crossterm_0_29"] }
 reqwest.workspace = true
 serde.workspace = true

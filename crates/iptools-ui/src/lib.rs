@@ -23,6 +23,9 @@ const SECONDARY: Color = Color::Cyan;
 const MUTED: Color = Color::Gray;
 const SUBTLE: Color = Color::DarkGray;
 const SELECTED: Color = Color::DarkGray;
+// Dedicated semantic color so completion text remains visibly secondary in
+// every palette instead of inheriting the ordinary label color.
+const GHOST: Color = Color::Indexed(244);
 
 /// Ephemeral layout state. No application or platform state is stored here.
 #[derive(Debug, Default)]
@@ -175,6 +178,7 @@ struct ThemePalette {
     selection: Color,
     muted: Color,
     subtle: Color,
+    ghost: Color,
     green: Color,
     cyan: Color,
     yellow: Color,
@@ -193,6 +197,7 @@ fn apply_theme(frame: &mut Frame, theme: ThemeId) {
             selection: Color::Rgb(76, 86, 106),
             muted: Color::Rgb(216, 222, 233),
             subtle: Color::Rgb(129, 161, 193),
+            ghost: Color::Rgb(76, 86, 106),
             green: Color::Rgb(163, 190, 140),
             cyan: Color::Rgb(136, 192, 208),
             yellow: Color::Rgb(235, 203, 139),
@@ -204,6 +209,7 @@ fn apply_theme(frame: &mut Frame, theme: ThemeId) {
             selection: Color::Rgb(69, 71, 90),
             muted: Color::Rgb(166, 173, 200),
             subtle: Color::Rgb(127, 132, 156),
+            ghost: Color::Rgb(108, 112, 134),
             green: Color::Rgb(166, 227, 161),
             cyan: Color::Rgb(148, 226, 213),
             yellow: Color::Rgb(249, 226, 175),
@@ -215,6 +221,7 @@ fn apply_theme(frame: &mut Frame, theme: ThemeId) {
             selection: Color::Rgb(68, 71, 90),
             muted: Color::Rgb(189, 147, 249),
             subtle: Color::Rgb(98, 114, 164),
+            ghost: Color::Rgb(98, 114, 164),
             green: Color::Rgb(80, 250, 123),
             cyan: Color::Rgb(139, 233, 253),
             yellow: Color::Rgb(241, 250, 140),
@@ -234,6 +241,7 @@ fn remap_color(color: Color, palette: ThemePalette, background: bool) -> Color {
         Color::Black => palette.background,
         Color::DarkGray if background => palette.selection,
         Color::DarkGray => palette.subtle,
+        Color::Indexed(244) => palette.ghost,
         Color::Gray => palette.muted,
         Color::Green | Color::LightGreen => palette.green,
         Color::Cyan | Color::LightCyan | Color::Blue | Color::LightBlue => palette.cyan,
@@ -852,7 +860,7 @@ fn render_adapter_edit(
                 Span::styled(after.to_string(), style),
             ];
             if let Some(suffix) = suffix {
-                spans.push(Span::styled(suffix, Style::default().fg(MUTED)));
+                spans.push(Span::styled(suffix, Style::default().fg(GHOST)));
             }
             if !edit.history_open {
                 frame.set_cursor_position(Position::new(
@@ -1053,7 +1061,7 @@ fn render_scanner(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut UiSt
     {
         input_spans.push(Span::styled(
             candidate[model.scanner.cidr.len()..].to_string(),
-            Style::default().fg(MUTED),
+            Style::default().fg(GHOST),
         ));
     }
     input_spans.push(Span::styled(
@@ -1223,37 +1231,46 @@ fn render_scanner(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut UiSt
 fn render_traffic(frame: &mut Frame, area: Rect, model: &AppModel) {
     let rows = model.traffic.rows.iter().enumerate().map(|(index, row)| {
         Row::new(vec![
-            row.name.clone(),
-            format!("↓ {}", format_rate(row.download_bps)),
-            format!("↑ {}", format_rate(row.upload_bps)),
-            format!(
-                "{} / {}",
-                format_bytes(row.session_download),
-                format_bytes(row.session_upload)
-            ),
-            format!(
-                "{} / {}",
-                format_bytes(row.total_download),
-                format_bytes(row.total_upload)
-            ),
+            Cell::from(row.name.clone()),
+            Cell::from(format!("↓ {}", format_rate(row.download_bps))),
+            Cell::from(format!("↑ {}", format_rate(row.upload_bps))),
+            Cell::from(vec![
+                Line::from(format!("↓ {}", format_bytes(row.session_download))),
+                Line::from(format!("↑ {}", format_bytes(row.session_upload))),
+            ]),
+            Cell::from(vec![
+                Line::from(format!("↓ {}", format_bytes(row.total_download))),
+                Line::from(format!("↑ {}", format_bytes(row.total_upload))),
+            ]),
         ])
+        .height(2)
         .style(if index == model.traffic.selected {
             Style::default().bg(SELECTED)
         } else {
             Style::default()
         })
     });
+    let inner_width = area.width.saturating_sub(2);
+    let (rate_width, byte_width) = if inner_width >= 100 {
+        (14, 18)
+    } else {
+        (13, 14)
+    };
+    let name_width = inner_width
+        .saturating_sub(rate_width * 2 + byte_width * 2 + 4)
+        .max(8);
     frame.render_widget(
         Table::new(
             rows,
             [
-                Constraint::Percentage(28),
-                Constraint::Length(14),
-                Constraint::Length(14),
-                Constraint::Length(14),
-                Constraint::Min(12),
+                Constraint::Length(name_width),
+                Constraint::Length(rate_width),
+                Constraint::Length(rate_width),
+                Constraint::Length(byte_width),
+                Constraint::Length(byte_width),
             ],
         )
+        .column_spacing(1)
         .header(
             Row::new(vec![
                 Cell::from(tr(model.language, "接口名称", "Interface Name"))
@@ -1262,11 +1279,18 @@ fn render_traffic(frame: &mut Frame, area: Rect, model: &AppModel) {
                     .style(Style::default().fg(Color::Green)),
                 Cell::from(tr(model.language, "上传速率", "Upload"))
                     .style(Style::default().fg(Color::Yellow)),
-                Cell::from(tr(model.language, "本次会话 (收/发)", "Session (Rx/Tx)"))
-                    .style(Style::default().fg(MUTED)),
-                Cell::from(tr(model.language, "开机累计 (收/发)", "Total (Rx/Tx)"))
-                    .style(Style::default().fg(MUTED)),
+                Cell::from(vec![
+                    Line::from(tr(model.language, "本次会话", "Session")),
+                    Line::from(tr(model.language, "收 / 发", "Rx / Tx")),
+                ])
+                .style(Style::default().fg(MUTED)),
+                Cell::from(vec![
+                    Line::from(tr(model.language, "开机累计", "Since Boot")),
+                    Line::from(tr(model.language, "收 / 发", "Rx / Tx")),
+                ])
+                .style(Style::default().fg(MUTED)),
             ])
+            .height(2)
             .bottom_margin(1),
         )
         .block(Block::bordered().title(tr(
@@ -1444,7 +1468,7 @@ fn render_diagnostics(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut 
             {
                 spans.push(Span::styled(
                     candidate[raw_value.len()..].to_string(),
-                    Style::default().fg(MUTED),
+                    Style::default().fg(GHOST),
                 ));
             }
             if !model.diagnostics.history_open {
@@ -1747,10 +1771,10 @@ fn render_port_scan(area: Rect, frame: &mut Frame, model: &AppModel) {
         ])),
         stats_area,
     );
-    let ports = state.open_ports.iter().enumerate().map(|(index, port)| {
+    let ports = state.open_ports.iter().enumerate().map(|(index, result)| {
         Row::new(vec![
-            Cell::from(port.to_string()),
-            Cell::from(well_known_service(*port)).style(Style::default().fg(SECONDARY)),
+            Cell::from(result.port.to_string()),
+            Cell::from(result.service.clone()).style(Style::default().fg(SECONDARY)),
         ])
         .style(if index == state.selected {
             Style::default().bg(SELECTED)
@@ -2014,29 +2038,6 @@ fn bottom_row(area: Rect) -> Rect {
         area.width,
         area.height.min(1),
     )
-}
-
-fn well_known_service(port: u16) -> &'static str {
-    match port {
-        20 | 21 => "FTP",
-        22 => "SSH",
-        23 => "Telnet",
-        25 => "SMTP",
-        53 => "DNS",
-        67 | 68 => "DHCP",
-        80 => "HTTP",
-        110 => "POP3",
-        123 => "NTP",
-        143 => "IMAP",
-        443 => "HTTPS",
-        445 => "SMB",
-        3306 => "MySQL",
-        3389 => "RDP",
-        5432 => "PostgreSQL",
-        6379 => "Redis",
-        8080 => "HTTP-alt",
-        _ => "-",
-    }
 }
 
 fn render_public_speed(area: Rect, frame: &mut Frame, model: &AppModel) {
@@ -3097,6 +3098,8 @@ mod tests {
                 assert!(text.contains("1.0 MiB/s"));
                 assert!(text.contains("↓ 1.0 MiB/s"), "{text}");
                 assert!(text.contains("↑ 256.0 KiB/s"), "{text}");
+                assert!(text.contains("↓ 700.0 MiB"), "{text}");
+                assert!(text.contains("↑ 1.5 GiB"), "{text}");
             }
         }
     }
@@ -3233,7 +3236,16 @@ mod tests {
                     model.diagnostics.port_scan.common.progress = 75;
                     model.diagnostics.port_scan.common.primary = "open: 443".into();
                     model.diagnostics.port_scan.common.log = vec!["open: 22".into()];
-                    model.diagnostics.port_scan.open_ports = vec![22, 443];
+                    model.diagnostics.port_scan.open_ports = vec![
+                        iptools_core::PortScanResult {
+                            port: 22,
+                            service: "SSH".into(),
+                        },
+                        iptools_core::PortScanResult {
+                            port: 443,
+                            service: "HTTPS".into(),
+                        },
+                    ];
                     let mut ui = UiState::default();
 
                     terminal
@@ -3687,6 +3699,39 @@ mod tests {
             let cells = &terminal.backend().buffer().content;
             assert!(cells.iter().any(|cell| cell.bg == background));
             assert!(cells.iter().any(|cell| cell.fg == cyan));
+        }
+    }
+
+    #[test]
+    fn completion_ghosts_use_a_distinct_theme_semantic_color() {
+        for (theme, expected) in [
+            (ThemeId::Classic, Color::Indexed(244)),
+            (ThemeId::Nord, Color::Rgb(76, 86, 106)),
+            (ThemeId::CatppuccinMocha, Color::Rgb(108, 112, 134)),
+            (ThemeId::Dracula, Color::Rgb(98, 114, 164)),
+        ] {
+            let backend = TestBackend::new(120, 36);
+            let mut terminal = Terminal::new(backend).unwrap();
+            let mut model = AppModel::default();
+            model.page = Page::Scanner;
+            model.theme = theme;
+            model.scanner.cidr = "192.".into();
+            model.scanner.cursor = model.scanner.cidr.len();
+            model.scanner.editing = true;
+            model.scanner.history = vec!["192.168.1.0/24".into()];
+            let mut ui = UiState::default();
+            terminal
+                .draw(|frame| render(frame, &model, &mut ui))
+                .unwrap();
+            assert!(
+                terminal
+                    .backend()
+                    .buffer()
+                    .content
+                    .iter()
+                    .any(|cell| cell.fg == expected),
+                "missing ghost color for {theme:?}"
+            );
         }
     }
 }

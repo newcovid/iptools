@@ -432,6 +432,12 @@ pub struct TraceHop {
     pub latency_ms: Option<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortScanResult {
+    pub port: u16,
+    pub service: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SpeedSample {
     pub elapsed_ms: u64,
@@ -653,7 +659,7 @@ pub enum RuntimeEvent {
     },
     PortScanOpen {
         job: JobId,
-        port: u16,
+        result: PortScanResult,
     },
     PortScanFinished {
         job: JobId,

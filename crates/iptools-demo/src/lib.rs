@@ -7,8 +7,9 @@ use iptools_core::{
     LanSpeedMode, LanSpeedPhase, LanSpeedRequest, LanSpeedSample, LanSpeedSummary,
     LinkQualityAdapter, LinkQualityGrade, LinkQualityRequest, LinkQualitySample,
     LinkQualitySnapshot, LinkQualitySummary, PingRequest, PingSample, PingSummary, PortScanRequest,
-    PublicIpInfo, PublicSpeedRequest, RuntimeError, RuntimeErrorCode, RuntimeEvent, ScanHost,
-    SpeedSample, SpeedSummary, ToolKind, TraceHop, TraceRequest, TrafficRow, WirelessSnapshot,
+    PortScanResult, PublicIpInfo, PublicSpeedRequest, RuntimeError, RuntimeErrorCode, RuntimeEvent,
+    ScanHost, SpeedSample, SpeedSummary, ToolKind, TraceHop, TraceRequest, TrafficRow,
+    WirelessSnapshot,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -360,7 +361,19 @@ impl DemoRuntime {
             if let Some(port) = open_ports.get(step as usize % open_ports.len().max(1)) {
                 self.schedule(
                     step * 320 + 40,
-                    RuntimeEvent::PortScanOpen { job, port: *port },
+                    RuntimeEvent::PortScanOpen {
+                        job,
+                        result: PortScanResult {
+                            port: *port,
+                            service: match port {
+                                22 => "SSH",
+                                443 => "HTTPS",
+                                8_080 => "HTTP-Alt",
+                                _ => "-",
+                            }
+                            .into(),
+                        },
+                    },
                 );
             }
         }

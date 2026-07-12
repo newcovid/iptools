@@ -1,4 +1,5 @@
 use anyhow::Result;
+use chrono::Local;
 use iptools_core::{Action, AppModel, Effect, InputEvent, Message};
 use iptools_ui::UiState;
 use ratatui::{Terminal, backend::CrosstermBackend};
@@ -44,6 +45,9 @@ pub async fn run(config_path: Option<String>) -> Result<()> {
                     }
                     effects.extend(model.update(Message::Tick(TICK_MS)));
                     if ticks.is_multiple_of(TRAFFIC_REFRESH_TICKS) {
+                        effects.extend(model.update(Message::Clock(
+                            Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                        )));
                         effects.extend(model.refresh_traffic());
                     }
                     if ticks.is_multiple_of(ADAPTER_REFRESH_TICKS) && model.adapters.edit.is_none()

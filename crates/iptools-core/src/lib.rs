@@ -12,4 +12,4 @@ pub use input::*;
 pub use model::*;
 
 /// Version of the cross-platform application protocol.
-pub const ARCHITECTURE_VERSION: u8 = 3;
+pub const ARCHITECTURE_VERSION: u8 = 4;
