@@ -25,7 +25,6 @@ TEXT_ROOTS = (
     ROOT / "crates/iptools-web/src",
     ROOT / "crates/iptools-web/index.html",
     ROOT / "crates/iptools-web/manifest.webmanifest",
-    ROOT / "assets/locales",
 )
 TEXT_SUFFIXES = {".rs", ".json", ".html", ".webmanifest"}
 COMMON_ARROWS = {

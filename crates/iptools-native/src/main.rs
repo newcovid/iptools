@@ -1,26 +1,16 @@
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use iptools_demo::ScenarioId;
-use std::io;
 
-mod app;
 mod config;
 mod demo;
 mod event;
-mod history;
+mod frontend;
 mod keymap;
 mod modules;
+mod native_app;
 pub mod runtime;
-mod session;
-mod tui;
-mod ui;
 mod utils;
-
-use crate::app::App;
-use crate::event::{Event, EventHandler};
-use crate::tui::Tui;
-use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
 
 /// 模块化、跨平台的网络工具箱。
 #[derive(Parser, Debug)]
@@ -67,29 +57,7 @@ async fn main() -> Result<()> {
         )
         .await;
     }
-    let mut app = App::new(args.config);
-
-    let backend = CrosstermBackend::new(io::stdout());
-    let terminal = Terminal::new(backend)?;
-    let event_handler = EventHandler::new(250);
-    let mut tui = Tui::new(terminal, event_handler);
-
-    tui.enter()?;
-
-    while app.running {
-        tui.draw(&mut app)?;
-
-        match tui.events.next().await? {
-            Event::Tick => app.on_tick(),
-            Event::Key(key) => app.on_key(key),
-            Event::Mouse(mouse) => app.on_mouse(mouse),
-            Event::Resize => {}
-        }
-    }
-
-    app.shutdown().await;
-    tui.events.shutdown().await;
-    tui.exit()?;
+    native_app::run(args.config).await?;
 
     // 终端恢复后再显示权限提示，避免信息被备用屏幕吞掉。
     #[cfg(target_os = "linux")]

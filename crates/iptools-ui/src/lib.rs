@@ -125,7 +125,7 @@ pub fn render(frame: &mut Frame, model: &AppModel, ui: &mut UiState) {
     render_footer(frame, areas[2], model);
 
     if model.show_help {
-        render_help(frame, model.language);
+        render_help(frame, model);
     }
 }
 
@@ -339,7 +339,7 @@ fn render_dashboard(frame: &mut Frame, area: Rect, model: &AppModel) {
         public.push(Row::new(vec![
             Cell::from(Span::styled("Public IP", key)),
             Cell::from(Span::styled(
-                task_label(&model.dashboard.status, model.language),
+                dashboard_public_label(&model.dashboard.status, model.language),
                 Style::default().fg(Color::Yellow),
             )),
         ]));
@@ -2452,32 +2452,75 @@ fn render_settings(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut UiS
 }
 
 fn render_footer(frame: &mut Frame, area: Rect, model: &AppModel) {
+    let next = binding(model, "next_tab", "Tab");
+    let previous = binding(model, "prev_tab", "Shift+Tab");
+    let language = binding(model, "toggle_language", "Ctrl+L");
+    let help = binding(model, "help", "F1");
+    let quit = binding(model, "quit", "Ctrl+C");
     frame.render_widget(
-        Paragraph::new(tr(
-            model.language,
-            " [Tab/Shift+Tab] 切换   [Ctrl+L] 语言   [F1] 帮助   [Ctrl+C] 退出 ",
-            " [Tab/Shift+Tab] Switch   [Ctrl+L] Language   [F1] Help   [Ctrl+C] Quit ",
-        ))
+        Paragraph::new(match model.language {
+            Language::Zh => format!(
+                " [{next}/{previous}] 切换   [{language}] 语言   [{help}] 帮助   [{quit}] 退出 "
+            ),
+            Language::En => format!(
+                " [{next}/{previous}] Switch   [{language}] Language   [{help}] Help   [{quit}] Quit "
+            ),
+        })
         .style(Style::default().fg(MUTED))
         .alignment(Alignment::Left),
         area,
     );
 }
 
-fn render_help(frame: &mut Frame, language: Language) {
+fn render_help(frame: &mut Frame, model: &AppModel) {
     let area = centered(frame.area(), 66, 72);
     frame.render_widget(Clear, area);
+    let next = binding(model, "next_tab", "Tab");
+    let previous = binding(model, "prev_tab", "Shift+Tab");
+    let up = binding(model, "up", "Up");
+    let down = binding(model, "down", "Down");
+    let left = binding(model, "left", "Left");
+    let right = binding(model, "right", "Right");
+    let confirm = binding(model, "confirm", "Enter");
+    let toggle = binding(model, "toggle", "Space");
+    let edit = binding(model, "edit", "E");
+    let language_key = binding(model, "toggle_language", "Ctrl+L");
+    let help = binding(model, "help", "F1");
+    let back = binding(model, "back", "Esc");
+    let detail = match model.language {
+        Language::Zh => format!(
+            "键盘与触控快捷键\n\n{next} / {previous}  切换页面\n{up}/{down}/{left}/{right}  导航\n{confirm} / {toggle}     开始或停止\n{edit}                 编辑\n{language_key}            切换语言\n{help} / {back}          打开或关闭帮助\n\n{}",
+            if model.demo {
+                "演示版本使用确定性模拟数据。"
+            } else {
+                "原生版快捷键从 config.json 加载。"
+            }
+        ),
+        Language::En => format!(
+            "Keyboard and touch shortcuts\n\n{next} / {previous}  switch pages\n{up}/{down}/{left}/{right}  navigate\n{confirm} / {toggle}     start or stop\n{edit}                 edit\n{language_key}            toggle language\n{help} / {back}          open or close help\n\n{}",
+            if model.demo {
+                "The demo uses deterministic simulated data."
+            } else {
+                "Native bindings are loaded from config.json."
+            }
+        ),
+    };
     frame.render_widget(
-        Paragraph::new(tr(
-            language,
-            "键盘与触控快捷键\n\nTab / Shift+Tab  切换页面\n方向键 / WASD    导航\nEnter / Space     开始或停止\nE                 编辑\nCtrl+L            切换语言\nF1 / Esc          打开或关闭帮助\n\n在线版本使用确定性模拟数据。",
-            "Keyboard and touch shortcuts\n\nTab / Shift+Tab  switch pages\nArrows / WASD     navigate\nEnter / Space     start or stop\nE                 edit\nCtrl+L            toggle language\nF1 / Esc          open or close help\n\nThe online version uses deterministic simulated data.",
-        ))
-        .block(Block::bordered().title(tr(language, " 帮助 ", " Help ")))
-        .alignment(Alignment::Left)
-        .wrap(Wrap { trim: true }),
+        Paragraph::new(detail)
+            .block(Block::bordered().title(tr(model.language, " 帮助 ", " Help ")))
+            .alignment(Alignment::Left)
+            .wrap(Wrap { trim: true }),
         area,
     );
+}
+
+fn binding<'a>(model: &'a AppModel, name: &str, fallback: &'a str) -> &'a str {
+    model
+        .keybindings
+        .get(name)
+        .and_then(|values| values.first())
+        .map(String::as_str)
+        .unwrap_or(fallback)
 }
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
@@ -2549,6 +2592,15 @@ fn task_label(status: &TaskStatus, language: Language) -> &'static str {
             " Done · click to restart ",
         ),
         TaskStatus::Failed(_) => tr(language, " 失败 · 点击重试 ", " Failed · click to retry "),
+    }
+}
+
+fn dashboard_public_label(status: &TaskStatus, language: Language) -> &'static str {
+    match status {
+        TaskStatus::Idle => tr(language, "尚未获取", "Not fetched"),
+        TaskStatus::Running => tr(language, "正在获取…", "Fetching…"),
+        TaskStatus::Done => tr(language, "无可用数据", "No data"),
+        TaskStatus::Failed(_) => tr(language, "获取失败", "Fetch failed"),
     }
 }
 
@@ -3145,5 +3197,31 @@ mod tests {
                 assert_eq!(ui.hit_test(2, 6), Some(Action::SelectSetting(2)));
             }
         }
+    }
+
+    #[test]
+    fn native_footer_and_help_show_configured_v031_keybindings() {
+        let backend = TestBackend::new(120, 36);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut model = AppModel::default();
+        model.demo = false;
+        model.show_help = true;
+        model
+            .keybindings
+            .insert("quit".into(), vec!["Ctrl+x".into()]);
+        model
+            .keybindings
+            .insert("next_tab".into(), vec!["n".into()]);
+        model
+            .keybindings
+            .insert("prev_tab".into(), vec!["p".into()]);
+        let mut ui = UiState::default();
+        terminal
+            .draw(|frame| render(frame, &model, &mut ui))
+            .unwrap();
+        let text = terminal.backend().to_string();
+        assert!(text.contains("[n/p] Switch"), "{text}");
+        assert!(text.contains("[Ctrl+x] Quit"), "{text}");
+        assert!(text.contains("Native bindings are loaded from config.json"));
     }
 }

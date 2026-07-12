@@ -1,17 +1,15 @@
 use anyhow::Result;
-use crossterm::{
-    event::{KeyCode as CrosstermKeyCode, KeyEvent as CrosstermKeyEvent, KeyModifiers},
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-};
-use iptools_core::{Action, AppModel, Effect, InputEvent, KeyCode, KeyEvent, Message, Modifiers};
+use iptools_core::{Action, AppModel, Effect, InputEvent, Message};
 use iptools_demo::{DemoRuntime, ScenarioId};
 use iptools_ui::UiState;
 use ratatui::{Terminal, backend::CrosstermBackend};
 use std::io;
 
 use crate::config::Config;
-use crate::event::{Event, EventHandler};
+use crate::{
+    event::{Event, EventHandler},
+    frontend,
+};
 
 pub async fn run(scenario: ScenarioId, config_path: Option<String>) -> Result<()> {
     let mut config = Config::load(config_path.as_deref());
@@ -26,7 +24,7 @@ pub async fn run(scenario: ScenarioId, config_path: Option<String>) -> Result<()
     let mut terminal = Terminal::new(backend)?;
     let mut events = EventHandler::new(250);
     let mut ui = UiState::default();
-    enter(&mut terminal)?;
+    frontend::enter(&mut terminal)?;
 
     while model.running {
         terminal.draw(|frame| iptools_ui::render(frame, &model, &mut ui))?;
@@ -38,7 +36,8 @@ pub async fn run(scenario: ScenarioId, config_path: Option<String>) -> Result<()
                 }
                 effects
             }
-            Event::Key(key) => model.update(Message::Input(InputEvent::Key(convert_key(key)))),
+            Event::Key(key) => frontend::plain_key(key)
+                .map_or_else(Vec::new, |input| model.update(Message::Input(input))),
             Event::Mouse(mouse) => {
                 let action = match mouse.kind {
                     crossterm::event::MouseEventKind::ScrollUp => Some(Action::Up),
@@ -58,7 +57,7 @@ pub async fn run(scenario: ScenarioId, config_path: Option<String>) -> Result<()
     }
 
     events.shutdown().await;
-    exit(&mut terminal)?;
+    frontend::exit(&mut terminal)?;
     Ok(())
 }
 
@@ -69,113 +68,13 @@ fn dispatch_effects(
     effects: Vec<Effect>,
 ) {
     for effect in effects {
-        match effect {
-            Effect::PersistPreferences(preferences) => {
-                config.language = preferences.language;
-                config.scan_concurrency = preferences.scan_concurrency;
-                config.save();
-            }
-            Effect::PersistSession(update) => {
-                match update {
-                    iptools_core::SessionUpdate::Ping(value) => config.session.ping = value,
-                    iptools_core::SessionUpdate::Trace(value) => config.session.trace = value,
-                    iptools_core::SessionUpdate::PortScan(value) => {
-                        config.session.port_scan = value
-                    }
-                    iptools_core::SessionUpdate::LanSpeed(value) => {
-                        config.session.lan_speed = value
-                    }
-                    iptools_core::SessionUpdate::LinkQuality(value) => {
-                        config.session.link_quality = value
-                    }
-                    iptools_core::SessionUpdate::TargetHistory(value) => {
-                        config.session.history.targets = value;
-                    }
-                    iptools_core::SessionUpdate::Ui(value) => config.session.ui = value,
-                    iptools_core::SessionUpdate::Reset(ui) => {
-                        config.session = iptools_core::SessionState {
-                            ui,
-                            ..iptools_core::SessionState::default()
-                        };
-                    }
-                }
-                config.save();
-            }
-            Effect::PersistAdapterEdit {
-                guid,
-                params,
-                history,
-            } => {
-                config.session.adapter_edit.adapters.insert(guid, params);
-                config.session.history.adapter = history;
-                config.save();
-            }
-            effect => {
-                for event in runtime.dispatch(effect) {
-                    model.update(Message::Runtime(event));
-                }
-            }
+        if frontend::persist_effect(config, &effect) {
+            continue;
+        }
+        for event in runtime.dispatch(effect) {
+            model.update(Message::Runtime(event));
         }
     }
-}
-
-fn convert_key(event: CrosstermKeyEvent) -> KeyEvent {
-    let code = match event.code {
-        CrosstermKeyCode::Char(value) => KeyCode::Char(value),
-        CrosstermKeyCode::F(value) => KeyCode::F(value),
-        CrosstermKeyCode::Enter => KeyCode::Enter,
-        CrosstermKeyCode::Esc => KeyCode::Esc,
-        CrosstermKeyCode::Tab => KeyCode::Tab,
-        CrosstermKeyCode::BackTab => KeyCode::BackTab,
-        CrosstermKeyCode::Backspace => KeyCode::Backspace,
-        CrosstermKeyCode::Delete => KeyCode::Delete,
-        CrosstermKeyCode::Home => KeyCode::Home,
-        CrosstermKeyCode::End => KeyCode::End,
-        CrosstermKeyCode::Up => KeyCode::Up,
-        CrosstermKeyCode::Down => KeyCode::Down,
-        CrosstermKeyCode::Left => KeyCode::Left,
-        CrosstermKeyCode::Right => KeyCode::Right,
-        _ => return KeyEvent::plain(KeyCode::Esc),
-    };
-    KeyEvent {
-        code,
-        modifiers: Modifiers {
-            control: event.modifiers.contains(KeyModifiers::CONTROL),
-            alt: event.modifiers.contains(KeyModifiers::ALT),
-            shift: event.modifiers.contains(KeyModifiers::SHIFT),
-        },
-    }
-}
-
-fn enter<B>(terminal: &mut Terminal<B>) -> Result<()>
-where
-    B: ratatui::backend::Backend,
-    B::Error: std::error::Error + Send + Sync + 'static,
-{
-    enable_raw_mode()?;
-    execute!(
-        io::stdout(),
-        EnterAlternateScreen,
-        crossterm::event::EnableMouseCapture
-    )?;
-    terminal.hide_cursor()?;
-    terminal.clear()?;
-    Ok(())
-}
-
-fn exit<B>(terminal: &mut Terminal<B>) -> Result<()>
-where
-    B: ratatui::backend::Backend,
-    B::Error: std::error::Error + Send + Sync + 'static,
-{
-    terminal.show_cursor()?;
-    execute!(
-        io::stdout(),
-        LeaveAlternateScreen,
-        crossterm::event::DisableMouseCapture
-    )?;
-    disable_raw_mode()?;
-    Ok(())
 }
 
 #[cfg(test)]

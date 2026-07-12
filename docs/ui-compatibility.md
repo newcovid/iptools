@@ -2,8 +2,8 @@
 
 The v0.4 architecture may replace state ownership and runtime boundaries, but it must not redesign
 the terminal experience as a side effect. The native v0.3.1 renderer at commit `9418468` is the
-visual and interaction reference. The retained native renderer remains the executable reference
-until the shared native entry point replaces it.
+visual and interaction reference. The v0.4 default native entry, native demo and Web now share the
+replacement renderer; comparisons use a v0.3.1 release binary or the tagged source checkout.
 
 ## Scope
 
@@ -56,5 +56,5 @@ until the shared native entry point replaces it.
 3. Chromium, Firefox and WebKit exercise the same reducer through DOM and Canvas modes.
 4. The DOM grid height and Ratatui-reported height derive from the same terminal container; shell,
    logs, status and footer must all remain visible.
-5. Before native cutover, manual comparison uses the retained v0.3.1 native renderer on the left and
-   `iptools --demo`/Web on the right at the same terminal dimensions and language.
+5. Manual comparison runs the v0.3.1 release/tagged checkout on the left and v0.4 native,
+   `iptools --demo` or Web on the right at the same terminal dimensions and language.

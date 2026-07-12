@@ -84,7 +84,7 @@ iptools --demo --scenario wifi-degraded
 | 操作 | 按键 |
 |---|---|
 | 下一个 / 上一个标签页 | `Tab` / `Shift+Tab` |
-| 导航 | 方向键或 `h` `j` `k` `l` |
+| 导航 | 方向键或 `w` `a` `s` `d` |
 | 确认 / 返回 | `Enter` / `Esc` |
 | 编辑 | `e` |
 | 开始或停止 | `Space` |
@@ -112,6 +112,7 @@ iptools --demo --scenario wifi-degraded
 ## 项目文档
 
 - [架构与开发约定](docs/architecture.md)
+- [v0.4 人工复核流程与验收标准](docs/manual-acceptance-v0.4.md)
 - [链路质量评测指南](docs/link-quality-guide.md)
 - [贡献指南](CONTRIBUTING.md)
 - [安全策略](SECURITY.md)
@@ -135,9 +136,9 @@ cd crates/iptools-web
 trunk serve
 ```
 
-浏览器端以 Ratzilla 0.3.1 为基础。项目携带四个小型可审计补丁：Canvas 按 Unicode 双宽裁剪；DOM 在 resize 交接帧跳过越界单元、替换全宽字符时恢复隐藏续格，并使用终端容器而非浏览器视口的行列数；中文字体是 OFL-1.1 的 Maple Mono CN 约 338 KiB 可重复字形子集，许可证、固定源文件哈希和生成脚本说明位于 `crates/iptools-web/assets/fonts/`。
+浏览器端以 Ratzilla 0.3.1 为基础。项目携带四个小型可审计补丁：Canvas 按 Unicode 双宽裁剪；DOM 在 resize 交接帧跳过越界单元、替换全宽字符时恢复隐藏续格，并使用终端容器而非浏览器视口的行列数；中文字体是 OFL-1.1 的 Maple Mono CN 约 289 KiB 可重复字形子集，许可证、固定源文件哈希和生成脚本说明位于 `crates/iptools-web/assets/fonts/`。
 
-UI 和真实网络写入仍需要在目标系统上手动验证。新增界面文案时必须同时更新 `assets/locales/en-US.json` 和 `assets/locales/zh-CN.json`，并重新生成 Web 字体子集；测试会检查语言包和浏览器字体加载。
+UI 和真实网络写入仍需要在目标系统上手动验证。共享 UI 文案必须在同一处提供中英文；新增中文后重新生成 Web 字体子集，CI 会检查源码中所有必需字符和浏览器字体加载。
 
 ## 许可证
 

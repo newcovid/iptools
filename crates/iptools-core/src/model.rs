@@ -576,6 +576,8 @@ pub struct AppModel {
     #[serde(default)]
     pub settings_just_reset: bool,
     #[serde(default)]
+    pub keybindings: crate::PersistedKeymap,
+    #[serde(default)]
     public_ip_config: crate::PublicIpConfig,
     adapter_edit_persist: crate::AdapterEditPersist,
     adapter_history: Vec<String>,
@@ -599,6 +601,7 @@ impl Default for AppModel {
             scan_concurrency: 50,
             settings_selected: 0,
             settings_just_reset: false,
+            keybindings: crate::PersistedKeymap::new(),
             public_ip_config: crate::PublicIpConfig::default(),
             adapter_edit_persist: crate::AdapterEditPersist::default(),
             adapter_history: Vec::new(),
@@ -611,6 +614,7 @@ impl AppModel {
     pub fn apply_config(&mut self, config: &crate::ConfigData) {
         self.language = config.language;
         self.scan_concurrency = config.scan_concurrency.clamp(10, 500);
+        self.keybindings = config.keybindings.clone();
         self.public_ip_config = config.public_ip.clone();
         self.adapter_edit_persist = config.session.adapter_edit.clone();
         self.adapter_history = config.session.history.adapter.clone();
@@ -667,11 +671,7 @@ impl AppModel {
 
     fn handle_input(&mut self, input: InputEvent) -> Vec<Effect> {
         if self.page == Page::Adapters && self.adapters.edit.is_some() {
-            let global = match &input {
-                InputEvent::Action(action) => Some(*action),
-                InputEvent::Key(key) => key.action(),
-                InputEvent::Mouse(_) => None,
-            };
+            let global = input.action();
             if matches!(
                 global,
                 Some(
@@ -690,11 +690,7 @@ impl AppModel {
         }
 
         if self.page == Page::Diagnostics {
-            let action = match &input {
-                InputEvent::Action(action) => Some(*action),
-                InputEvent::Key(key) => key.action(),
-                InputEvent::Mouse(_) => None,
-            };
+            let action = input.action();
             if let Some(Action::FocusDiagnostic(focus)) = action {
                 self.diagnostics.focused = true;
                 self.diagnostics.focus = focus;
@@ -723,18 +719,14 @@ impl AppModel {
                 return self.handle_diagnostic_input(input);
             }
         }
-        if let InputEvent::Key(key) = input
-            && self.page == Page::Scanner
+        if self.page == Page::Scanner
             && self.scanner.editing
+            && let Some(key) = input.key()
         {
             return self.handle_scanner_edit(key.code);
         }
 
-        let action = match input {
-            InputEvent::Action(action) => Some(action),
-            InputEvent::Key(key) => key.action(),
-            InputEvent::Mouse(_) => None,
-        };
+        let action = input.action();
         action.map_or_else(Vec::new, |action| self.handle_action(action))
     }
 
@@ -803,9 +795,9 @@ impl AppModel {
             _ => {}
         }
 
-        let action = match input {
-            InputEvent::Action(action) => Some(action),
-            InputEvent::Key(key) => {
+        let mapped_action = input.action();
+        let action = match input.key() {
+            Some(key) => {
                 let history_was_open = self
                     .adapters
                     .edit
@@ -826,9 +818,9 @@ impl AppModel {
                 {
                     return Vec::new();
                 }
-                key.action()
+                mapped_action
             }
-            InputEvent::Mouse(_) => None,
+            None => mapped_action,
         };
 
         match action {
@@ -1072,24 +1064,20 @@ impl AppModel {
     }
 
     fn handle_diagnostic_input(&mut self, input: InputEvent) -> Vec<Effect> {
-        let key = match &input {
-            InputEvent::Key(key) => Some(*key),
-            _ => None,
-        };
-        let action = match &input {
-            InputEvent::Action(action) => Some(*action),
-            InputEvent::Key(key) => key.action(),
-            InputEvent::Mouse(_) => None,
-        };
+        let key = input.key();
+        let action = input.action();
 
-        if key.is_some_and(|key| key.code == KeyCode::Tab && !key.modifiers.shift) {
+        if key.is_some_and(|key| key.code == KeyCode::Tab && !key.modifiers.shift)
+            || action == Some(Action::NextPage)
+        {
             self.diagnostics.focus = self.diagnostics.focus.next();
             self.diagnostics.history_open = false;
             return Vec::new();
         }
         if key.is_some_and(|key| {
             key.code == KeyCode::BackTab || (key.code == KeyCode::Tab && key.modifiers.shift)
-        }) {
+        }) || action == Some(Action::PreviousPage)
+        {
             self.diagnostics.focus = self.diagnostics.focus.previous();
             self.diagnostics.history_open = false;
             return Vec::new();
@@ -1912,6 +1900,21 @@ impl AppModel {
         }
     }
 
+    pub fn bootstrap_effects(&mut self) -> Vec<Effect> {
+        let mut effects = self.refresh_dashboard();
+        effects.extend(self.refresh_adapters());
+        effects.extend(self.refresh_traffic());
+        effects
+    }
+
+    pub fn refresh_adapters(&mut self) -> Vec<Effect> {
+        self.refresh_adapters_inner()
+    }
+
+    pub fn refresh_traffic(&mut self) -> Vec<Effect> {
+        self.refresh_traffic_inner()
+    }
+
     fn refresh_dashboard(&mut self) -> Vec<Effect> {
         let job = self.next_job(ToolKind::Dashboard);
         self.dashboard.job = Some(job);
@@ -1925,7 +1928,7 @@ impl AppModel {
         }]
     }
 
-    fn refresh_adapters(&mut self) -> Vec<Effect> {
+    fn refresh_adapters_inner(&mut self) -> Vec<Effect> {
         let job = self.next_job(ToolKind::Adapters);
         self.adapters.job = Some(job);
         self.adapters.status = TaskStatus::Running;
@@ -1933,7 +1936,7 @@ impl AppModel {
         vec![Effect::RefreshAdapters { job }]
     }
 
-    fn refresh_traffic(&mut self) -> Vec<Effect> {
+    fn refresh_traffic_inner(&mut self) -> Vec<Effect> {
         let job = self.next_job(ToolKind::Traffic);
         self.traffic.job = Some(job);
         self.traffic.status = TaskStatus::Running;
@@ -2156,7 +2159,10 @@ impl AppModel {
                 self.adapters.items = adapters;
                 self.sync_link_quality_adapters();
             }
-            RuntimeEvent::TrafficUpdated(rows) => self.traffic.rows = rows,
+            RuntimeEvent::TrafficUpdated(rows) => {
+                self.sync_dashboard_traffic(&rows);
+                self.traffic.rows = rows;
+            }
             RuntimeEvent::AdaptersRefreshFinished { job, adapters }
                 if self.adapters.job == Some(job) =>
             {
@@ -2187,6 +2193,7 @@ impl AppModel {
                 self.adapters.job = None;
             }
             RuntimeEvent::TrafficRefreshFinished { job, rows } if self.traffic.job == Some(job) => {
+                self.sync_dashboard_traffic(&rows);
                 let selected_name = self
                     .traffic
                     .rows
@@ -2522,6 +2529,19 @@ impl AppModel {
             }
             _ => {}
         }
+    }
+
+    fn sync_dashboard_traffic(&mut self, rows: &[TrafficRow]) {
+        let Some(interface) = self.dashboard.snapshot.active_interface.as_ref() else {
+            return;
+        };
+        let Some(row) = rows.iter().find(|row| row.name == interface.name) else {
+            return;
+        };
+        self.dashboard.snapshot.download_bps = row.download_bps;
+        self.dashboard.snapshot.upload_bps = row.upload_bps;
+        self.dashboard.snapshot.total_download = row.total_download;
+        self.dashboard.snapshot.total_upload = row.total_upload;
     }
 }
 
@@ -3761,5 +3781,77 @@ mod tests {
         }));
         assert_eq!(app.diagnostics.lan_speed.summary, Some(summary));
         assert_eq!(app.diagnostics.lan_speed.common.status, TaskStatus::Done);
+    }
+
+    #[test]
+    fn mapped_native_keys_preserve_text_input_and_custom_navigation() {
+        let mapped = |code, action| InputEvent::MappedKey {
+            key: KeyEvent::plain(code),
+            action,
+        };
+        let mut app = AppModel {
+            page: Page::Diagnostics,
+            ..AppModel::default()
+        };
+        app.diagnostics.focused = true;
+        app.diagnostics.focus = DiagnosticFocus::Menu;
+        app.update(Input(mapped(KeyCode::Char('j'), Some(Action::Down))));
+        assert_eq!(app.diagnostics.tool, DiagnosticTool::Trace);
+
+        app.diagnostics.focus = DiagnosticFocus::Config;
+        app.diagnostics.trace.config_selected = 0;
+        app.diagnostics.trace.request.target.clear();
+        app.diagnostics.cursor = 0;
+        let effects = app.update(Input(mapped(KeyCode::Char('j'), Some(Action::Down))));
+        assert_eq!(app.diagnostics.trace.request.target, "j");
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::PersistSession(crate::SessionUpdate::Trace(_))]
+        ));
+
+        app.diagnostics.focus = DiagnosticFocus::Main;
+        app.update(Input(mapped(KeyCode::Char('n'), Some(Action::NextPage))));
+        assert_eq!(app.diagnostics.focus, DiagnosticFocus::Config);
+    }
+
+    #[test]
+    fn bootstrap_and_background_traffic_keep_native_read_models_live() {
+        let mut app = AppModel::default();
+        let effects = app.bootstrap_effects();
+        assert_eq!(effects.len(), 3);
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::RefreshDashboard { .. }))
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::RefreshAdapters { .. }))
+        );
+        let traffic_job = effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::RefreshTraffic { job } => Some(*job),
+                _ => None,
+            })
+            .unwrap();
+        app.dashboard.snapshot.active_interface = Some(DashboardInterface {
+            name: "Ethernet".into(),
+            ..DashboardInterface::default()
+        });
+        app.update(Runtime(RuntimeEvent::TrafficRefreshFinished {
+            job: traffic_job,
+            rows: vec![TrafficRow {
+                name: "Ethernet".into(),
+                download_bps: 1_000,
+                upload_bps: 500,
+                total_download: 10_000,
+                total_upload: 5_000,
+                ..TrafficRow::default()
+            }],
+        }));
+        assert_eq!(app.dashboard.snapshot.download_bps, 1_000);
+        assert_eq!(app.dashboard.snapshot.total_upload, 5_000);
     }
 }

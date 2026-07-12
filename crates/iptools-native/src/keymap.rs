@@ -62,27 +62,6 @@ impl Action {
         }
     }
 
-    /// 帮助浮层中该动作说明文字的 i18n 键。
-    pub fn desc_key(self) -> &'static str {
-        match self {
-            Action::Quit => "action_quit",
-            Action::ToggleLanguage => "action_toggle_language",
-            Action::NextTab => "action_next_tab",
-            Action::PrevTab => "action_prev_tab",
-            Action::Up => "action_up",
-            Action::Down => "action_down",
-            Action::Left => "action_left",
-            Action::Right => "action_right",
-            Action::Confirm => "action_confirm",
-            Action::Back => "action_back",
-            Action::Refresh => "action_refresh",
-            Action::History => "action_history",
-            Action::Edit => "action_edit",
-            Action::Toggle => "action_toggle",
-            Action::Help => "action_help",
-        }
-    }
-
     pub fn from_name(s: &str) -> Option<Action> {
         Action::ALL.iter().copied().find(|a| a.name() == s)
     }
@@ -351,36 +330,6 @@ impl KeyMap {
             }
         }
         None
-    }
-
-    /// 返回某动作的首个组合键标签（用于动态生成帮助栏）；无绑定时返回 "?"。
-    pub fn primary_label(&self, action: Action) -> String {
-        self.map
-            .get(&action)
-            .and_then(|v| v.first())
-            .map(|c| c.to_label())
-            .unwrap_or_else(|| "?".to_string())
-    }
-
-    /// 返回某动作的首个组合键本地化标签；无绑定时返回 "?"。
-    pub fn primary_label_i18n(&self, action: Action, locale: &str) -> String {
-        self.map
-            .get(&action)
-            .and_then(|v| v.first())
-            .map(|c| c.to_label_i18n(locale))
-            .unwrap_or_else(|| "?".to_string())
-    }
-
-    /// 某动作的全部组合键标签，以 " / " 连接（用于帮助浮层）；无绑定返回 "-"。
-    pub fn all_labels(&self, action: Action) -> String {
-        match self.map.get(&action) {
-            Some(v) if !v.is_empty() => v
-                .iter()
-                .map(|c| c.to_label())
-                .collect::<Vec<_>>()
-                .join(" / "),
-            _ => "-".to_string(),
-        }
     }
 }
 

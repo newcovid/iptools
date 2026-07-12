@@ -4,8 +4,35 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InputEvent {
     Key(KeyEvent),
+    /// A platform key together with the user-configured semantic binding.
+    ///
+    /// Native needs both values: text editors consume the physical key while
+    /// navigation honors the v0.3.1 configurable key map. Web and deterministic
+    /// demo adapters can keep using `Key` and the built-in bindings.
+    MappedKey {
+        key: KeyEvent,
+        action: Option<Action>,
+    },
     Mouse(MouseEvent),
     Action(Action),
+}
+
+impl InputEvent {
+    pub const fn key(&self) -> Option<KeyEvent> {
+        match self {
+            Self::Key(key) | Self::MappedKey { key, .. } => Some(*key),
+            Self::Mouse(_) | Self::Action(_) => None,
+        }
+    }
+
+    pub fn action(&self) -> Option<Action> {
+        match self {
+            Self::Key(key) => key.action(),
+            Self::MappedKey { action, .. } => *action,
+            Self::Action(action) => Some(*action),
+            Self::Mouse(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
