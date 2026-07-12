@@ -1,5 +1,6 @@
 use anyhow::Result;
 use crossterm::{
+    cursor::SetCursorStyle,
     event::{KeyCode as CrosstermKeyCode, KeyEvent as CrosstermKeyEvent, KeyModifiers},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -76,9 +77,14 @@ pub(crate) fn persist_effect(config: &mut Config, effect: &Effect) -> bool {
     match effect {
         Effect::PersistPreferences(preferences) => {
             config.language = preferences.language;
+            config.theme = preferences.theme;
             config.scan_concurrency = preferences.scan_concurrency;
         }
         Effect::PersistSession(update) => match update {
+            iptools_core::SessionUpdate::Scanner(value) => config.session.scanner = value.clone(),
+            iptools_core::SessionUpdate::CidrHistory(value) => {
+                config.session.history.cidrs = value.clone();
+            }
             iptools_core::SessionUpdate::Ping(value) => config.session.ping = value.clone(),
             iptools_core::SessionUpdate::Trace(value) => config.session.trace = value.clone(),
             iptools_core::SessionUpdate::PortScan(value) => {
@@ -128,7 +134,8 @@ where
     execute!(
         io::stdout(),
         EnterAlternateScreen,
-        crossterm::event::EnableMouseCapture
+        crossterm::event::EnableMouseCapture,
+        SetCursorStyle::BlinkingBar
     )?;
     terminal.hide_cursor()?;
     terminal.clear()?;
@@ -143,6 +150,7 @@ where
     terminal.show_cursor()?;
     execute!(
         io::stdout(),
+        SetCursorStyle::DefaultUserShape,
         LeaveAlternateScreen,
         crossterm::event::DisableMouseCapture
     )?;

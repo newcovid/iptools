@@ -48,6 +48,7 @@ impl Default for PublicIpConfig {
 #[serde(default)]
 pub struct ConfigData {
     pub language: Language,
+    pub theme: crate::ThemeId,
     pub scan_concurrency: usize,
     pub keybindings: PersistedKeymap,
     pub session: SessionState,
@@ -58,6 +59,7 @@ impl Default for ConfigData {
     fn default() -> Self {
         Self {
             language: Language::En,
+            theme: crate::ThemeId::Classic,
             scan_concurrency: 50,
             keybindings: PersistedKeymap::new(),
             session: SessionState::default(),
@@ -257,6 +259,7 @@ mod tests {
         let config: ConfigData =
             serde_json::from_str(r#"{"language":"En","scan_concurrency":50}"#).unwrap();
         assert_eq!(config.language, Language::En);
+        assert_eq!(config.theme, crate::ThemeId::Classic);
         assert_eq!(config.session.ping, PingPersist::default());
         assert_eq!(config.public_ip, PublicIpConfig::default());
     }
@@ -335,5 +338,16 @@ mod tests {
             serde_json::from_str::<SessionState>(&json).unwrap(),
             session
         );
+    }
+
+    #[test]
+    fn theme_is_optional_for_v031_and_roundtrips_as_a_stable_name() {
+        let config: ConfigData = serde_json::from_str(
+            r#"{"language":"Zh","theme":"catppuccin-mocha","scan_concurrency":50}"#,
+        )
+        .unwrap();
+        assert_eq!(config.theme, crate::ThemeId::CatppuccinMocha);
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("\"theme\":\"catppuccin-mocha\""));
     }
 }

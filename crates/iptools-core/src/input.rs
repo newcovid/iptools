@@ -121,10 +121,15 @@ pub enum Action {
     SelectDiagnostic(u8),
     FocusDiagnostic(crate::DiagnosticFocus),
     SelectDiagnosticField(usize, usize),
+    SelectDiagnosticHistory(usize),
     ResetDemo,
     History,
     SelectAdapter(usize),
     SelectAdapterField(crate::AdapterField, usize),
+    SelectAdapterHistory(usize),
+    SelectScannerInput(usize),
+    ActivateScannerPanel,
+    SelectScannerHistory(usize),
     SelectSetting(usize),
 }
 

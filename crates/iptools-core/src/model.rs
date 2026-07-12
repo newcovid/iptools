@@ -40,6 +40,33 @@ impl Language {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ThemeId {
+    #[default]
+    Classic,
+    Nord,
+    CatppuccinMocha,
+    Dracula,
+}
+
+impl ThemeId {
+    pub const ALL: [Self; 4] = [
+        Self::Classic,
+        Self::Nord,
+        Self::CatppuccinMocha,
+        Self::Dracula,
+    ];
+
+    pub const fn next(self) -> Self {
+        Self::ALL[(self as usize + 1) % Self::ALL.len()]
+    }
+
+    pub const fn previous(self) -> Self {
+        Self::ALL[(self as usize + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Page {
     #[default]
     Dashboard,
@@ -355,6 +382,10 @@ impl Default for DashboardState {
 pub struct ScannerState {
     pub cidr: String,
     pub editing: bool,
+    pub cursor: usize,
+    pub history: Vec<String>,
+    pub history_open: bool,
+    pub history_selected: usize,
     pub status: TaskStatus,
     pub current: u64,
     pub total: u64,
@@ -368,6 +399,10 @@ impl Default for ScannerState {
         Self {
             cidr: "192.168.1.0/24".into(),
             editing: false,
+            cursor: 0,
+            history: Vec::new(),
+            history_open: false,
+            history_selected: 0,
             status: TaskStatus::Idle,
             current: 0,
             total: 0,
@@ -564,6 +599,7 @@ pub struct AppModel {
     pub elapsed_ms: u64,
     pub page: Page,
     pub language: Language,
+    pub theme: ThemeId,
     pub show_help: bool,
     pub dashboard: DashboardState,
     pub adapters: AdaptersState,
@@ -592,6 +628,7 @@ impl Default for AppModel {
             elapsed_ms: 0,
             page: Page::Dashboard,
             language: Language::En,
+            theme: ThemeId::Classic,
             show_help: false,
             dashboard: DashboardState::default(),
             adapters: AdaptersState::default(),
@@ -613,11 +650,19 @@ impl Default for AppModel {
 impl AppModel {
     pub fn apply_config(&mut self, config: &crate::ConfigData) {
         self.language = config.language;
+        self.theme = config.theme;
         self.scan_concurrency = config.scan_concurrency.clamp(10, 500);
         self.keybindings = config.keybindings.clone();
         self.public_ip_config = config.public_ip.clone();
         self.adapter_edit_persist = config.session.adapter_edit.clone();
         self.adapter_history = config.session.history.adapter.clone();
+        self.scanner.cidr = if config.session.scanner.cidr.trim().is_empty() {
+            ScannerState::default().cidr
+        } else {
+            config.session.scanner.cidr.clone()
+        };
+        self.scanner.cursor = self.scanner.cidr.len();
+        self.scanner.history = config.session.history.cidrs.clone();
         self.diagnostics.ping.request = crate::PingRequest {
             target: config.session.ping.target.clone(),
             interval_ms: config.session.ping.interval_ms.clamp(100, 10_000),
@@ -651,6 +696,7 @@ impl AppModel {
     pub const fn preferences(&self) -> crate::Preferences {
         crate::Preferences {
             language: self.language,
+            theme: self.theme,
             scan_concurrency: self.scan_concurrency,
         }
     }
@@ -691,6 +737,15 @@ impl AppModel {
 
         if self.page == Page::Diagnostics {
             let action = input.action();
+            if let Some(Action::SelectDiagnosticHistory(index)) = action {
+                if let Some(value) = self.diagnostics.target_history.get(index).cloned() {
+                    self.set_active_diagnostic_field(value);
+                    self.diagnostics.cursor = self.active_diagnostic_field().len();
+                    self.diagnostics.history_open = false;
+                    return self.persist_active_diagnostic();
+                }
+                return Vec::new();
+            }
             if let Some(Action::FocusDiagnostic(focus)) = action {
                 self.diagnostics.focused = true;
                 self.diagnostics.focus = focus;
@@ -719,32 +774,151 @@ impl AppModel {
                 return self.handle_diagnostic_input(input);
             }
         }
-        if self.page == Page::Scanner
-            && self.scanner.editing
-            && let Some(key) = input.key()
-        {
-            return self.handle_scanner_edit(key.code);
+        if self.page == Page::Scanner {
+            let action = input.action();
+            if self.scanner.editing
+                || matches!(
+                    action,
+                    Some(
+                        Action::SelectScannerInput(_)
+                            | Action::ActivateScannerPanel
+                            | Action::SelectScannerHistory(_)
+                    )
+                )
+            {
+                if matches!(
+                    action,
+                    Some(
+                        Action::Quit
+                            | Action::ToggleLanguage
+                            | Action::Help
+                            | Action::NextPage
+                            | Action::PreviousPage
+                            | Action::SelectPage(_)
+                            | Action::ResetDemo
+                    )
+                ) {
+                    return self.handle_action(action.expect("matched global action"));
+                }
+                return self.handle_scanner_input(input);
+            }
         }
 
         let action = input.action();
         action.map_or_else(Vec::new, |action| self.handle_action(action))
     }
 
-    fn handle_scanner_edit(&mut self, code: KeyCode) -> Vec<Effect> {
-        match code {
-            KeyCode::Enter | KeyCode::Esc => self.scanner.editing = false,
-            KeyCode::Backspace => {
-                self.scanner.cidr.pop();
+    fn handle_scanner_input(&mut self, input: InputEvent) -> Vec<Effect> {
+        let action = input.action();
+
+        if let Some(Action::SelectScannerInput(cursor)) = action {
+            self.scanner.editing = true;
+            self.scanner.cursor = cursor.min(self.scanner.cidr.len());
+            self.scanner.history_open = false;
+            return Vec::new();
+        }
+
+        if let Some(Action::ActivateScannerPanel) = action {
+            if self.scanner.editing {
+                self.scanner.editing = false;
+                self.scanner.history_open = false;
+                return self.persist_scanner();
             }
-            KeyCode::Char(c)
-                if (c.is_ascii_digit() || matches!(c, '.' | '/'))
-                    && self.scanner.cidr.len() < 32 =>
+            return self.toggle_scan();
+        }
+
+        if let Some(Action::SelectScannerHistory(index)) = action {
+            if let Some(value) = self.scanner.history.get(index).cloned() {
+                self.scanner.cidr = value;
+                self.scanner.cursor = self.scanner.cidr.len();
+                self.scanner.history_open = false;
+                return self.persist_scanner();
+            }
+            return Vec::new();
+        }
+
+        if self.scanner.history_open {
+            match action {
+                Some(Action::Up) => {
+                    self.scanner.history_selected = self.scanner.history_selected.saturating_sub(1)
+                }
+                Some(Action::Down) => {
+                    self.scanner.history_selected = (self.scanner.history_selected + 1)
+                        .min(self.scanner.history.len().min(8).saturating_sub(1));
+                }
+                Some(Action::Confirm | Action::Toggle) => {
+                    if let Some(value) = self
+                        .scanner
+                        .history
+                        .get(self.scanner.history_selected)
+                        .cloned()
+                    {
+                        self.scanner.cidr = value;
+                        self.scanner.cursor = self.scanner.cidr.len();
+                        self.scanner.history_open = false;
+                        return self.persist_scanner();
+                    }
+                }
+                Some(Action::Back) => self.scanner.history_open = false,
+                _ => self.scanner.history_open = false,
+            }
+            return Vec::new();
+        }
+
+        match action {
+            Some(Action::History) => {
+                self.scanner.history_open = true;
+                self.scanner.history_selected = 0;
+                return Vec::new();
+            }
+            Some(Action::Confirm | Action::Toggle | Action::Back) => {
+                self.scanner.editing = false;
+                return self.persist_scanner();
+            }
+            Some(Action::Right)
+                if self.scanner.cursor == self.scanner.cidr.len()
+                    && !self.scanner.cidr.is_empty() =>
             {
-                self.scanner.cidr.push(c);
+                if let Some(value) = self
+                    .scanner
+                    .history
+                    .iter()
+                    .find(|value| {
+                        value.starts_with(&self.scanner.cidr)
+                            && value.len() > self.scanner.cidr.len()
+                    })
+                    .cloned()
+                {
+                    self.scanner.cidr = value;
+                    self.scanner.cursor = self.scanner.cidr.len();
+                    return self.persist_scanner();
+                }
             }
             _ => {}
         }
+
+        if let Some(key) = input.key() {
+            let mut value = self.scanner.cidr.clone();
+            if edit_ascii(
+                &mut value,
+                &mut self.scanner.cursor,
+                key.code,
+                |character| character.is_ascii_digit() || matches!(character, '.' | '/'),
+            ) && value.len() <= 32
+            {
+                self.scanner.cidr = value;
+                return self.persist_scanner();
+            }
+        }
         Vec::new()
+    }
+
+    fn persist_scanner(&self) -> Vec<Effect> {
+        vec![Effect::PersistSession(crate::SessionUpdate::Scanner(
+            crate::ScannerPersist {
+                cidr: self.scanner.cidr.clone(),
+            },
+        ))]
     }
 
     fn begin_adapter_edit(&mut self) -> Vec<Effect> {
@@ -796,27 +970,48 @@ impl AppModel {
         }
 
         let mapped_action = input.action();
+        if self
+            .adapters
+            .edit
+            .as_ref()
+            .is_some_and(|edit| edit.history_open)
+        {
+            match mapped_action {
+                Some(Action::Up) => {
+                    let edit = self.adapters.edit.as_mut().expect("history is open");
+                    edit.history_selected = edit.history_selected.saturating_sub(1);
+                }
+                Some(Action::Down) => {
+                    let edit = self.adapters.edit.as_mut().expect("history is open");
+                    edit.history_selected = (edit.history_selected + 1)
+                        .min(edit.history.len().min(8).saturating_sub(1));
+                }
+                Some(Action::Confirm | Action::Toggle | Action::Right) => {
+                    let index = self
+                        .adapters
+                        .edit
+                        .as_ref()
+                        .expect("history is open")
+                        .history_selected;
+                    return self.select_adapter_history(index);
+                }
+                Some(Action::SelectAdapterHistory(index)) => {
+                    return self.select_adapter_history(index);
+                }
+                _ => {
+                    self.adapters
+                        .edit
+                        .as_mut()
+                        .expect("history is open")
+                        .history_open = false;
+                }
+            }
+            return Vec::new();
+        }
         let action = match input.key() {
             Some(key) => {
-                let history_was_open = self
-                    .adapters
-                    .edit
-                    .as_ref()
-                    .is_some_and(|edit| edit.history_open);
                 if self.handle_adapter_edit_key(key.code, key.modifiers.control) {
                     return self.persist_adapter_edit();
-                }
-                if history_was_open
-                    && matches!(
-                        key.code,
-                        KeyCode::Up
-                            | KeyCode::Down
-                            | KeyCode::Enter
-                            | KeyCode::Right
-                            | KeyCode::Esc
-                    )
-                {
-                    return Vec::new();
                 }
                 mapped_action
             }
@@ -855,13 +1050,14 @@ impl AppModel {
             Some(Action::History) => {
                 if let Some(edit) = self.adapters.edit.as_mut()
                     && edit.selected != AdapterField::Mode
-                    && !edit.history.is_empty()
+                    && !edit.params.use_dhcp
                 {
                     edit.history_open = !edit.history_open;
                     edit.history_selected = 0;
                 }
                 Vec::new()
             }
+            Some(Action::SelectAdapterHistory(index)) => self.select_adapter_history(index),
             Some(Action::SelectAdapterField(field, cursor)) => {
                 if let Some(edit) = self.adapters.edit.as_mut() {
                     edit.selected = field;
@@ -872,6 +1068,24 @@ impl AppModel {
             }
             _ => Vec::new(),
         }
+    }
+
+    fn select_adapter_history(&mut self, index: usize) -> Vec<Effect> {
+        let Some(edit) = self.adapters.edit.as_mut() else {
+            return Vec::new();
+        };
+        let Some(value) = edit.history.get(index).cloned() else {
+            edit.history_open = false;
+            return Vec::new();
+        };
+        let field = edit.selected;
+        edit.cursor = value.len();
+        if let Some(target) = edit.value_mut(field) {
+            *target = value;
+        }
+        edit.history_open = false;
+        edit.validation_error = None;
+        self.persist_adapter_edit()
     }
 
     /// Returns true when persistent form data changed.
@@ -1163,38 +1377,35 @@ impl AppModel {
             return Vec::new();
         }
         if self.diagnostics.history_open {
-            if let Some(key) = key {
-                match key.code {
-                    KeyCode::Up => {
-                        self.diagnostics.history_selected =
-                            self.diagnostics.history_selected.saturating_sub(1);
-                    }
-                    KeyCode::Down => {
-                        self.diagnostics.history_selected = (self.diagnostics.history_selected + 1)
-                            .min(
-                                self.diagnostics
-                                    .target_history
-                                    .len()
-                                    .min(8)
-                                    .saturating_sub(1),
-                            );
-                    }
-                    KeyCode::Enter | KeyCode::Right => {
-                        if let Some(value) = self
-                            .diagnostics
-                            .target_history
-                            .get(self.diagnostics.history_selected)
-                            .cloned()
-                        {
-                            self.set_active_diagnostic_field(value);
-                            self.diagnostics.cursor = self.active_diagnostic_field().len();
-                            self.diagnostics.history_open = false;
-                            return self.persist_active_diagnostic();
-                        }
-                    }
-                    KeyCode::Esc => self.diagnostics.history_open = false,
-                    _ => {}
+            match action {
+                Some(Action::Up) => {
+                    self.diagnostics.history_selected =
+                        self.diagnostics.history_selected.saturating_sub(1);
                 }
+                Some(Action::Down) => {
+                    self.diagnostics.history_selected = (self.diagnostics.history_selected + 1)
+                        .min(
+                            self.diagnostics
+                                .target_history
+                                .len()
+                                .min(8)
+                                .saturating_sub(1),
+                        );
+                }
+                Some(Action::Confirm | Action::Toggle | Action::Right) => {
+                    if let Some(value) = self
+                        .diagnostics
+                        .target_history
+                        .get(self.diagnostics.history_selected)
+                        .cloned()
+                    {
+                        self.set_active_diagnostic_field(value);
+                        self.diagnostics.cursor = self.active_diagnostic_field().len();
+                        self.diagnostics.history_open = false;
+                        return self.persist_active_diagnostic();
+                    }
+                }
+                _ => self.diagnostics.history_open = false,
             }
             return Vec::new();
         }
@@ -1742,7 +1953,11 @@ impl AppModel {
                     Page::Scanner | Page::Diagnostics | Page::Settings => Vec::new(),
                 };
             }
-            Edit if self.page == Page::Scanner => self.scanner.editing = true,
+            Edit if self.page == Page::Scanner => {
+                self.scanner.editing = true;
+                self.scanner.cursor = self.scanner.cidr.len();
+                self.scanner.history_open = false;
+            }
             Confirm | Toggle if self.page == Page::Scanner => return self.toggle_scan(),
             Confirm if self.page == Page::Diagnostics => {
                 self.diagnostics.focused = true;
@@ -1759,10 +1974,12 @@ impl AppModel {
                 self.adapters.selected = index.min(self.adapters.items.len() - 1)
             }
             SelectSetting(index) if self.page == Page::Settings => {
-                self.settings_selected = index.min(2);
+                self.settings_selected = index.min(3);
                 self.settings_just_reset = false;
             }
-            Edit if self.page == Page::Adapters => return self.begin_adapter_edit(),
+            Edit | Confirm | Toggle if self.page == Page::Adapters => {
+                return self.begin_adapter_edit();
+            }
             Up => {
                 self.navigate(-1);
                 if self.page == Page::Diagnostics {
@@ -1792,9 +2009,14 @@ impl AppModel {
             | History
             | SelectAdapter(_)
             | SelectAdapterField(_, _)
+            | SelectAdapterHistory(_)
+            | SelectScannerInput(_)
+            | ActivateScannerPanel
+            | SelectScannerHistory(_)
             | SelectSetting(_)
             | FocusDiagnostic(_)
-            | SelectDiagnosticField(_, _) => {}
+            | SelectDiagnosticField(_, _)
+            | SelectDiagnosticHistory(_) => {}
         }
         Vec::new()
     }
@@ -1821,7 +2043,7 @@ impl AppModel {
                 self.diagnostics.tool = DiagnosticTool::from_index(index as u8);
             }
             Page::Settings => {
-                self.settings_selected = wrap(self.settings_selected, 3, delta);
+                self.settings_selected = wrap(self.settings_selected, 4, delta);
                 self.settings_just_reset = false;
             }
             _ => {}
@@ -1843,7 +2065,15 @@ impl AppModel {
                 }
                 vec![Effect::PersistPreferences(self.preferences())]
             }
-            2 if activate => {
+            2 => {
+                self.theme = if direction < 0 {
+                    self.theme.previous()
+                } else {
+                    self.theme.next()
+                };
+                vec![Effect::PersistPreferences(self.preferences())]
+            }
+            3 if activate => {
                 self.reset_session_memory();
                 self.settings_just_reset = true;
                 vec![Effect::PersistSession(crate::SessionUpdate::Reset(
@@ -1861,8 +2091,7 @@ impl AppModel {
     }
 
     fn reset_session_memory(&mut self) {
-        self.scanner.cidr = ScannerState::default().cidr;
-        self.scanner.editing = false;
+        self.scanner = ScannerState::default();
         self.diagnostics.ping.request = crate::PingRequest::default();
         let trace = crate::TracePersist::default();
         self.diagnostics.trace.request = crate::TraceRequest::default();
@@ -1952,18 +2181,34 @@ impl AppModel {
         }
 
         let job = self.next_job(ToolKind::Scanner);
+        let cidr = self.scanner.cidr.trim().to_string();
+        if !cidr.is_empty() {
+            self.scanner.history.retain(|old| old != &cidr);
+            self.scanner.history.insert(0, cidr.clone());
+            self.scanner.history.truncate(15);
+        }
+        self.scanner.editing = false;
+        self.scanner.history_open = false;
         self.scanner.job = Some(job);
         self.scanner.status = TaskStatus::Running;
         self.scanner.current = 0;
         self.scanner.total = 0;
         self.scanner.results.clear();
-        vec![Effect::StartScan {
-            job,
-            request: ScanRequest {
+        vec![
+            Effect::PersistSession(crate::SessionUpdate::Scanner(crate::ScannerPersist {
                 cidr: self.scanner.cidr.clone(),
-                concurrency: self.scan_concurrency,
+            })),
+            Effect::PersistSession(crate::SessionUpdate::CidrHistory(
+                self.scanner.history.clone(),
+            )),
+            Effect::StartScan {
+                job,
+                request: ScanRequest {
+                    cidr: self.scanner.cidr.clone(),
+                    concurrency: self.scan_concurrency,
+                },
             },
-        }]
+        ]
     }
 
     fn toggle_diagnostic(&mut self) -> Vec<Effect> {
@@ -2711,7 +2956,11 @@ mod tests {
             ..AppModel::default()
         };
         let effects = app.update(Input(InputEvent::Action(Action::Toggle)));
-        let Effect::StartScan { job, .. } = effects[0].clone() else {
+        let Some(Effect::StartScan { job, .. }) = effects
+            .iter()
+            .find(|effect| matches!(effect, Effect::StartScan { .. }))
+            .cloned()
+        else {
             panic!("expected scan effect");
         };
         app.update(Runtime(RuntimeEvent::ScanHostFound {
@@ -2730,6 +2979,51 @@ mod tests {
             },
         }));
         assert_eq!(app.scanner.results.len(), 1);
+    }
+
+    #[test]
+    fn scanner_restores_v031_edit_mru_completion_and_panel_click_semantics() {
+        let mut config = crate::ConfigData::default();
+        config.session.scanner.cidr = "10.0.0.0/24".into();
+        config.session.history.cidrs = vec!["192.168.50.0/24".into(), "10.0.0.0/24".into()];
+        let mut app = AppModel::default();
+        app.apply_config(&config);
+        app.page = Page::Scanner;
+
+        app.update(Input(InputEvent::Action(Action::SelectScannerInput(3))));
+        assert!(app.scanner.editing);
+        assert_eq!(app.scanner.cursor, 3);
+        app.update(Input(InputEvent::Action(Action::History)));
+        assert!(app.scanner.history_open);
+        let effects = app.update(Input(InputEvent::Action(Action::SelectScannerHistory(0))));
+        assert_eq!(app.scanner.cidr, "192.168.50.0/24");
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::PersistSession(crate::SessionUpdate::Scanner(_))]
+        ));
+
+        app.scanner.cidr = "10.".into();
+        app.scanner.cursor = app.scanner.cidr.len();
+        app.update(Input(InputEvent::Key(KeyEvent::plain(KeyCode::Right))));
+        assert_eq!(app.scanner.cidr, "10.0.0.0/24");
+
+        let effects = app.update(Input(InputEvent::Action(Action::ActivateScannerPanel)));
+        assert!(!app.scanner.editing);
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::StartScan { .. }))
+        );
+        let effects = app.update(Input(InputEvent::Action(Action::ActivateScannerPanel)));
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::StartScan { .. }))
+        );
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            Effect::PersistSession(crate::SessionUpdate::CidrHistory(_))
+        )));
     }
 
     #[test]
@@ -2929,6 +3223,7 @@ mod tests {
             app.update(Input(InputEvent::Action(Action::Right))),
             [Effect::PersistPreferences(crate::Preferences {
                 language: Language::En,
+                theme: ThemeId::Classic,
                 scan_concurrency: 60,
             })]
         );
@@ -2938,6 +3233,7 @@ mod tests {
             app.update(Input(InputEvent::Action(Action::ToggleLanguage))),
             [Effect::PersistPreferences(crate::Preferences {
                 language: Language::Zh,
+                theme: ThemeId::Classic,
                 scan_concurrency: 60,
             })]
         );
@@ -2946,6 +3242,16 @@ mod tests {
         app.diagnostics.target_history = vec!["remembered.example".into()];
         app.update(Input(InputEvent::Action(Action::Down)));
         assert_eq!(app.settings_selected, 2);
+        assert_eq!(
+            app.update(Input(InputEvent::Action(Action::Confirm))),
+            [Effect::PersistPreferences(crate::Preferences {
+                language: Language::Zh,
+                theme: ThemeId::Nord,
+                scan_concurrency: 60,
+            })]
+        );
+        app.update(Input(InputEvent::Action(Action::Down)));
+        assert_eq!(app.settings_selected, 3);
         assert_eq!(
             app.update(Input(InputEvent::Action(Action::Confirm))),
             [Effect::PersistSession(crate::SessionUpdate::Reset(
@@ -3165,6 +3471,15 @@ mod tests {
     }
 
     #[test]
+    fn adapter_enter_and_space_restore_unambiguous_v031_edit_entry() {
+        for action in [Action::Confirm, Action::Toggle] {
+            let mut app = adapter_app();
+            app.update(Input(InputEvent::Action(action)));
+            assert!(app.adapters.edit.is_some(), "{action:?}");
+        }
+    }
+
+    #[test]
     fn adapter_apply_is_job_scoped_and_runtime_only_is_not_reported_as_failure() {
         let mut app = adapter_app();
         app.update(Input(InputEvent::Action(Action::Edit)));
@@ -3278,6 +3593,13 @@ mod tests {
         ))));
         app.update(Input(InputEvent::Action(Action::History)));
         assert!(app.adapters.edit.as_ref().unwrap().history_open);
+        let effects = app.update(Input(InputEvent::Action(Action::SelectAdapterHistory(0))));
+        assert_eq!(app.adapters.edit.as_ref().unwrap().params.ip, "9.9.9.9");
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::PersistAdapterEdit { .. }]
+        ));
+        app.update(Input(InputEvent::Action(Action::History)));
         app.update(Input(InputEvent::Key(KeyEvent::plain(KeyCode::Esc))));
         assert!(!app.adapters.edit.as_ref().unwrap().history_open);
         assert!(app.adapters.edit.is_some());
@@ -3365,6 +3687,27 @@ mod tests {
 
         app.update(Input(InputEvent::Key(KeyEvent::plain(KeyCode::Esc))));
         assert!(!app.diagnostics.focused);
+    }
+
+    #[test]
+    fn diagnostic_history_mouse_selection_fills_the_active_target() {
+        let mut app = AppModel {
+            page: Page::Diagnostics,
+            ..AppModel::default()
+        };
+        app.diagnostics.focused = true;
+        app.diagnostics.focus = DiagnosticFocus::Config;
+        app.diagnostics.target_history = vec!["1.1.1.1".into(), "8.8.8.8".into()];
+        app.diagnostics.history_open = true;
+        let effects = app.update(Input(InputEvent::Action(Action::SelectDiagnosticHistory(
+            1,
+        ))));
+        assert_eq!(app.diagnostics.ping.request.target, "8.8.8.8");
+        assert!(!app.diagnostics.history_open);
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::PersistSession(crate::SessionUpdate::Ping(_))]
+        ));
     }
 
     #[test]

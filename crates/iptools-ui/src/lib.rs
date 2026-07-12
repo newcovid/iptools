@@ -3,11 +3,11 @@
 use iptools_core::{
     Action, AdapterApplyOutcome, AdapterEditPhase, AdapterField, AdapterValidationError, AppModel,
     DiagnosticFocus, DiagnosticTool, LanDirection, LanSpeedMode, LanSpeedPhase, Language,
-    LinkQualityDimensionKind, LinkQualityGrade, Page, RuntimeErrorCode, TaskStatus,
+    LinkQualityDimensionKind, LinkQualityGrade, Page, RuntimeErrorCode, TaskStatus, ThemeId,
 };
 use ratatui::{
     Frame,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
@@ -27,18 +27,30 @@ const SELECTED: Color = Color::DarkGray;
 /// Ephemeral layout state. No application or platform state is stored here.
 #[derive(Debug, Default)]
 pub struct UiState {
+    overlay_regions: Vec<(Rect, Action)>,
     page_regions: Vec<(Rect, Page)>,
     diagnostic_regions: Vec<(Rect, DiagnosticTool)>,
-    scanner_action: Option<Rect>,
+    diagnostic_menu: Option<Rect>,
     diagnostic_main: Option<Rect>,
+    diagnostic_config: Option<Rect>,
     diagnostic_fields: Vec<(Rect, usize, u16)>,
+    scanner_input: Option<(Rect, u16)>,
+    scanner_panel: Option<Rect>,
     adapter_regions: Vec<(Rect, usize)>,
     adapter_fields: Vec<(Rect, AdapterField, u16)>,
     settings_regions: Vec<(Rect, usize)>,
+    footer_regions: Vec<(Rect, Action)>,
 }
 
 impl UiState {
     pub fn hit_test(&self, column: u16, row: u16) -> Option<Action> {
+        if let Some((_, action)) = self
+            .overlay_regions
+            .iter()
+            .find(|(area, _)| contains(*area, column, row))
+        {
+            return Some(*action);
+        }
         if let Some((area, field, value_x)) = self
             .adapter_fields
             .iter()
@@ -68,6 +80,13 @@ impl UiState {
         {
             return Some(Action::SelectPage(*page as u8));
         }
+        if let Some((_, action)) = self
+            .footer_regions
+            .iter()
+            .find(|(area, _)| contains(*area, column, row))
+        {
+            return Some(*action);
+        }
         if let Some((_, tool)) = self
             .diagnostic_regions
             .iter()
@@ -92,10 +111,29 @@ impl UiState {
             return Some(Action::FocusDiagnostic(DiagnosticFocus::Main));
         }
         if self
-            .scanner_action
+            .diagnostic_menu
             .is_some_and(|area| contains(area, column, row))
         {
-            return Some(Action::Toggle);
+            return Some(Action::FocusDiagnostic(DiagnosticFocus::Menu));
+        }
+        if self
+            .diagnostic_config
+            .is_some_and(|area| contains(area, column, row))
+        {
+            return Some(Action::FocusDiagnostic(DiagnosticFocus::Config));
+        }
+        if let Some((area, value_x)) = self.scanner_input
+            && contains(area, column, row)
+        {
+            return Some(Action::SelectScannerInput(
+                column.saturating_sub(value_x).min(area.width) as usize,
+            ));
+        }
+        if self
+            .scanner_panel
+            .is_some_and(|area| contains(area, column, row))
+        {
+            return Some(Action::ActivateScannerPanel);
         }
         None
     }
@@ -122,10 +160,86 @@ pub fn render(frame: &mut Frame, model: &AppModel, ui: &mut UiState) {
         Page::Diagnostics => render_diagnostics(frame, areas[1], model, ui),
         Page::Settings => render_settings(frame, areas[1], model, ui),
     }
-    render_footer(frame, areas[2], model);
+    render_footer(frame, areas[2], model, ui);
 
     if model.show_help {
         render_help(frame, model);
+    }
+    apply_theme(frame, model.theme);
+}
+
+#[derive(Clone, Copy)]
+struct ThemePalette {
+    background: Color,
+    foreground: Color,
+    selection: Color,
+    muted: Color,
+    subtle: Color,
+    green: Color,
+    cyan: Color,
+    yellow: Color,
+    red: Color,
+}
+
+fn apply_theme(frame: &mut Frame, theme: ThemeId) {
+    if theme == ThemeId::Classic {
+        return;
+    }
+    let palette = match theme {
+        ThemeId::Classic => unreachable!(),
+        ThemeId::Nord => ThemePalette {
+            background: Color::Rgb(46, 52, 64),
+            foreground: Color::Rgb(236, 239, 244),
+            selection: Color::Rgb(76, 86, 106),
+            muted: Color::Rgb(216, 222, 233),
+            subtle: Color::Rgb(129, 161, 193),
+            green: Color::Rgb(163, 190, 140),
+            cyan: Color::Rgb(136, 192, 208),
+            yellow: Color::Rgb(235, 203, 139),
+            red: Color::Rgb(191, 97, 106),
+        },
+        ThemeId::CatppuccinMocha => ThemePalette {
+            background: Color::Rgb(30, 30, 46),
+            foreground: Color::Rgb(205, 214, 244),
+            selection: Color::Rgb(69, 71, 90),
+            muted: Color::Rgb(166, 173, 200),
+            subtle: Color::Rgb(127, 132, 156),
+            green: Color::Rgb(166, 227, 161),
+            cyan: Color::Rgb(148, 226, 213),
+            yellow: Color::Rgb(249, 226, 175),
+            red: Color::Rgb(243, 139, 168),
+        },
+        ThemeId::Dracula => ThemePalette {
+            background: Color::Rgb(40, 42, 54),
+            foreground: Color::Rgb(248, 248, 242),
+            selection: Color::Rgb(68, 71, 90),
+            muted: Color::Rgb(189, 147, 249),
+            subtle: Color::Rgb(98, 114, 164),
+            green: Color::Rgb(80, 250, 123),
+            cyan: Color::Rgb(139, 233, 253),
+            yellow: Color::Rgb(241, 250, 140),
+            red: Color::Rgb(255, 85, 85),
+        },
+    };
+    for cell in &mut frame.buffer_mut().content {
+        cell.fg = remap_color(cell.fg, palette, false);
+        cell.bg = remap_color(cell.bg, palette, true);
+    }
+}
+
+fn remap_color(color: Color, palette: ThemePalette, background: bool) -> Color {
+    match color {
+        Color::Reset if background => palette.background,
+        Color::Reset | Color::White => palette.foreground,
+        Color::Black => palette.background,
+        Color::DarkGray if background => palette.selection,
+        Color::DarkGray => palette.subtle,
+        Color::Gray => palette.muted,
+        Color::Green | Color::LightGreen => palette.green,
+        Color::Cyan | Color::LightCyan | Color::Blue | Color::LightBlue => palette.cyan,
+        Color::Yellow | Color::LightYellow => palette.yellow,
+        Color::Red | Color::LightRed => palette.red,
+        other => other,
     }
 }
 
@@ -182,7 +296,10 @@ fn render_dashboard(frame: &mut Frame, area: Rect, model: &AppModel) {
     let key = Style::default().fg(MUTED);
     let mut local = vec![
         Row::new(vec![
-            Cell::from(Span::styled(tr(model.language, "时间", "Time"), key)),
+            Cell::from(Span::styled(
+                tr(model.language, "当前时间", "Current Time"),
+                key,
+            )),
             Cell::from(snapshot.observed_at.clone()),
         ]),
         Row::new(vec![
@@ -202,7 +319,7 @@ fn render_dashboard(frame: &mut Frame, area: Rect, model: &AppModel) {
         local.push(
             Row::new(vec![
                 Cell::from(Span::styled(
-                    tr(model.language, "活动接口", "Interface"),
+                    tr(model.language, "活跃网卡", "Active Interface"),
                     key,
                 )),
                 Cell::from(vec![
@@ -220,25 +337,25 @@ fn render_dashboard(frame: &mut Frame, area: Rect, model: &AppModel) {
         );
         local.push(Row::new(vec![
             Cell::from(Span::styled(
-                tr(model.language, "连接 / 寻址", "Connection"),
+                tr(model.language, "IP 配置", "IP Config"),
                 key,
             )),
             Cell::from(format!(
                 "{} / {}",
                 if interface.is_physical {
-                    tr(model.language, "物理", "Physical")
+                    tr(model.language, "物理网卡", "Physical")
                 } else {
-                    tr(model.language, "虚拟", "Virtual")
+                    tr(model.language, "虚拟/软件网卡", "Virtual")
                 },
                 if interface.dhcp_enabled {
                     "DHCP"
                 } else {
-                    tr(model.language, "静态", "Static")
+                    tr(model.language, "静态 (Static)", "Static")
                 }
             )),
         ]));
         local.push(Row::new(vec![
-            Cell::from(Span::styled(tr(model.language, "本地 IP", "Local IP"), key)),
+            Cell::from(Span::styled(tr(model.language, "本机 IP", "Local IP"), key)),
             Cell::from(interface.ipv4.clone()),
         ]));
         local.push(Row::new(vec![Cell::from(""), Cell::from("")]));
@@ -246,7 +363,11 @@ fn render_dashboard(frame: &mut Frame, area: Rect, model: &AppModel) {
         local.push(Row::new(vec![
             Cell::from(Span::styled(tr(model.language, "状态", "Status"), key)),
             Cell::from(Span::styled(
-                tr(model.language, "无活动接口", "No active interface"),
+                tr(
+                    model.language,
+                    "未找到活跃网卡",
+                    "No active interface found",
+                ),
                 Style::default().fg(Color::Red),
             )),
         ]));
@@ -270,7 +391,7 @@ fn render_dashboard(frame: &mut Frame, area: Rect, model: &AppModel) {
         ]),
         Row::new(vec![
             Cell::from(Span::styled(
-                tr(model.language, "累计流量", "Traffic Total"),
+                tr(model.language, "流量统计", "Data Usage"),
                 key,
             )),
             Cell::from(format!(
@@ -285,16 +406,24 @@ fn render_dashboard(frame: &mut Frame, area: Rect, model: &AppModel) {
     frame.render_widget(
         Table::new(local, [Constraint::Length(14), Constraint::Min(0)])
             .column_spacing(1)
-            .block(Block::bordered().title(tr(model.language, " 本地概览 ", " Local Overview "))),
+            .block(Block::bordered().title(tr(
+                model.language,
+                " 本地网络状态 ",
+                " Local Network ",
+            ))),
         cols[0],
     );
-    let proxy = snapshot
-        .proxy
-        .as_deref()
-        .unwrap_or(tr(model.language, "无", "none"));
+    let proxy =
+        snapshot
+            .proxy
+            .as_deref()
+            .unwrap_or(tr(model.language, "无 (直连)", "None (Direct)"));
     let mut public = vec![
         Row::new(vec![
-            Cell::from(Span::styled(tr(model.language, "系统代理", "Proxy"), key)),
+            Cell::from(Span::styled(
+                tr(model.language, "网络代理", "Web Proxy"),
+                key,
+            )),
             Cell::from(Span::styled(
                 proxy,
                 Style::default().fg(if snapshot.proxy.is_some() {
@@ -315,7 +444,10 @@ fn render_dashboard(frame: &mut Frame, area: Rect, model: &AppModel) {
             .join(", ");
         public.extend([
             Row::new(vec![
-                Cell::from(Span::styled("Public IP", key)),
+                Cell::from(Span::styled(
+                    tr(model.language, "公网 IP", "Public IP"),
+                    key,
+                )),
                 Cell::from(Span::styled(
                     info.ip.clone(),
                     Style::default()
@@ -331,13 +463,16 @@ fn render_dashboard(frame: &mut Frame, area: Rect, model: &AppModel) {
                 Cell::from(location),
             ]),
             Row::new(vec![
-                Cell::from(Span::styled("ISP", key)),
+                Cell::from(Span::styled(tr(model.language, "运营商", "ISP"), key)),
                 Cell::from(info.isp.clone()),
             ]),
         ]);
     } else {
         public.push(Row::new(vec![
-            Cell::from(Span::styled("Public IP", key)),
+            Cell::from(Span::styled(
+                tr(model.language, "公网 IP", "Public IP"),
+                key,
+            )),
             Cell::from(Span::styled(
                 dashboard_public_label(&model.dashboard.status, model.language),
                 Style::default().fg(Color::Yellow),
@@ -372,7 +507,11 @@ fn render_dashboard(frame: &mut Frame, area: Rect, model: &AppModel) {
     frame.render_widget(
         Table::new(public, [Constraint::Length(14), Constraint::Min(0)])
             .column_spacing(1)
-            .block(Block::bordered().title(tr(model.language, " 公网信息 ", " Public Network "))),
+            .block(Block::bordered().title(tr(
+                model.language,
+                " 公网连接信息 ",
+                " Public Connection ",
+            ))),
         cols[1],
     );
 }
@@ -425,17 +564,21 @@ fn render_adapters(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut UiS
     frame.render_widget(
         List::new(items).block(Block::bordered().title(tr(
             model.language,
-            " 网络适配器 ",
-            " Network Adapters ",
+            " 网卡列表 ",
+            " Interfaces ",
         ))),
         cols[0],
     );
 
     let detail_block = Block::bordered()
-        .title(tr(model.language, " 适配器详情 ", " Adapter Details "))
+        .title(tr(model.language, " 详细信息 ", " Details "))
         .title(
             Line::from(Span::styled(
-                tr(model.language, " [E] 编辑 ", " [E] Edit "),
+                tr(
+                    model.language,
+                    " [E/回车/空格] 编辑 IP ",
+                    " [E/Enter/Space] Edit IP ",
+                ),
                 Style::default().fg(SECONDARY),
             ))
             .alignment(Alignment::Right),
@@ -465,7 +608,15 @@ fn render_adapters(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut UiS
                 Cell::from(Span::styled(tr(model.language, "状态", "Status"), key)),
                 Cell::from(Line::from(vec![
                     Span::styled(
-                        adapter.status.clone(),
+                        tr(
+                            model.language,
+                            if adapter_is_up(adapter) {
+                                "活跃"
+                            } else {
+                                "不活跃"
+                            },
+                            if adapter_is_up(adapter) { "UP" } else { "DOWN" },
+                        ),
                         Style::default().fg(if adapter_is_up(adapter) {
                             Color::Green
                         } else {
@@ -492,23 +643,29 @@ fn render_adapters(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut UiS
                 Cell::from(format!(
                     "{} [{}]",
                     if adapter.is_physical {
-                        tr(model.language, "物理", "Physical")
+                        tr(model.language, "物理网卡", "Physical")
                     } else {
-                        tr(model.language, "虚拟", "Virtual")
+                        tr(model.language, "虚拟/软件网卡", "Virtual")
                     },
                     adapter.kind
                 )),
             ]),
             Row::new(vec![
-                Cell::from(Span::styled(tr(model.language, "IP 类型", "IP Type"), key)),
+                Cell::from(Span::styled(
+                    tr(model.language, "IP 分配", "IP Assignment"),
+                    key,
+                )),
                 Cell::from(if adapter.dhcp_enabled {
                     "DHCP"
                 } else {
-                    tr(model.language, "静态", "Static")
+                    tr(model.language, "静态 (Static)", "Static")
                 }),
             ]),
             Row::new(vec![
-                Cell::from(Span::styled("MAC", key)),
+                Cell::from(Span::styled(
+                    tr(model.language, "物理地址 (MAC)", "MAC Address"),
+                    key,
+                )),
                 Cell::from(adapter.mac.clone()),
             ]),
             Row::new(vec![
@@ -537,7 +694,7 @@ fn render_adapters(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut UiS
         rows.push(Row::new(vec![Cell::from(""), Cell::from("")]));
         rows.push(Row::new(vec![
             Cell::from(Span::styled(
-                tr(model.language, "实时流量", "Traffic Rate"),
+                tr(model.language, "实时速率", "Traffic Rate"),
                 key,
             )),
             Cell::from(Line::from(vec![
@@ -553,7 +710,7 @@ fn render_adapters(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut UiS
         ]));
         rows.push(Row::new(vec![
             Cell::from(Span::styled(
-                tr(model.language, "累计流量", "Traffic Total"),
+                tr(model.language, "总流量", "Total Data"),
                 key,
             )),
             Cell::from(format!(
@@ -615,10 +772,10 @@ fn render_adapter_edit(
     .split(inner);
 
     let labels = [
-        tr(model.language, "模式", "Mode"),
-        "IPv4",
+        tr(model.language, "分配方式", "Assignment"),
+        tr(model.language, "IPv4 地址", "IPv4 Address"),
         tr(model.language, "子网掩码", "Subnet mask"),
-        tr(model.language, "网关", "Gateway"),
+        tr(model.language, "默认网关", "Default Gateway"),
         tr(model.language, "首选 DNS", "Primary DNS"),
         tr(model.language, "备用 DNS", "Secondary DNS"),
     ];
@@ -632,7 +789,7 @@ fn render_adapter_edit(
         let selected = field == edit.selected;
         let enabled = field == AdapterField::Mode || !edit.params.use_dhcp;
         let style = if !enabled {
-            Style::default().fg(MUTED)
+            Style::default().fg(SUBTLE).add_modifier(Modifier::DIM)
         } else if selected {
             Style::default()
                 .fg(Color::Yellow)
@@ -644,9 +801,9 @@ fn render_adapter_edit(
             AdapterField::Mode => tr(
                 model.language,
                 if edit.params.use_dhcp {
-                    "自动 (DHCP)"
+                    "动态 (DHCP)"
                 } else {
-                    "手动 (静态)"
+                    "静态 (Static)"
                 },
                 if edit.params.use_dhcp {
                     "Automatic (DHCP)"
@@ -659,17 +816,20 @@ fn render_adapter_edit(
         };
         let label_area = Rect::new(row.x, row.y, label_width, 1);
         let value_area = Rect::new(value_x, row.y, row.right().saturating_sub(value_x), 1);
+        let label_style = if !enabled {
+            Style::default().fg(SUBTLE).add_modifier(Modifier::DIM)
+        } else if selected {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default().fg(MUTED)
+        };
         frame.render_widget(
             Paragraph::new(format!(
                 "{} {}",
                 if selected { ">" } else { " " },
                 labels[index]
             ))
-            .style(if selected {
-                Style::default().fg(Color::Yellow)
-            } else {
-                Style::default().fg(MUTED)
-            }),
+            .style(label_style),
             label_area,
         );
         let value_widget = if selected
@@ -689,11 +849,18 @@ fn render_adapter_edit(
             let after = &raw[edit.cursor.min(raw.len())..];
             let mut spans = vec![
                 Span::styled(before.to_string(), style),
-                Span::styled("█", style),
                 Span::styled(after.to_string(), style),
             ];
             if let Some(suffix) = suffix {
                 spans.push(Span::styled(suffix, Style::default().fg(MUTED)));
+            }
+            if !edit.history_open {
+                frame.set_cursor_position(Position::new(
+                    value_area
+                        .x
+                        .saturating_add(edit.cursor.min(value_area.width as usize) as u16),
+                    value_area.y,
+                ));
             }
             Paragraph::new(Line::from(spans))
         } else {
@@ -724,7 +891,7 @@ fn render_adapter_edit(
     let status = match &edit.phase {
         AdapterEditPhase::Editing => validation.unwrap_or(tr(
             model.language,
-            "静态模式下可编辑地址；Ctrl+R 打开历史。",
+            "静态模式下可编辑地址；Ctrl+R 打开历史，行尾 → 采纳灰字补全。",
             "Address fields are editable in static mode; Ctrl+R opens history.",
         )),
         AdapterEditPhase::Confirming => tr(
@@ -771,8 +938,8 @@ fn render_adapter_edit(
     frame.render_widget(
         Paragraph::new(tr(
             model.language,
-            " [↑↓] 字段  [←→] 光标/模式  [Enter] 确认  [Esc] 取消 ",
-            " [↑↓] Fields  [←→] Cursor/mode  [Enter] Confirm  [Esc] Cancel ",
+            " [↑↓] 选择字段  [←→] 移动光标/切换方式  [回车] 应用  [Esc] 取消 ",
+            " [↑↓] Select field  [←→] Cursor/mode  [Enter] Apply  [Esc] Cancel ",
         ))
         .style(Style::default().fg(MUTED)),
         rows[2],
@@ -781,23 +948,37 @@ fn render_adapter_edit(
     if edit.history_open {
         let popup = centered(area, 52, 45);
         frame.render_widget(Clear, popup);
-        let items = edit
-            .history
-            .iter()
-            .take(8)
-            .enumerate()
-            .map(|(index, value)| {
-                ListItem::new(value.clone()).style(if index == edit.history_selected {
-                    Style::default().bg(SELECTED).fg(Color::White)
-                } else {
-                    Style::default()
+        let visible = edit.history.len().min(8);
+        for index in 0..visible {
+            ui.overlay_regions.push((
+                Rect::new(popup.x + 1, popup.y + 1 + index as u16, popup.width - 2, 1),
+                Action::SelectAdapterHistory(index),
+            ));
+        }
+        let items: Vec<ListItem> = if edit.history.is_empty() {
+            vec![
+                ListItem::new(tr(model.language, "暂无历史记录", "No history yet"))
+                    .style(Style::default().fg(SUBTLE)),
+            ]
+        } else {
+            edit.history
+                .iter()
+                .take(8)
+                .enumerate()
+                .map(|(index, value)| {
+                    ListItem::new(value.clone()).style(if index == edit.history_selected {
+                        Style::default().bg(SELECTED).fg(Color::White)
+                    } else {
+                        Style::default()
+                    })
                 })
-            });
+                .collect()
+        };
         frame.render_widget(
             List::new(items).block(Block::bordered().title(tr(
                 model.language,
-                " 输入历史 ",
-                " Input history ",
+                " 输入历史（点击或回车选择） ",
+                " Input history (click or Enter) ",
             ))),
             popup,
         );
@@ -850,38 +1031,63 @@ fn render_scanner(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut UiSt
     };
     let status = task_label(&model.scanner.status, model.language).trim();
     let count = if model.scanner.total == 0 {
-        "—".into()
+        scan_address_count(&model.scanner.cidr)
+            .map_or_else(|| "—".into(), |count| count.to_string())
     } else {
         model.scanner.total.to_string()
     };
+    let label = format!(
+        " {}: ",
+        tr(model.language, "扫描范围 (CIDR)", "Scan Range (CIDR)")
+    );
+    let mut input_spans = vec![
+        Span::styled(label.clone(), input_style),
+        Span::styled(model.scanner.cidr.clone(), input_style),
+    ];
+    if model.scanner.editing
+        && model.scanner.cursor == model.scanner.cidr.len()
+        && !model.scanner.cidr.is_empty()
+        && let Some(candidate) = model.scanner.history.iter().find(|candidate| {
+            candidate.starts_with(&model.scanner.cidr) && candidate.len() > model.scanner.cidr.len()
+        })
+    {
+        input_spans.push(Span::styled(
+            candidate[model.scanner.cidr.len()..].to_string(),
+            Style::default().fg(MUTED),
+        ));
+    }
+    input_spans.push(Span::styled(
+        format!(
+            "   {}: {}   [{}]   {} / {}",
+            tr(model.language, "预计数量", "Estimated"),
+            count,
+            status,
+            tr(model.language, "E 编辑范围", "E Edit Range"),
+            action,
+        ),
+        input_style,
+    ));
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                format!(" {} ", tr(model.language, "扫描范围", "Range")),
-                input_style,
-            ),
-            Span::styled(model.scanner.cidr.clone(), input_style),
-            Span::styled(if model.scanner.editing { "█" } else { "" }, input_style),
-            Span::styled(
-                format!(
-                    "   {} {}   [{}]   {} / {}",
-                    tr(model.language, "地址数", "Addresses"),
-                    count,
-                    status,
-                    tr(model.language, "E 编辑", "E Edit"),
-                    action,
-                ),
-                input_style,
-            ),
-        ]))
-        .block(Block::bordered().title(tr(
+        Paragraph::new(Line::from(input_spans)).block(Block::bordered().title(tr(
             model.language,
-            " 局域网扫描 ",
+            " 局域网设备扫描 ",
             " LAN Scanner ",
         ))),
         rows[0],
     );
-    ui.scanner_action = Some(rows[0]);
+    let value_x = rows[0]
+        .x
+        .saturating_add(1)
+        .saturating_add(label.width() as u16);
+    let value_width = rows[0].right().saturating_sub(value_x).min(32);
+    ui.scanner_input = Some((Rect::new(value_x, rows[0].y + 1, value_width, 1), value_x));
+    ui.scanner_panel = Some(rows[1]);
+    if model.scanner.editing && !model.scanner.history_open {
+        frame.set_cursor_position(Position::new(
+            value_x.saturating_add(model.scanner.cursor.min(value_width as usize) as u16),
+            rows[0].y + 1,
+        ));
+    }
     let ratio = if model.scanner.total == 0 {
         0.0
     } else {
@@ -970,14 +1176,56 @@ fn render_scanner(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut UiSt
             rows[2],
         );
     }
+
+    if model.scanner.editing && model.scanner.history_open {
+        let width = rows[1].width.min(52);
+        let height = (model.scanner.history.len().clamp(1, 8) as u16 + 2).min(rows[1].height);
+        let popup = Rect::new(rows[1].x, rows[1].y, width, height.max(3));
+        frame.render_widget(Clear, popup);
+        for index in 0..model.scanner.history.len().min(8) {
+            ui.overlay_regions.push((
+                Rect::new(popup.x + 1, popup.y + 1 + index as u16, popup.width - 2, 1),
+                Action::SelectScannerHistory(index),
+            ));
+        }
+        let items: Vec<ListItem> = if model.scanner.history.is_empty() {
+            vec![
+                ListItem::new(tr(model.language, "暂无历史记录", "No history yet"))
+                    .style(Style::default().fg(SUBTLE)),
+            ]
+        } else {
+            model
+                .scanner
+                .history
+                .iter()
+                .take(8)
+                .enumerate()
+                .map(|(index, value)| {
+                    ListItem::new(value.clone()).style(if index == model.scanner.history_selected {
+                        Style::default().bg(SELECTED)
+                    } else {
+                        Style::default()
+                    })
+                })
+                .collect()
+        };
+        frame.render_widget(
+            List::new(items).block(Block::bordered().title(tr(
+                model.language,
+                " CIDR 历史（点击或回车选择） ",
+                " CIDR history (click or Enter) ",
+            ))),
+            popup,
+        );
+    }
 }
 
 fn render_traffic(frame: &mut Frame, area: Rect, model: &AppModel) {
     let rows = model.traffic.rows.iter().enumerate().map(|(index, row)| {
         Row::new(vec![
             row.name.clone(),
-            format_rate(row.download_bps),
-            format_rate(row.upload_bps),
+            format!("↓ {}", format_rate(row.download_bps)),
+            format!("↑ {}", format_rate(row.upload_bps)),
             format!(
                 "{} / {}",
                 format_bytes(row.session_download),
@@ -1010,18 +1258,22 @@ fn render_traffic(frame: &mut Frame, area: Rect, model: &AppModel) {
             Row::new(vec![
                 Cell::from(tr(model.language, "接口名称", "Interface Name"))
                     .style(Style::default().fg(MUTED)),
-                Cell::from(tr(model.language, "接收速率", "RX Rate"))
+                Cell::from(tr(model.language, "下载速率", "Download"))
                     .style(Style::default().fg(Color::Green)),
-                Cell::from(tr(model.language, "发送速率", "TX Rate"))
+                Cell::from(tr(model.language, "上传速率", "Upload"))
                     .style(Style::default().fg(Color::Yellow)),
-                Cell::from(tr(model.language, "本次接收/发送", "Session RX/TX"))
+                Cell::from(tr(model.language, "本次会话 (收/发)", "Session (Rx/Tx)"))
                     .style(Style::default().fg(MUTED)),
-                Cell::from(tr(model.language, "累计接收/发送", "Total RX/TX"))
+                Cell::from(tr(model.language, "开机累计 (收/发)", "Total (Rx/Tx)"))
                     .style(Style::default().fg(MUTED)),
             ])
             .bottom_margin(1),
         )
-        .block(Block::bordered().title(tr(model.language, " 实时流量 ", " Live Traffic "))),
+        .block(Block::bordered().title(tr(
+            model.language,
+            " 实时流量监控 ",
+            " Real-time Monitor ",
+        ))),
         area,
     );
 }
@@ -1046,6 +1298,7 @@ fn render_diagnostics(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut 
     };
 
     let mut items = Vec::new();
+    ui.diagnostic_menu = Some(cols[0]);
     let menu_inner = Block::bordered().inner(cols[0]);
     for (index, tool) in DiagnosticTool::ALL.into_iter().enumerate() {
         let row = Rect::new(
@@ -1075,7 +1328,7 @@ fn render_diagnostics(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut 
     frame.render_widget(
         List::new(items).block(
             Block::bordered()
-                .title(tr(model.language, " 诊断工具 ", " Diagnostic Tools "))
+                .title(tr(model.language, " 工具列表 ", " Tools "))
                 .border_style(focus_style(DiagnosticFocus::Menu)),
         ),
         cols[0],
@@ -1083,7 +1336,7 @@ fn render_diagnostics(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut 
 
     ui.diagnostic_main = Some(cols[1]);
     let main_block = Block::bordered()
-        .title(tr(model.language, " 主面板 ", " Main Panel "))
+        .title(tr(model.language, " 监控面板 ", " Visualization "))
         .border_style(focus_style(DiagnosticFocus::Main));
     let main_inner = main_block.inner(cols[1]);
     frame.render_widget(main_block, cols[1]);
@@ -1118,8 +1371,9 @@ fn render_diagnostics(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut 
         }
     }
 
+    ui.diagnostic_config = Some(cols[2]);
     let config_block = Block::bordered()
-        .title(tr(model.language, " 配置 ", " Configuration "))
+        .title(tr(model.language, " 参数配置 ", " Configuration "))
         .border_style(focus_style(DiagnosticFocus::Config));
     let config_inner = config_block.inner(cols[2]);
     frame.render_widget(config_block, cols[2]);
@@ -1177,7 +1431,6 @@ fn render_diagnostics(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut 
                 raw_value[..cursor].to_string(),
                 Style::default().fg(Color::Yellow),
             ));
-            spans.push(Span::styled("█", Style::default().fg(Color::Yellow)));
             spans.push(Span::styled(
                 raw_value[cursor..].to_string(),
                 Style::default().fg(Color::Yellow),
@@ -1192,6 +1445,12 @@ fn render_diagnostics(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut 
                 spans.push(Span::styled(
                     candidate[raw_value.len()..].to_string(),
                     Style::default().fg(MUTED),
+                ));
+            }
+            if !model.diagnostics.history_open {
+                frame.set_cursor_position(Position::new(
+                    value_x.saturating_add(cursor.min(value_row.width as usize) as u16),
+                    value_row.y,
                 ));
             }
         } else {
@@ -1214,24 +1473,40 @@ fn render_diagnostics(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut 
     if model.diagnostics.history_open {
         let popup = centered(cols[2], 90, 55);
         frame.render_widget(Clear, popup);
-        let items = model
-            .diagnostics
-            .target_history
-            .iter()
-            .take(8)
-            .enumerate()
-            .map(|(index, value)| {
-                ListItem::new(value.clone()).style(if index == model.diagnostics.history_selected {
-                    Style::default().bg(SELECTED)
-                } else {
-                    Style::default()
+        for index in 0..model.diagnostics.target_history.len().min(8) {
+            ui.overlay_regions.push((
+                Rect::new(popup.x + 1, popup.y + 1 + index as u16, popup.width - 2, 1),
+                Action::SelectDiagnosticHistory(index),
+            ));
+        }
+        let items: Vec<ListItem> = if model.diagnostics.target_history.is_empty() {
+            vec![
+                ListItem::new(tr(model.language, "暂无历史记录", "No history yet"))
+                    .style(Style::default().fg(SUBTLE)),
+            ]
+        } else {
+            model
+                .diagnostics
+                .target_history
+                .iter()
+                .take(8)
+                .enumerate()
+                .map(|(index, value)| {
+                    ListItem::new(value.clone()).style(
+                        if index == model.diagnostics.history_selected {
+                            Style::default().bg(SELECTED)
+                        } else {
+                            Style::default()
+                        },
+                    )
                 })
-            });
+                .collect()
+        };
         frame.render_widget(
             List::new(items).block(Block::bordered().title(tr(
                 model.language,
-                " 目标历史 ",
-                " Target history ",
+                " 目标历史（点击或回车选择） ",
+                " Target history (click or Enter) ",
             ))),
             popup,
         );
@@ -1242,8 +1517,8 @@ fn render_diagnostics(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut 
         frame.render_widget(
             Paragraph::new(tr(
                 model.language,
-                "按 Enter 进入诊断工具",
-                "Press Enter to focus diagnostics",
+                "按回车键进入交互模式，或直接点击任一卡片",
+                "Press Enter to interact, or click any panel",
             ))
             .alignment(Alignment::Center)
             .style(Style::default().fg(MUTED)),
@@ -2234,25 +2509,25 @@ fn diagnostic_fields(model: &AppModel) -> Vec<(&'static str, String)> {
     match model.diagnostics.tool {
         DiagnosticTool::Ping => vec![
             (
-                tr(model.language, "目标", "Target"),
+                tr(model.language, "目标 IP/域名", "Target IP/Domain"),
                 model.diagnostics.ping.request.target.clone(),
             ),
             (
-                tr(model.language, "间隔", "Interval"),
-                format!("{} ms", model.diagnostics.ping.request.interval_ms),
+                tr(model.language, "发包间隔 (ms)", "Interval (ms)"),
+                model.diagnostics.ping.request.interval_ms.to_string(),
             ),
             (
-                tr(model.language, "超时", "Timeout"),
-                format!("{} ms", model.diagnostics.ping.request.timeout_ms),
+                tr(model.language, "超时时间 (ms)", "Timeout (ms)"),
+                model.diagnostics.ping.request.timeout_ms.to_string(),
             ),
             (
-                tr(model.language, "载荷", "Payload"),
-                format!("{} B", model.diagnostics.ping.request.packet_size),
+                tr(model.language, "包载荷大小", "Packet Size"),
+                model.diagnostics.ping.request.packet_size.to_string(),
             ),
         ],
         DiagnosticTool::Trace => vec![
             (
-                tr(model.language, "目标", "Target"),
+                tr(model.language, "目标 IP/域名", "Target IP/Domain"),
                 model.diagnostics.trace.request.target.clone(),
             ),
             (
@@ -2260,14 +2535,17 @@ fn diagnostic_fields(model: &AppModel) -> Vec<(&'static str, String)> {
                 model.diagnostics.trace.max_hops_input.clone(),
             ),
             (
-                tr(model.language, "超时", "Timeout"),
+                tr(model.language, "超时 (ms)", "Timeout (ms)"),
                 model.diagnostics.trace.timeout_input.clone(),
             ),
         ],
         DiagnosticTool::PortScan => {
             let state = &model.diagnostics.port_scan.persist;
             vec![
-                (tr(model.language, "目标", "Target"), state.target.clone()),
+                (
+                    tr(model.language, "目标 IP/域名", "Target IP/Domain"),
+                    state.target.clone(),
+                ),
                 (
                     tr(model.language, "起始端口", "Start port"),
                     state.start_port.clone(),
@@ -2277,13 +2555,13 @@ fn diagnostic_fields(model: &AppModel) -> Vec<(&'static str, String)> {
                     state.end_port.clone(),
                 ),
                 (
-                    tr(model.language, "超时", "Timeout"),
+                    tr(model.language, "超时 (ms)", "Timeout (ms)"),
                     state.timeout_ms.clone(),
                 ),
             ]
         }
         DiagnosticTool::PublicSpeed => vec![(
-            tr(model.language, "服务器", "Server"),
+            tr(model.language, "测速服务器", "Test Server"),
             model
                 .diagnostics
                 .public_speed
@@ -2299,25 +2577,25 @@ fn diagnostic_fields(model: &AppModel) -> Vec<(&'static str, String)> {
                 .map(|adapter| format!("{} ({})", adapter.name, adapter.ipv4))
                 .unwrap_or_else(|| tr(model.language, "无可用网卡", "No adapter").into());
             vec![
-                (tr(model.language, "网卡", "Adapter"), adapter),
+                (tr(model.language, "网卡", "Interface"), adapter),
                 (
-                    tr(model.language, "目标", "Target"),
+                    tr(model.language, "目标 IP/域名", "Target IP/Domain"),
                     state.params.target.clone(),
                 ),
                 (
-                    tr(model.language, "次数", "Count"),
+                    tr(model.language, "探测次数", "Probe Count"),
                     state.params.count.clone(),
                 ),
                 (
-                    tr(model.language, "间隔", "Interval"),
+                    tr(model.language, "间隔 (ms)", "Interval (ms)"),
                     state.params.interval_ms.clone(),
                 ),
                 (
-                    tr(model.language, "超时", "Timeout"),
+                    tr(model.language, "超时 (ms)", "Timeout (ms)"),
                     state.params.timeout_ms.clone(),
                 ),
                 (
-                    tr(model.language, "载荷", "Payload"),
+                    tr(model.language, "包大小 (字节)", "Packet Size (B)"),
                     state.params.packet_size.clone(),
                 ),
             ]
@@ -2386,17 +2664,30 @@ fn render_settings(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut UiS
     };
     let rows = Layout::vertical([Constraint::Min(0), Constraint::Length(3)]).split(area);
     let list_inner = Block::bordered().inner(rows[0]);
-    for index in 0..3 {
+    for index in 0..4 {
         ui.settings_regions.push((
             Rect::new(list_inner.x, list_inner.y + index, list_inner.width, 1),
             index as usize,
         ));
     }
+    let theme = match model.theme {
+        ThemeId::Classic => tr(model.language, "经典", "Classic"),
+        ThemeId::Nord => "Nord",
+        ThemeId::CatppuccinMocha => "Catppuccin Mocha",
+        ThemeId::Dracula => "Dracula",
+    };
     let values = [
-        (tr(model.language, "语言", "Language"), language.to_string()),
+        (
+            tr(model.language, "界面语言", "Language"),
+            language.to_string(),
+        ),
         (
             tr(model.language, "扫描并发数", "Scan concurrency"),
             model.scan_concurrency.to_string(),
+        ),
+        (
+            tr(model.language, "配色方案", "Color theme"),
+            theme.to_string(),
         ),
         (
             tr(
@@ -2407,7 +2698,7 @@ fn render_settings(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut UiS
             if model.settings_just_reset {
                 tr(model.language, "已清空 ✓", "Cleared ✓").to_string()
             } else {
-                tr(model.language, "按 Enter 清空", "Press Enter to clear").to_string()
+                tr(model.language, "回车清空", "Press Enter to clear").to_string()
             },
         ),
     ];
@@ -2435,14 +2726,18 @@ fn render_settings(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut UiS
             })
         });
     frame.render_widget(
-        List::new(items).block(Block::bordered().title(tr(model.language, " 设置 ", " Settings "))),
+        List::new(items).block(Block::bordered().title(tr(
+            model.language,
+            " 全局设置 ",
+            " Global Settings ",
+        ))),
         rows[0],
     );
     frame.render_widget(
         Paragraph::new(tr(
             model.language,
-            "方向键选择与修改；Enter 确认。清空仅重置参数记忆，不改变当前页面。",
-            "Use arrows to select and edit; Enter confirms. Reset keeps the current page.",
+            "[←/→] 修改值   [回车] 执行   [↑/↓] 选择配置项；清空不会改变当前页面。",
+            "[←/→] Change value   [Enter] Apply   [↑/↓] Select item; reset keeps this page.",
         ))
         .block(Block::bordered())
         .style(Style::default().fg(Color::Yellow))
@@ -2451,25 +2746,42 @@ fn render_settings(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut UiS
     );
 }
 
-fn render_footer(frame: &mut Frame, area: Rect, model: &AppModel) {
+fn render_footer(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut UiState) {
     let next = binding(model, "next_tab", "Tab");
     let previous = binding(model, "prev_tab", "Shift+Tab");
     let language = binding(model, "toggle_language", "Ctrl+L");
     let help = binding(model, "help", "F1");
     let quit = binding(model, "quit", "Ctrl+C");
-    frame.render_widget(
-        Paragraph::new(match model.language {
-            Language::Zh => format!(
-                " [{next}/{previous}] 切换   [{language}] 语言   [{help}] 帮助   [{quit}] 退出 "
-            ),
-            Language::En => format!(
-                " [{next}/{previous}] Switch   [{language}] Language   [{help}] Help   [{quit}] Quit "
-            ),
-        })
-        .style(Style::default().fg(MUTED))
-        .alignment(Alignment::Left),
-        area,
-    );
+    let buttons = match model.language {
+        Language::Zh => vec![
+            (format!("[{next}/{previous}] 切换菜单"), Action::NextPage),
+            (format!("[{language}] 切换语言"), Action::ToggleLanguage),
+            (format!("[{help}] 帮助"), Action::Help),
+            (format!("[{quit}] 退出"), Action::Quit),
+        ],
+        Language::En => vec![
+            (format!("[{next}/{previous}] Switch"), Action::NextPage),
+            (format!("[{language}] Language"), Action::ToggleLanguage),
+            (format!("[{help}] Help"), Action::Help),
+            (format!("[{quit}] Quit"), Action::Quit),
+        ],
+    };
+    let mut spans = Vec::new();
+    let mut x = area.x;
+    for (label, action) in buttons {
+        let text = format!(" {label} ");
+        let width = text.width().min(u16::MAX as usize) as u16;
+        if x < area.right() {
+            ui.footer_regions
+                .push((Rect::new(x, area.y, width.min(area.right() - x), 1), action));
+        }
+        spans.push(Span::styled(
+            text,
+            Style::default().fg(SECONDARY).add_modifier(Modifier::BOLD),
+        ));
+        x = x.saturating_add(width);
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn render_help(frame: &mut Frame, model: &AppModel) {
@@ -2568,12 +2880,13 @@ fn page_label(page: Page, language: Language) -> &'static str {
 
 fn tool_label(tool: DiagnosticTool, language: Language) -> &'static str {
     match (tool, language) {
-        (DiagnosticTool::Ping, _) => "Ping",
-        (DiagnosticTool::Trace, Language::Zh) => "路由追踪",
+        (DiagnosticTool::Ping, Language::Zh) => "多功能 Ping",
+        (DiagnosticTool::Ping, Language::En) => "Advanced Ping",
+        (DiagnosticTool::Trace, Language::Zh) => "路由跟踪",
         (DiagnosticTool::PortScan, Language::Zh) => "端口扫描",
         (DiagnosticTool::PublicSpeed, Language::Zh) => "公网测速",
         (DiagnosticTool::LinkQuality, Language::Zh) => "链路质量",
-        (DiagnosticTool::LanSpeed, Language::Zh) => "局域网测速",
+        (DiagnosticTool::LanSpeed, Language::Zh) => "内网测速",
         (DiagnosticTool::Trace, Language::En) => "Trace Route",
         (DiagnosticTool::PortScan, Language::En) => "Port Scan",
         (DiagnosticTool::PublicSpeed, Language::En) => "Public Speed",
@@ -2608,6 +2921,21 @@ fn format_rate(value: u64) -> String {
     format!("{}/s", format_bytes(value))
 }
 
+fn scan_address_count(cidr: &str) -> Option<u64> {
+    let (address, prefix) = cidr.trim().split_once('/')?;
+    address.parse::<std::net::Ipv4Addr>().ok()?;
+    let prefix = prefix.parse::<u32>().ok()?;
+    if prefix > 32 {
+        return None;
+    }
+    let size = 1_u64 << (32 - prefix);
+    Some(if prefix < 31 {
+        size.saturating_sub(2)
+    } else {
+        size
+    })
+}
+
 fn format_bytes(value: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut amount = value as f64;
@@ -2627,6 +2955,14 @@ fn format_bytes(value: u64) -> String {
 mod tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
+
+    #[test]
+    fn scanner_estimate_matches_v031_usable_host_count() {
+        assert_eq!(scan_address_count("192.168.1.0/24"), Some(254));
+        assert_eq!(scan_address_count("192.168.1.0/31"), Some(2));
+        assert_eq!(scan_address_count("192.168.1.1/32"), Some(1));
+        assert_eq!(scan_address_count("invalid"), None);
+    }
 
     #[test]
     fn renders_demo_banner_and_hit_regions() {
@@ -2682,6 +3018,25 @@ mod tests {
                     let text = terminal.backend().to_string();
                     assert!(text.contains("demo-router"));
                     assert!(text.contains("203.0.113.10"));
+                    for label in if language == Language::Zh {
+                        [
+                            "本地网络状态",
+                            "公网连接信息",
+                            "公网 IP",
+                            "运营商",
+                            "网络代理",
+                        ]
+                    } else {
+                        [
+                            "Local Network",
+                            "Public Connection",
+                            "Public IP",
+                            "ISP",
+                            "Web Proxy",
+                        ]
+                    } {
+                        assert!(text.contains(label), "missing {label}: {text}");
+                    }
                 }
             }
         }
@@ -2740,6 +3095,8 @@ mod tests {
                 let text = terminal.backend().to_string();
                 assert!(text.contains("Wi-Fi"));
                 assert!(text.contains("1.0 MiB/s"));
+                assert!(text.contains("↓ 1.0 MiB/s"), "{text}");
+                assert!(text.contains("↑ 256.0 KiB/s"), "{text}");
             }
         }
     }
@@ -2792,6 +3149,15 @@ mod tests {
                         assert_eq!(ui.hit_test(20, 5), None);
                     }
                 }
+                let edit = model.adapters.edit.as_mut().unwrap();
+                edit.phase = AdapterEditPhase::Editing;
+                edit.params.use_dhcp = true;
+                terminal
+                    .draw(|frame| render(frame, &model, &mut ui))
+                    .unwrap();
+                let disabled = &terminal.backend().buffer()[(19, 5)];
+                assert_eq!(disabled.fg, SUBTLE);
+                assert!(disabled.modifier.contains(Modifier::DIM));
             }
         }
     }
@@ -2823,7 +3189,18 @@ mod tests {
                     let text = terminal.backend().to_string();
                     assert!(text.contains("192.168.1.0/24"));
                     assert!(text.contains("192.168.1.1"));
-                    assert!(ui.scanner_action.is_some());
+                    assert!(ui.scanner_input.is_some());
+                    assert!(ui.scanner_panel.is_some());
+                    let (input, _) = ui.scanner_input.unwrap();
+                    assert!(matches!(
+                        ui.hit_test(input.x, input.y),
+                        Some(Action::SelectScannerInput(_))
+                    ));
+                    let panel = ui.scanner_panel.unwrap();
+                    assert_eq!(
+                        ui.hit_test(panel.x, panel.y),
+                        Some(Action::ActivateScannerPanel)
+                    );
                 }
             }
         }
@@ -2979,7 +3356,7 @@ mod tests {
                 .unwrap();
             let text = terminal.backend().to_string();
             assert!(text.contains("8.8.8.8"), "{text}");
-            assert!(text.contains("1000 ms"), "{text}");
+            assert!(text.contains("1000"), "{text}");
             assert!(text.contains("reply 3: 20 ms"), "{text}");
             assert!(
                 text.contains(if language == Language::Zh {
@@ -3177,7 +3554,7 @@ mod tests {
                 let mut model = AppModel::default();
                 model.page = Page::Settings;
                 model.language = language;
-                model.settings_selected = 2;
+                model.settings_selected = 3;
                 model.settings_just_reset = true;
                 model.scan_concurrency = 120;
                 let mut ui = UiState::default();
@@ -3194,7 +3571,7 @@ mod tests {
                     }),
                     "{text}"
                 );
-                assert_eq!(ui.hit_test(2, 6), Some(Action::SelectSetting(2)));
+                assert_eq!(ui.hit_test(2, 7), Some(Action::SelectSetting(3)));
             }
         }
     }
@@ -3223,5 +3600,93 @@ mod tests {
         assert!(text.contains("[n/p] Switch"), "{text}");
         assert!(text.contains("[Ctrl+x] Quit"), "{text}");
         assert!(text.contains("Native bindings are loaded from config.json"));
+        let language = ui
+            .footer_regions
+            .iter()
+            .find(|(_, action)| *action == Action::ToggleLanguage)
+            .unwrap()
+            .0;
+        assert_eq!(
+            ui.hit_test(language.x, language.y),
+            Some(Action::ToggleLanguage)
+        );
+    }
+
+    #[test]
+    fn full_diagnostic_panels_and_history_rows_are_clickable() {
+        let backend = TestBackend::new(120, 36);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut model = AppModel::default();
+        model.page = Page::Diagnostics;
+        model.diagnostics.focused = true;
+        model.diagnostics.focus = DiagnosticFocus::Config;
+        model.diagnostics.target_history = vec!["8.8.8.8".into(), "1.1.1.1".into()];
+        model.diagnostics.history_open = true;
+        let mut ui = UiState::default();
+        terminal
+            .draw(|frame| render(frame, &model, &mut ui))
+            .unwrap();
+
+        for (area, focus) in [
+            (ui.diagnostic_menu.unwrap(), DiagnosticFocus::Menu),
+            (ui.diagnostic_main.unwrap(), DiagnosticFocus::Main),
+            (ui.diagnostic_config.unwrap(), DiagnosticFocus::Config),
+        ] {
+            assert_eq!(
+                ui.hit_test(area.right() - 2, area.bottom() - 2),
+                Some(Action::FocusDiagnostic(focus))
+            );
+        }
+        let (history, action) = ui.overlay_regions[0];
+        assert_eq!(action, Action::SelectDiagnosticHistory(0));
+        assert_eq!(ui.hit_test(history.x, history.y), Some(action));
+    }
+
+    #[test]
+    fn text_editors_use_backend_cursor_without_inserting_a_block_cell() {
+        let backend = TestBackend::new(120, 36);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut model = AppModel::default();
+        model.page = Page::Scanner;
+        model.scanner.editing = true;
+        model.scanner.cursor = 4;
+        let mut ui = UiState::default();
+        terminal
+            .draw(|frame| render(frame, &model, &mut ui))
+            .unwrap();
+        assert!(!terminal.backend().to_string().contains('█'));
+    }
+
+    #[test]
+    fn preset_themes_remap_semantic_colors_and_backgrounds() {
+        for (theme, background, cyan) in [
+            (
+                ThemeId::Nord,
+                Color::Rgb(46, 52, 64),
+                Color::Rgb(136, 192, 208),
+            ),
+            (
+                ThemeId::CatppuccinMocha,
+                Color::Rgb(30, 30, 46),
+                Color::Rgb(148, 226, 213),
+            ),
+            (
+                ThemeId::Dracula,
+                Color::Rgb(40, 42, 54),
+                Color::Rgb(139, 233, 253),
+            ),
+        ] {
+            let backend = TestBackend::new(120, 36);
+            let mut terminal = Terminal::new(backend).unwrap();
+            let mut model = AppModel::default();
+            model.theme = theme;
+            let mut ui = UiState::default();
+            terminal
+                .draw(|frame| render(frame, &model, &mut ui))
+                .unwrap();
+            let cells = &terminal.backend().buffer().content;
+            assert!(cells.iter().any(|cell| cell.bg == background));
+            assert!(cells.iter().any(|cell| cell.fg == cyan));
+        }
     }
 }

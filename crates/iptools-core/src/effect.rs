@@ -8,6 +8,7 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Preferences {
     pub language: crate::Language,
+    pub theme: crate::ThemeId,
     pub scan_concurrency: usize,
 }
 
@@ -361,6 +362,8 @@ pub enum Effect {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionUpdate {
+    Scanner(crate::ScannerPersist),
+    CidrHistory(Vec<String>),
     Ping(crate::PingPersist),
     Trace(crate::TracePersist),
     PortScan(crate::PortScanPersist),

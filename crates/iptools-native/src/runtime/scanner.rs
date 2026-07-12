@@ -136,10 +136,11 @@ mod tests {
         let mut model = AppModel::default();
         model.page = Page::Scanner;
         model.scanner.cidr = "invalid-cidr".into();
-        let [effect] = model
+        let effect = model
             .update(Message::Input(InputEvent::Action(Action::Toggle)))
-            .try_into()
-            .expect("scanner should emit one effect");
+            .into_iter()
+            .find(|effect| matches!(effect, iptools_core::Effect::StartScan { .. }))
+            .expect("scanner should emit a start effect");
         let mut runtime = NativeRuntime::new();
         runtime.dispatch(effect).unwrap();
 

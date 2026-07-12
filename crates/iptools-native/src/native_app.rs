@@ -122,6 +122,7 @@ mod tests {
             &mut config,
             vec![Effect::PersistPreferences(Preferences {
                 language: Language::Zh,
+                theme: iptools_core::ThemeId::Dracula,
                 scan_concurrency: 90,
             })],
         )
@@ -129,6 +130,7 @@ mod tests {
         let saved: iptools_core::ConfigData =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(saved.language, Language::Zh);
+        assert_eq!(saved.theme, iptools_core::ThemeId::Dracula);
         assert_eq!(saved.scan_concurrency, 90);
         std::fs::remove_file(path).unwrap();
     }
