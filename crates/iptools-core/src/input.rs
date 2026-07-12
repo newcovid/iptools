@@ -93,6 +93,9 @@ pub enum Action {
     SelectPage(u8),
     SelectDiagnostic(u8),
     ResetDemo,
+    History,
+    SelectAdapter(usize),
+    SelectAdapterField(crate::AdapterField, usize),
 }
 
 impl KeyEvent {
@@ -103,6 +106,7 @@ impl KeyEvent {
         match (self.code, self.modifiers) {
             (Char('c' | 'q'), Modifiers { control: true, .. }) => Some(Action::Quit),
             (Char('l'), Modifiers { control: true, .. }) => Some(Action::ToggleLanguage),
+            (Char('r'), Modifiers { control: true, .. }) => Some(Action::History),
             (Tab, Modifiers { shift: true, .. }) | (BackTab, _) => Some(Action::PreviousPage),
             (Tab, _) => Some(Action::NextPage),
             (Up | Char('w'), _) => Some(Action::Up),

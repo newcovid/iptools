@@ -53,7 +53,7 @@ Web 和 native `--demo` 使用 `iptools-demo::DemoRuntime` 的固定 seed 与定
 
 真实原生页面的既有网络算法暂时保留在 `iptools-native/src/modules` 和 `utils` 中，作为兼容迁移桥；新增跨端行为必须进入 core/ui/runtime 边界，不能继续增加 detached spawn 或无界通道。迁移桥删除前，真实网络算法行为不得因 Web 展览而改变。
 
-Scanner、Port Scan、Dashboard、Adapter 读取与 Traffic 已进入阶段 3 的垂直切片：ARP/主机名解析、TCP 连接扫描、Dashboard 的系统/公网信息，以及适配器枚举和流量采样已移到 `NativeRuntime::dispatch(Effect)`。所有刷新均使用 JobId；同一工具的新刷新取消旧 generation，core 丢弃迟到结果。Adapter 与 Traffic 共用速率、累计量和会话基线采样器，但慢速平台适配器枚举通过单许可 blocking gate 串行执行，不阻塞快速 Traffic 刷新。旧原生页继续作为兼容迁移桥，共享 `AppModel` 已可直接由这些 native handler 驱动。
+Scanner、Port Scan、Dashboard、Adapter 读取、Traffic 与 Adapter Edit 已进入阶段 3 的垂直切片：ARP/主机名解析、TCP 连接扫描、Dashboard 的系统/公网信息、适配器枚举和流量采样，以及网卡 DHCP/静态地址写入均已移到 `NativeRuntime::dispatch(Effect)`。所有操作均使用 JobId；同一工具的新任务取代旧 generation，core 丢弃迟到结果。Adapter 读取与写入共用单许可 blocking gate，确保不可中断的系统写入完成并被等待后，更新的写入才会执行；Traffic 仍使用独立的快速采样路径。Adapter Edit 在 core 与 native 边界各自校验请求，区分永久生效、Linux 运行时临时生效与 Demo 模拟生效；Web 永远只修改确定性场景。旧原生页继续作为兼容迁移桥，共享 `AppModel` 已可直接由这些 native handler 驱动。
 
 错误策略：binary 顶层可用 `anyhow`，领域与 runtime 边界使用强类型错误；结构化日志使用 `tracing`，core 不依赖 tracing。
 
