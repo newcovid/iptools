@@ -141,21 +141,73 @@ pub enum TaskStatus {
     Failed(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct DashboardState {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DashboardInterface {
+    pub name: String,
+    pub description: String,
+    pub ipv4: String,
+    pub ssid: Option<String>,
+    pub is_physical: bool,
+    pub dhcp_enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PublicIpInfo {
+    pub ip: String,
+    pub city: String,
+    pub region: String,
+    pub country: String,
+    pub isp: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DashboardSnapshot {
+    pub observed_at: String,
     pub hostname: String,
-    pub public_ip: String,
+    pub os_name: String,
+    pub os_version: String,
+    pub active_interface: Option<DashboardInterface>,
+    pub proxy: Option<String>,
+    pub public_info: Option<PublicIpInfo>,
     pub download_bps: u64,
     pub upload_bps: u64,
+    pub total_download: u64,
+    pub total_upload: u64,
+}
+
+impl Default for DashboardSnapshot {
+    fn default() -> Self {
+        Self {
+            observed_at: "—".into(),
+            hostname: "loading…".into(),
+            os_name: String::new(),
+            os_version: String::new(),
+            active_interface: None,
+            proxy: None,
+            public_info: None,
+            download_bps: 0,
+            upload_bps: 0,
+            total_download: 0,
+            total_upload: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DashboardState {
+    pub snapshot: DashboardSnapshot,
+    pub status: TaskStatus,
+    pub error: Option<crate::RuntimeError>,
+    pub job: Option<JobId>,
 }
 
 impl Default for DashboardState {
     fn default() -> Self {
         Self {
-            hostname: "loading…".into(),
-            public_ip: "loading…".into(),
-            download_bps: 0,
-            upload_bps: 0,
+            snapshot: DashboardSnapshot::default(),
+            status: TaskStatus::Idle,
+            error: None,
+            job: None,
         }
     }
 }
@@ -320,6 +372,8 @@ pub struct AppModel {
     pub traffic: Vec<TrafficRow>,
     pub diagnostics: DiagnosticsState,
     pub scan_concurrency: usize,
+    #[serde(default)]
+    public_ip_config: crate::PublicIpConfig,
     generation: u64,
 }
 
@@ -339,6 +393,7 @@ impl Default for AppModel {
             traffic: Vec::new(),
             diagnostics: DiagnosticsState::default(),
             scan_concurrency: 50,
+            public_ip_config: crate::PublicIpConfig::default(),
             generation: 0,
         }
     }
@@ -348,6 +403,7 @@ impl AppModel {
     pub fn apply_config(&mut self, config: &crate::ConfigData) {
         self.language = config.language;
         self.scan_concurrency = config.scan_concurrency.clamp(10, 500);
+        self.public_ip_config = config.public_ip.clone();
     }
 
     pub const fn preferences(&self) -> crate::Preferences {
@@ -423,7 +479,7 @@ impl AppModel {
             }
             Refresh => {
                 return match self.page {
-                    Page::Dashboard => vec![Effect::RefreshDashboard],
+                    Page::Dashboard => self.refresh_dashboard(),
                     Page::Adapters => vec![Effect::RefreshAdapters],
                     _ => Vec::new(),
                 };
@@ -476,6 +532,19 @@ impl AppModel {
             tool,
             generation: self.generation,
         }
+    }
+
+    fn refresh_dashboard(&mut self) -> Vec<Effect> {
+        let job = self.next_job(ToolKind::Dashboard);
+        self.dashboard.job = Some(job);
+        self.dashboard.status = TaskStatus::Running;
+        self.dashboard.error = None;
+        vec![Effect::RefreshDashboard {
+            job,
+            request: crate::DashboardRequest {
+                public_ip: self.public_ip_config.clone(),
+            },
+        }]
     }
 
     fn toggle_scan(&mut self) -> Vec<Effect> {
@@ -574,18 +643,28 @@ impl AppModel {
 
     fn handle_runtime(&mut self, event: RuntimeEvent) {
         match event {
-            RuntimeEvent::DashboardUpdated {
-                hostname,
-                public_ip,
-                download_bps,
-                upload_bps,
-            } => {
-                self.dashboard = DashboardState {
-                    hostname,
-                    public_ip,
-                    download_bps,
-                    upload_bps,
-                };
+            RuntimeEvent::DashboardUpdated(snapshot) => self.dashboard.snapshot = *snapshot,
+            RuntimeEvent::DashboardRefreshFinished { job, snapshot }
+                if self.dashboard.job == Some(job) =>
+            {
+                self.dashboard.snapshot = *snapshot;
+                self.dashboard.status = TaskStatus::Done;
+                self.dashboard.error = None;
+                self.dashboard.job = None;
+            }
+            RuntimeEvent::DashboardRefreshFailed {
+                job,
+                snapshot,
+                error,
+            } if self.dashboard.job == Some(job) => {
+                self.dashboard.snapshot = *snapshot;
+                self.dashboard.status = TaskStatus::Failed(error.message.clone());
+                self.dashboard.error = Some(error);
+                self.dashboard.job = None;
+            }
+            RuntimeEvent::DashboardRefreshCancelled { job } if self.dashboard.job == Some(job) => {
+                self.dashboard.status = TaskStatus::Done;
+                self.dashboard.job = None;
             }
             RuntimeEvent::AdaptersUpdated(adapters) => self.adapters = adapters,
             RuntimeEvent::TrafficUpdated(rows) => self.traffic = rows,
@@ -876,6 +955,7 @@ fn wrap(current: usize, len: usize, delta: isize) -> usize {
 
 fn stop_effect(job: JobId) -> Effect {
     match job.tool {
+        ToolKind::Dashboard => unreachable!("dashboard refreshes are not diagnostic jobs"),
         ToolKind::Ping => Effect::StopPing(job),
         ToolKind::Trace => Effect::StopTrace(job),
         ToolKind::PortScan => Effect::StopPortScan(job),
@@ -1039,6 +1119,71 @@ mod tests {
                 language: Language::Zh,
                 scan_concurrency: 60,
             })]
+        );
+    }
+
+    #[test]
+    fn dashboard_refresh_uses_config_and_ignores_stale_generations() {
+        let mut app = AppModel::default();
+        app.apply_config(&crate::ConfigData {
+            public_ip: crate::PublicIpConfig {
+                endpoints: vec![crate::Endpoint {
+                    url: "http://127.0.0.1:9876/ip".into(),
+                    kind: "plaintext".into(),
+                }],
+                use_system_proxy: false,
+            },
+            ..crate::ConfigData::default()
+        });
+
+        let [first_effect] = app
+            .update(Input(InputEvent::Action(Action::Refresh)))
+            .try_into()
+            .unwrap();
+        let first = match first_effect {
+            Effect::RefreshDashboard { job, request } => {
+                assert_eq!(request.public_ip.endpoints[0].kind, "plaintext");
+                assert!(!request.public_ip.use_system_proxy);
+                job
+            }
+            other => panic!("unexpected effect: {other:?}"),
+        };
+        let [second_effect] = app
+            .update(Input(InputEvent::Action(Action::Refresh)))
+            .try_into()
+            .unwrap();
+        let second = match second_effect {
+            Effect::RefreshDashboard { job, .. } => job,
+            other => panic!("unexpected effect: {other:?}"),
+        };
+        assert!(second.generation > first.generation);
+
+        let stale = DashboardSnapshot {
+            hostname: "stale-host".into(),
+            ..DashboardSnapshot::default()
+        };
+        app.update(Runtime(RuntimeEvent::DashboardRefreshFinished {
+            job: first,
+            snapshot: Box::new(stale),
+        }));
+        assert_eq!(app.dashboard.job, Some(second));
+        assert_ne!(app.dashboard.snapshot.hostname, "stale-host");
+
+        let current = DashboardSnapshot {
+            hostname: "current-host".into(),
+            ..DashboardSnapshot::default()
+        };
+        app.update(Runtime(RuntimeEvent::DashboardRefreshFailed {
+            job: second,
+            snapshot: Box::new(current),
+            error: crate::RuntimeError::new(crate::RuntimeErrorCode::Network, "offline"),
+        }));
+        assert_eq!(app.dashboard.job, None);
+        assert_eq!(app.dashboard.snapshot.hostname, "current-host");
+        assert!(matches!(app.dashboard.status, TaskStatus::Failed(_)));
+        assert_eq!(
+            app.dashboard.error.as_ref().unwrap().code,
+            crate::RuntimeErrorCode::Network
         );
     }
 

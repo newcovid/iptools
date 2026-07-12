@@ -7,15 +7,8 @@
 
 use serde::Deserialize;
 
-/// 归一化后的公网信息（地理/ISP 可能为空字符串）。
-#[derive(Debug, Clone, PartialEq)]
-pub struct PublicInfo {
-    pub ip: String,
-    pub city: String,
-    pub region: String,
-    pub country: String,
-    pub isp: String,
-}
+/// Compatibility alias while the legacy Dashboard still uses its old name.
+pub use iptools_core::PublicIpInfo as PublicInfo;
 
 #[derive(Debug, Deserialize)]
 struct IpSb {

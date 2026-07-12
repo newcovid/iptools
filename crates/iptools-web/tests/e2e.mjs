@@ -44,6 +44,20 @@ try {
     assert.equal(await page.evaluate(() => navigator.serviceWorker.ready.then(() => true)), true);
   }
 
+  const dashboardGeneration = Number(
+    await page.locator("#terminal").getAttribute("data-rendered-input-generation"),
+  );
+  await page.keyboard.press("r");
+  await page.waitForFunction(
+    (generation) =>
+      Number(document.getElementById("terminal")?.dataset.renderedInputGeneration) > generation,
+    dashboardGeneration,
+  );
+  await page.waitForFunction(() => {
+    const text = document.getElementById("terminal")?.textContent ?? "";
+    return text.includes("198.51.100.27") && text.includes("完成");
+  });
+
   const before = hash(await page.locator("#terminal").screenshot());
   await page.keyboard.press("Tab");
   await page.waitForTimeout(150);
