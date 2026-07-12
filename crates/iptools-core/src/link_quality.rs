@@ -170,7 +170,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn v031_scoring_boundaries_are_preserved() {
+    fn scoring_boundaries_are_preserved() {
         assert_eq!(latency_score(20.0), 100.0);
         assert_eq!(latency_score(300.0), 0.0);
         assert!((latency_score(160.0) - 50.0).abs() < 1.0);
@@ -186,7 +186,7 @@ mod tests {
     }
 
     #[test]
-    fn v031_weights_and_grades_are_preserved() {
+    fn weights_and_grades_are_preserved() {
         assert_eq!(
             overall(&[(100.0, 40.0), (100.0, 35.0), (100.0, 25.0)]),
             100.0

@@ -8,22 +8,26 @@ pub(super) fn to_rgb(color: Color, reset_fallback_rgb: u32) -> u32 {
     match color {
         Color::Rgb(r, g, b) => ((r as u32) << 16) | ((g as u32) << 8) | b as u32,
         Color::Reset => reset_fallback_rgb,
-        Color::Black => 0x000000,
-        Color::Red => 0x800000,
-        Color::Green => 0x008000,
-        Color::Yellow => 0x808000,
-        Color::Blue => 0x000080,
-        Color::Magenta => 0x800080,
-        Color::Cyan => 0x008080,
-        Color::Gray => 0xc0c0c0,
-        Color::DarkGray => 0x808080,
-        Color::LightRed => 0xFF0000,
-        Color::LightGreen => 0x00FF00,
-        Color::LightYellow => 0xFFFF00,
-        Color::LightBlue => 0x0000FF,
-        Color::LightMagenta => 0xFF00FF,
-        Color::LightCyan => 0x00FFFF,
-        Color::White => 0xFFFFFF,
+        // Match the Campbell palette used by modern Windows Terminal instead
+        // of the much darker legacy HTML/ANSI colors. RGB theme colors pass
+        // through unchanged; this only aligns Ratatui's named colors with the
+        // native terminal presentation used by iptools.
+        Color::Black => 0x0C0C0C,
+        Color::Red => 0xC50F1F,
+        Color::Green => 0x13A10E,
+        Color::Yellow => 0xC19C00,
+        Color::Blue => 0x0037DA,
+        Color::Magenta => 0x881798,
+        Color::Cyan => 0x3A96DD,
+        Color::Gray => 0xCCCCCC,
+        Color::DarkGray => 0x767676,
+        Color::LightRed => 0xE74856,
+        Color::LightGreen => 0x16C60C,
+        Color::LightYellow => 0xF9F1A5,
+        Color::LightBlue => 0x3B78FF,
+        Color::LightMagenta => 0xB4009E,
+        Color::LightCyan => 0x61D6D6,
+        Color::White => 0xF2F2F2,
         Color::Indexed(code) => indexed_color_to_rgb(code),
     }
 }
@@ -165,9 +169,10 @@ mod tests {
     #[test]
     fn test_ansi_to_rgb() {
         // Test some basic ANSI colors
-        assert_eq!(ansi_to_rgb(Color::LightRed), Some((255, 0, 0)));
-        assert_eq!(ansi_to_rgb(Color::Green), Some((0, 128, 0)));
-        assert_eq!(ansi_to_rgb(Color::LightBlue), Some((0, 0, 255)));
+        assert_eq!(ansi_to_rgb(Color::LightRed), Some((231, 72, 86)));
+        assert_eq!(ansi_to_rgb(Color::Green), Some((19, 161, 14)));
+        assert_eq!(ansi_to_rgb(Color::Cyan), Some((58, 150, 221)));
+        assert_eq!(ansi_to_rgb(Color::LightBlue), Some((59, 120, 255)));
 
         // Reset should return None
         assert_eq!(ansi_to_rgb(Color::Reset), None);

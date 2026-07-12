@@ -16,7 +16,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-// Keep the v0.3.1 terminal palette as the visual contract for every backend.
+// Keep the established native terminal palette as the visual contract for every backend.
 // Web-specific presentation belongs to the surrounding page, not the TUI.
 const PRIMARY: Color = Color::Green;
 const SECONDARY: Color = Color::Cyan;
@@ -1279,18 +1279,12 @@ fn render_traffic(frame: &mut Frame, area: Rect, model: &AppModel) {
                     .style(Style::default().fg(Color::Green)),
                 Cell::from(tr(model.language, "上传速率", "Upload"))
                     .style(Style::default().fg(Color::Yellow)),
-                Cell::from(vec![
-                    Line::from(tr(model.language, "本次会话", "Session")),
-                    Line::from(tr(model.language, "收 / 发", "Rx / Tx")),
-                ])
-                .style(Style::default().fg(MUTED)),
-                Cell::from(vec![
-                    Line::from(tr(model.language, "开机累计", "Since Boot")),
-                    Line::from(tr(model.language, "收 / 发", "Rx / Tx")),
-                ])
-                .style(Style::default().fg(MUTED)),
+                Cell::from(tr(model.language, "本次会话", "Session"))
+                    .style(Style::default().fg(MUTED)),
+                Cell::from(tr(model.language, "开机累计", "Since Boot"))
+                    .style(Style::default().fg(MUTED)),
             ])
-            .height(2)
+            .height(1)
             .bottom_margin(1),
         )
         .block(Block::bordered().title(tr(
@@ -1979,7 +1973,7 @@ fn render_lan_speed(area: Rect, frame: &mut Frame, model: &AppModel) {
         frame.render_widget(
             Paragraph::new(format!(
                 "{phase} | {}",
-                tr(model.language, "Space 停止", "Space to stop")
+                tr(model.language, "空格 停止", "Space to stop")
             ))
             .style(Style::default().fg(Color::Green)),
             status_area,
@@ -2007,12 +2001,12 @@ fn render_diagnostic_status(
             format!(
                 "{} | {}",
                 tr(language, "运行中", "Running"),
-                tr(language, "Space 停止", "Space to stop")
+                tr(language, "空格 停止", "Space to stop")
             ),
             Color::Green,
         ),
         TaskStatus::Done => (
-            tr(language, "完成 | Space 重新开始", "Done | Space to restart").into(),
+            tr(language, "完成 | 空格 重新开始", "Done | Space to restart").into(),
             SECONDARY,
         ),
         TaskStatus::Failed(error) => (
@@ -2023,7 +2017,7 @@ fn render_diagnostic_status(
             format!(
                 "{} | {}",
                 tr(language, "已停止", "Stopped"),
-                tr(language, "Space 开始", "Space to start")
+                tr(language, "空格 开始", "Space to start")
             ),
             Color::Red,
         ),
@@ -2958,7 +2952,7 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
 
     #[test]
-    fn scanner_estimate_matches_v031_usable_host_count() {
+    fn scanner_estimate_matches_established_usable_host_count() {
         assert_eq!(scan_address_count("192.168.1.0/24"), Some(254));
         assert_eq!(scan_address_count("192.168.1.0/31"), Some(2));
         assert_eq!(scan_address_count("192.168.1.1/32"), Some(1));
@@ -3100,6 +3094,8 @@ mod tests {
                 assert!(text.contains("↑ 256.0 KiB/s"), "{text}");
                 assert!(text.contains("↓ 700.0 MiB"), "{text}");
                 assert!(text.contains("↑ 1.5 GiB"), "{text}");
+                assert!(!text.contains("收 / 发"), "{text}");
+                assert!(!text.contains("Rx / Tx"), "{text}");
             }
         }
     }
@@ -3270,7 +3266,7 @@ mod tests {
     }
 
     #[test]
-    fn lan_speed_preserves_v031_dynamic_config_and_result_layout() {
+    fn lan_speed_preserves_dynamic_config_and_result_layout() {
         for (width, height) in [(80, 24), (120, 36), (160, 48)] {
             for language in [Language::En, Language::Zh] {
                 for mode in [LanSpeedMode::Server, LanSpeedMode::Client] {
@@ -3378,6 +3374,10 @@ mod tests {
                 }),
                 "{text}"
             );
+            if language == Language::Zh {
+                assert!(text.contains("空格 停止"), "{text}");
+                assert!(!text.contains("Space 停止"), "{text}");
+            }
             assert_eq!(
                 ui.hit_test(89, 5),
                 Some(Action::SelectDiagnosticField(0, 1))
@@ -3558,7 +3558,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_preserve_v031_list_reset_feedback_and_mouse_rows() {
+    fn settings_preserve_list_reset_feedback_and_mouse_rows() {
         for (width, height) in [(80, 24), (120, 36), (160, 48)] {
             for language in [Language::En, Language::Zh] {
                 let backend = TestBackend::new(width, height);
@@ -3589,7 +3589,7 @@ mod tests {
     }
 
     #[test]
-    fn native_footer_and_help_show_configured_v031_keybindings() {
+    fn native_footer_and_help_show_configured_keybindings() {
         let backend = TestBackend::new(120, 36);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut model = AppModel::default();

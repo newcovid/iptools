@@ -13,9 +13,11 @@ crate-type = ["cdylib", "rlib"]
 iptools-core.workspace = true
 iptools-demo.workspace = true
 iptools-ui.workspace = true
+serde_json.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 console_error_panic_hook = "0.1.7"
+js-sys = "0.3"
 ratzilla = "=0.3.1"
 wasm-bindgen = "0.2"
 web-sys = { version = "0.3", features = [
@@ -23,6 +25,7 @@ web-sys = { version = "0.3", features = [
     "Element",
     "Event",
     "EventTarget",
+    "History",
     "HtmlElement",
     "KeyboardEvent",
     "Location",

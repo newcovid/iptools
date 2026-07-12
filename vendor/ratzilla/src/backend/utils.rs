@@ -53,7 +53,7 @@ pub(crate) fn get_cell_style_as_css(cell: &Cell) -> String {
 
     let fg_style = match fg {
         Some(color) => format!("color: rgb({}, {}, {});", color.0, color.1, color.2),
-        None => "color: rgb(255, 255, 255);".to_string(),
+        None => "color: rgb(204, 204, 204);".to_string(),
     };
 
     let bg_style = match bg {
@@ -65,7 +65,7 @@ pub(crate) fn get_cell_style_as_css(cell: &Cell) -> String {
             // If the cell needs to be reversed but we don't have a valid background,
             // then default the background to white.
             if cell.modifier.contains(Modifier::REVERSED) {
-                "background-color: rgb(255, 255, 255);".to_string()
+                "background-color: rgb(204, 204, 204);".to_string()
             } else {
                 "background-color: transparent;".to_string()
             }

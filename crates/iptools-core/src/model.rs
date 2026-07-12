@@ -3016,7 +3016,7 @@ mod tests {
     }
 
     #[test]
-    fn scanner_restores_v031_edit_mru_completion_and_panel_click_semantics() {
+    fn scanner_restores_edit_mru_completion_and_panel_click_semantics() {
         let mut config = crate::ConfigData::default();
         config.session.scanner.cidr = "10.0.0.0/24".into();
         config.session.history.cidrs = vec!["192.168.50.0/24".into(), "10.0.0.0/24".into()];
@@ -3459,7 +3459,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_model_loads_preferences_from_v031_config_data() {
+    fn shared_model_loads_preferences_from_legacy_config_data() {
         let config = crate::ConfigData {
             language: Language::Zh,
             scan_concurrency: 120,
@@ -3489,7 +3489,7 @@ mod tests {
     }
 
     #[test]
-    fn adapter_edit_preserves_v031_defaults_and_validates_static_fields() {
+    fn adapter_edit_preserves_defaults_and_validates_static_fields() {
         let mut app = adapter_app();
         assert!(
             app.update(Input(InputEvent::Action(Action::Edit)))
@@ -3517,7 +3517,7 @@ mod tests {
     }
 
     #[test]
-    fn adapter_enter_and_space_restore_unambiguous_v031_edit_entry() {
+    fn adapter_enter_and_space_keep_unambiguous_edit_entry() {
         for action in [Action::Confirm, Action::Toggle] {
             let mut app = adapter_app();
             app.update(Input(InputEvent::Action(action)));
@@ -3663,7 +3663,7 @@ mod tests {
     }
 
     #[test]
-    fn adapter_edit_keeps_v031_global_shortcuts_available() {
+    fn adapter_edit_keeps_global_shortcuts_available() {
         let mut app = adapter_app();
         app.update(Input(InputEvent::Action(Action::Edit)));
         assert!(app.adapters.edit.is_some());
@@ -3682,7 +3682,7 @@ mod tests {
     }
 
     #[test]
-    fn diagnostics_focus_and_ping_config_match_v031_interaction() {
+    fn diagnostics_focus_and_ping_config_keep_established_interaction() {
         let mut app = AppModel {
             page: Page::Diagnostics,
             ..AppModel::default()
@@ -3824,7 +3824,7 @@ mod tests {
     }
 
     #[test]
-    fn link_quality_restores_per_adapter_v031_params_and_validates_request() {
+    fn link_quality_restores_per_adapter_params_and_validates_request() {
         let mut app = AppModel::default();
         let mut config = crate::ConfigData::default();
         config.session.link_quality.adapters.insert(
@@ -4054,7 +4054,7 @@ mod tests {
     }
 
     #[test]
-    fn port_scan_and_lan_speed_keep_v031_raw_config_and_validate_at_execution() {
+    fn port_scan_and_lan_speed_keep_raw_config_and_validate_at_execution() {
         let mut config = crate::ConfigData::default();
         config.session.port_scan = crate::PortScanPersist {
             target: "scan.example".into(),

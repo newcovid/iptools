@@ -56,7 +56,7 @@ button:hover, a:hover, select:hover { border-color: #5ee8ff; }
   overflow: hidden;
   border: 1px solid #29465c;
   border-radius: .55rem;
-  background: #000;
+  background: #0c0c0c;
   box-shadow: 0 1.4rem 3rem #0008;
   outline: none;
 }

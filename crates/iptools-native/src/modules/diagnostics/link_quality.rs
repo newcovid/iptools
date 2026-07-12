@@ -11,7 +11,7 @@ use crate::utils::{
     wlan::{self, WirelessInfo},
 };
 
-/// Bridge the v0.3.1 source-bound ICMP and radio sampling algorithm into the
+/// Bridge the established source-bound ICMP and radio sampling algorithm into the
 /// shared runtime. The legacy page remains available until the native cutover,
 /// but both paths use the same platform probes.
 pub(crate) async fn run_shared(
@@ -316,7 +316,7 @@ mod shared_tests {
     use super::*;
 
     #[test]
-    fn coalesced_sample_keeps_v031_latency_loss_radio_and_link_statistics() {
+    fn coalesced_sample_keeps_latency_loss_radio_and_link_statistics() {
         let mut statistics = SharedLinkStatistics::default();
         statistics.observe(1, Some(20), Some(-55), Some(90), None);
         statistics.observe(2, None, Some(-57), Some(86), None);

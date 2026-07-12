@@ -74,52 +74,8 @@ fn convert_key(event: CrosstermKeyEvent) -> Option<KeyEvent> {
 }
 
 pub(crate) fn persist_effect(config: &mut Config, effect: &Effect) -> bool {
-    match effect {
-        Effect::PersistPreferences(preferences) => {
-            config.language = preferences.language;
-            config.theme = preferences.theme;
-            config.scan_concurrency = preferences.scan_concurrency;
-        }
-        Effect::PersistSession(update) => match update {
-            iptools_core::SessionUpdate::Scanner(value) => config.session.scanner = value.clone(),
-            iptools_core::SessionUpdate::CidrHistory(value) => {
-                config.session.history.cidrs = value.clone();
-            }
-            iptools_core::SessionUpdate::Ping(value) => config.session.ping = value.clone(),
-            iptools_core::SessionUpdate::Trace(value) => config.session.trace = value.clone(),
-            iptools_core::SessionUpdate::PortScan(value) => {
-                config.session.port_scan = value.clone();
-            }
-            iptools_core::SessionUpdate::LanSpeed(value) => {
-                config.session.lan_speed = value.clone();
-            }
-            iptools_core::SessionUpdate::LinkQuality(value) => {
-                config.session.link_quality = value.clone();
-            }
-            iptools_core::SessionUpdate::TargetHistory(value) => {
-                config.session.history.targets = value.clone();
-            }
-            iptools_core::SessionUpdate::Ui(value) => config.session.ui = value.clone(),
-            iptools_core::SessionUpdate::Reset(ui) => {
-                config.session = iptools_core::SessionState {
-                    ui: ui.clone(),
-                    ..iptools_core::SessionState::default()
-                };
-            }
-        },
-        Effect::PersistAdapterEdit {
-            guid,
-            params,
-            history,
-        } => {
-            config
-                .session
-                .adapter_edit
-                .adapters
-                .insert(guid.clone(), params.clone());
-            config.session.history.adapter = history.clone();
-        }
-        _ => return false,
+    if !config.apply_persistence_effect(effect) {
+        return false;
     }
     config.save();
     true

@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 use crate::utils::net;
 use proto::{Direction, Flow, LanEvent, Proto, TestSpec, run_client, run_server};
 
-/// Bridge the v0.3.1 LAN protocol into the shared runtime. All protocol
+/// Bridge the established LAN protocol into the shared runtime. All protocol
 /// workers remain owned by this task and are joined before it returns.
 pub(crate) async fn run_shared(
     job: iptools_core::JobId,

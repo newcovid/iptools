@@ -1,6 +1,6 @@
 //! Offline TCP service-name lookup.
 //!
-//! Friendly names preserve the v0.3.1 display for common services. All other
+//! Friendly names preserve the established display for common services. All other
 //! assigned ports fall back to the bundled IANA Service Name registry from
 //! `port-desc`; no network request or banner probe is performed during scans.
 

@@ -14,6 +14,7 @@ const browser = await browserType.launch(launchOptions);
 
 try {
   const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+  await isolateStorage(page);
   const pageErrors = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
 
@@ -28,10 +29,10 @@ try {
     /\[Ctrl\+C\].*(退出|Quit)/,
     "DOM terminal size must keep the bottom footer inside the visible grid",
   );
-  assert.match(await page.locator(".demo-badge").textContent(), /v0\.4 PREVIEW.*SIMULATED DATA/);
+  assert.match(await page.locator(".demo-badge").textContent(), /v0\.4\.0.*SIMULATED DATA/);
   assert.ok(
     (await page.locator(".demo-badge").boundingBox())?.height <= 24,
-    "Preview badge should remain on one line",
+    "Version badge should remain on one line",
   );
   await page.locator("#terminal").focus();
   assert.equal(await page.evaluate(() => document.activeElement?.id), "terminal");
@@ -39,6 +40,26 @@ try {
     await page.evaluate(() => document.fonts.check('16px "Maple Mono CN iptools"')),
     true,
     "Bundled CJK terminal font should be loaded",
+  );
+  assert.equal(
+    await page.locator("#terminal_ratzilla_grid span").evaluateAll((elements) =>
+      elements.some((element) => getComputedStyle(element).color === "rgb(19, 161, 14)"),
+    ),
+    true,
+    "Classic Web green should match the native Windows Terminal palette",
+  );
+  const firstClock = (await page.locator("#terminal").textContent()).match(
+    /20\d\d-\d\d-\d\d \d\d:\d\d:\d\d/,
+  )?.[0];
+  assert.ok(firstClock, "Dashboard should render a local clock");
+  await page.waitForFunction(
+    (previous) => {
+      const current = document
+        .getElementById("terminal")
+        ?.textContent?.match(/20\d\d-\d\d-\d\d \d\d:\d\d:\d\d/)?.[0];
+      return current && current !== previous;
+    },
+    firstClock,
   );
   await page.screenshot({
     path: "../../target/playwright-web-demo-font-fixed.png",
@@ -64,7 +85,7 @@ try {
   );
   await page.waitForFunction(() => {
     const text = document.getElementById("terminal")?.textContent ?? "";
-    return text.includes("198.51.100.27") && text.includes("公网信息");
+    return text.includes("198.51.100.27") && text.includes("公网连接信息");
   });
 
   const before = hash(await page.locator("#terminal").screenshot());
@@ -75,7 +96,7 @@ try {
   await page.keyboard.press("r");
   await page.waitForFunction(() => {
     const text = document.getElementById("terminal")?.textContent ?? "";
-    return text.includes("192.168.50.37") && text.includes("适配器详情");
+    return text.includes("192.168.50.37") && text.includes("详细信息");
   });
   await page.waitForTimeout(250);
   await page.screenshot({
@@ -111,7 +132,7 @@ try {
   await page.keyboard.press("Enter");
   await page.waitForFunction(() => {
     const text = document.getElementById("terminal")?.textContent ?? "";
-    return text.includes("10.20.30.40") && text.includes("适配器详情");
+    return text.includes("10.20.30.40") && text.includes("详细信息");
   });
 
   await page.keyboard.press("Tab");
@@ -142,6 +163,12 @@ try {
       Number(document.getElementById("terminal")?.dataset.renderedInputGeneration) > generation,
     wheelGeneration,
   );
+  await page.getByRole("button", { name: "Reset" }).click();
+  await page.waitForFunction(() => {
+    const text = document.getElementById("terminal")?.textContent ?? "";
+    return text.includes("field-laptop.demo") && text.includes("198.51.100.27");
+  });
+  assert.equal(await page.locator("#scenario-select").inputValue(), "wifi-degraded");
 
   for (const zoom of ["80%", "100%", "125%", "150%"]) {
     await page.evaluate((value) => {
@@ -176,7 +203,7 @@ try {
       await page.evaluate(async () => {
         await navigator.serviceWorker.ready;
         return (await caches.keys()).some((name) =>
-          name.startsWith("iptools-web-v0.4-alpha.1-"),
+          name.startsWith("iptools-web-v0.4.0-"),
         );
       }),
       true,
@@ -190,6 +217,7 @@ try {
   }
 
   const canvasPage = await browser.newPage({ viewport: { width: 1200, height: 800 } });
+  await isolateStorage(canvasPage);
   await canvasPage.goto(`${baseURL}?renderer=canvas&lang=en&scenario=home-network`, {
     waitUntil: "domcontentloaded",
   });
@@ -209,6 +237,7 @@ try {
   await canvasPage.close();
 
   const chineseCanvas = await browser.newPage({ viewport: { width: 1200, height: 800 } });
+  await isolateStorage(chineseCanvas);
   const chineseCanvasErrors = [];
   chineseCanvas.on("pageerror", (error) => chineseCanvasErrors.push(error.message));
   await chineseCanvas.goto(`${baseURL}?renderer=canvas&lang=zh&scenario=multi-adapter`, {
@@ -221,9 +250,41 @@ try {
     true,
   );
   assert.deepEqual(chineseCanvasErrors, []);
+  await chineseCanvas.goto(`${baseURL}?lang=zh&scenario=multi-adapter`, {
+    waitUntil: "domcontentloaded",
+  });
+  await chineseCanvas.waitForSelector("#terminal canvas");
+  assert.equal(
+    await chineseCanvas.evaluate(() => localStorage.getItem("iptools.web.v1.renderer")),
+    "canvas",
+    "Stored renderer should apply when no renderer URL parameter is present",
+  );
   await chineseCanvas.close();
 
+  const mousePage = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  await isolateStorage(mousePage);
+  await mousePage.goto(`${baseURL}?scenario=home-network&lang=zh&renderer=dom`, {
+    waitUntil: "domcontentloaded",
+  });
+  await mousePage.waitForSelector("#terminal_ratzilla_grid");
+  await clickTerminalCell(mousePage, 33, 1);
+  await mousePage.waitForFunction(() =>
+    document.getElementById("terminal")?.textContent?.includes("工具列表"),
+  );
+  await clickTerminalCell(mousePage, 2, 6);
+  await mousePage.waitForFunction(() => {
+    const text = document.getElementById("terminal")?.textContent ?? "";
+    return text.includes("端口扫描") && text.includes("起始端口");
+  });
+  assert.match(
+    await mousePage.locator("#terminal").textContent(),
+    /端口扫描.*起始端口/s,
+    "A single mouse press should switch and focus the clicked diagnostic tool",
+  );
+  await mousePage.close();
+
   const settingsPage = await browser.newPage({ viewport: { width: 1200, height: 800 } });
+  await isolateStorage(settingsPage);
   await settingsPage.goto(`${baseURL}?renderer=dom&lang=en`, {
     waitUntil: "domcontentloaded",
   });
@@ -251,6 +312,22 @@ try {
   );
   assert.match(await settingsPage.locator("#terminal").textContent(), /Scan concurrency\s*:\s*60/);
   await settingsPage.keyboard.press("ArrowDown");
+  await settingsPage.keyboard.press("ArrowRight");
+  await settingsPage.waitForFunction(() => {
+    const saved = JSON.parse(localStorage.getItem("iptools.web.v1.config") ?? "{}");
+    return saved.theme === "nord";
+  });
+  await settingsPage.waitForFunction(() =>
+    [...document.querySelectorAll("#terminal_ratzilla_grid span")].some((element) =>
+      /^rgba?\(46, 52, 64(?:, 1)?\)$/.test(getComputedStyle(element).backgroundColor),
+    ),
+  );
+  await settingsPage.reload({ waitUntil: "domcontentloaded" });
+  await settingsPage.waitForSelector("#terminal_ratzilla_grid");
+  assert.match(await settingsPage.locator("#terminal").textContent(), /Color theme\s*:\s*Nord/);
+  for (let index = 0; index < 3; index += 1) {
+    await settingsPage.keyboard.press("ArrowDown");
+  }
   await settingsPage.keyboard.press("Enter");
   await settingsPage.waitForFunction(() =>
     document.getElementById("terminal")?.textContent?.includes("Cleared"),
@@ -258,6 +335,7 @@ try {
   await settingsPage.close();
 
   const trafficPage = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  await isolateStorage(trafficPage);
   await trafficPage.goto(`${baseURL}?scenario=multi-adapter&lang=en&renderer=dom`, {
     waitUntil: "domcontentloaded",
   });
@@ -278,7 +356,7 @@ try {
     );
   }
   await trafficPage.waitForFunction(() =>
-    document.getElementById("terminal")?.textContent?.includes("Live Traffic"),
+    document.getElementById("terminal")?.textContent?.includes("Real-time Monitor"),
   );
   const beforeTrafficRefresh = Number(
     await trafficPage.locator("#terminal").getAttribute("data-rendered-state-revision"),
@@ -293,6 +371,7 @@ try {
   await trafficPage.close();
 
   const diagnosticsPage = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  await isolateStorage(diagnosticsPage);
   await diagnosticsPage.goto(`${baseURL}?scenario=home-network&lang=zh&renderer=dom`, {
     waitUntil: "domcontentloaded",
   });
@@ -302,7 +381,7 @@ try {
     await diagnosticsPage.keyboard.press("Tab");
   }
   await diagnosticsPage.waitForFunction(() =>
-    document.getElementById("terminal")?.textContent?.includes("按 Enter 进入诊断工具"),
+    document.getElementById("terminal")?.textContent?.includes("工具列表"),
   );
   await diagnosticsPage.keyboard.press("Enter");
   await diagnosticsPage.keyboard.press("Tab");
@@ -320,7 +399,9 @@ try {
   await diagnosticsPage.keyboard.press("Tab");
   await diagnosticsPage.keyboard.press("Space");
   await diagnosticsPage.waitForFunction(() =>
-    /reply 1: \d+ ms/.test(document.getElementById("terminal")?.textContent ?? ""),
+    /回复 seq=1 bytes=\d+ ttl=\d+ time=\d+ms/.test(
+      document.getElementById("terminal")?.textContent ?? "",
+    ),
   );
   await diagnosticsPage.keyboard.press("Space");
   await diagnosticsPage.keyboard.press("Tab");
@@ -335,7 +416,28 @@ try {
     beforeIntervalAdjust,
   );
   await diagnosticsPage.keyboard.press("ArrowUp");
+  await diagnosticsPage.evaluate(() => {
+    window.__iptoolsCtrlRPrevented = false;
+    document.addEventListener(
+      "keydown",
+      (event) => {
+        if (event.ctrlKey && event.key.toLowerCase() === "r") {
+          window.__iptoolsCtrlRPrevented = event.defaultPrevented;
+        }
+      },
+    );
+  });
   await diagnosticsPage.keyboard.press("Control+r");
+  await diagnosticsPage.waitForFunction(() =>
+    document.getElementById("terminal")?.textContent?.includes("目标历史"),
+  );
+  assert.equal(
+    await diagnosticsPage.evaluate(() => window.__iptoolsCtrlRPrevented),
+    true,
+    "Ctrl+R must open history without allowing the browser reload action",
+  );
+  await diagnosticsPage.keyboard.press("Escape");
+  await diagnosticsPage.getByRole("button", { name: "Ctrl+R" }).click();
   await diagnosticsPage.waitForFunction(() =>
     document.getElementById("terminal")?.textContent?.includes("目标历史"),
   );
@@ -353,7 +455,7 @@ try {
     path: "../../target/playwright-web-ping-trace-zh.png",
     fullPage: false,
   });
-  // Port Scan keeps the v0.3.1 stats/table/progress/status layout while the
+  // Port Scan keeps its tool-specific stats/table/progress/status layout while the
   // deterministic Web runtime supplies typed progress and open-port events.
   await diagnosticsPage.keyboard.press("Shift+Tab");
   await diagnosticsPage.keyboard.press("ArrowDown");
@@ -398,7 +500,7 @@ try {
     path: "../../target/playwright-web-public-link-zh.png",
     fullPage: false,
   });
-  // LAN Speed exercises its v0.3.1 dynamic client configuration (mode and
+  // LAN Speed exercises its dynamic client configuration (mode and
   // peer editing) before starting the same reducer/render path as native demo.
   await diagnosticsPage.keyboard.press("Shift+Tab");
   await diagnosticsPage.keyboard.press("ArrowDown");
@@ -424,9 +526,17 @@ try {
     path: "../../target/playwright-web-lan-speed-zh.png",
     fullPage: false,
   });
+  assert.ok(
+    await diagnosticsPage.evaluate(() => {
+      const saved = JSON.parse(localStorage.getItem("iptools.web.v1.config") ?? "{}");
+      return Array.isArray(saved.session?.history?.targets) && saved.session.history.targets.length > 0;
+    }),
+    "Diagnostic target history should persist through the same shared session update",
+  );
   await diagnosticsPage.close();
 
   const narrowPage = await browser.newPage({ viewport: { width: 390, height: 844 } });
+  await isolateStorage(narrowPage);
   await narrowPage.goto(`${baseURL}?lang=zh`, { waitUntil: "domcontentloaded" });
   assert.notEqual(
     await narrowPage.locator(".rotate").evaluate((element) => getComputedStyle(element).display),
@@ -466,6 +576,24 @@ async function waitForStableTerminal(page) {
     await page.waitForTimeout(50);
   }
   assert.fail("Terminal did not reach a stable rendered frame");
+}
+
+async function isolateStorage(page) {
+  await page.addInitScript(() => {
+    if (sessionStorage.getItem("iptools.e2e.initialized")) return;
+    localStorage.clear();
+    sessionStorage.setItem("iptools.e2e.initialized", "1");
+  });
+}
+
+async function clickTerminalCell(page, column, row) {
+  const terminal = await page.locator("#terminal_ratzilla_grid").boundingBox();
+  const cell = await page.locator("#terminal_ratzilla_grid span").first().boundingBox();
+  assert.ok(terminal && cell, "DOM terminal cell geometry should be measurable");
+  await page.mouse.click(
+    terminal.x + cell.width * (column + 0.5),
+    terminal.y + cell.height * (row + 0.5),
+  );
 }
 
 async function measureInputLatencies(page, iterations) {

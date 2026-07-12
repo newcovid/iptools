@@ -4,16 +4,15 @@
 
 ## 开发环境
 
-- 稳定版 Rust 工具链；
+- Rust 1.97.0（仓库已固定工具链）；
 - Windows 10/11，或常见 x86_64 Linux 发行版；
-- Linux 构建需要 `pkg-config` 和 OpenSSL 开发包；
 - 测试原始套接字功能时需要管理员权限、root 或 `CAP_NET_RAW`。
 
 ```bash
 git clone https://github.com/newcovid/iptools.git
 cd iptools
 cargo build
-cargo test --all
+cargo test --workspace
 ```
 
 ## 提交流程
@@ -26,16 +25,17 @@ cargo test --all
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 cargo build --release
+cargo check -p iptools-web --target wasm32-unknown-unknown
 ```
 
 ## 代码约定
 
 - 遵循 `rustfmt` 和 Clippy；不要用无说明的 `allow` 掩盖警告。
 - 注释解释约束、原因和平台差异，不复述代码，也不保留临时调试记录或阶段性计划。
-- UI 线程不得执行阻塞操作；耗时任务使用 Tokio 后台任务和消息通道。
+- reducer 和渲染函数不得执行 I/O；耗时任务由平台 Runtime 管理。
 - 新增按键动作时同步更新动作枚举、名称映射、默认绑定和帮助文案。
 - 新增界面文案时同时更新中英文语言包，并运行全部测试。
 - 网络配置写入必须保留输入校验和二次确认。

@@ -342,7 +342,7 @@ impl CanvasBackend {
                     self.canvas.context.clip();
 
                     last_color = None; // reset last color to avoid clipping
-                    let color = get_canvas_color(color, Color::White);
+                    let color = get_canvas_color(color, Color::Gray);
                     self.canvas.context.set_fill_style_str(&color);
                 } else if last_color != Some(color) {
                     self.canvas.context.restore();
@@ -350,7 +350,7 @@ impl CanvasBackend {
 
                     last_color = Some(color);
 
-                    let color = get_canvas_color(color, Color::White);
+                    let color = get_canvas_color(color, Color::Gray);
                     self.canvas.context.set_fill_style_str(&color);
                 }
 

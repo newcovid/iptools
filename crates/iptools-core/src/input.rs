@@ -7,7 +7,7 @@ pub enum InputEvent {
     /// A platform key together with the user-configured semantic binding.
     ///
     /// Native needs both values: text editors consume the physical key while
-    /// navigation honors the v0.3.1 configurable key map. Web and deterministic
+    /// navigation honors the configurable native key map. Web and deterministic
     /// demo adapters can keep using `Key` and the built-in bindings.
     MappedKey {
         key: KeyEvent,

@@ -1,4 +1,4 @@
-const CACHE = "iptools-web-v0.4-alpha.1-__IPTOOLS_BUILD_HASH__";
+const CACHE = "iptools-web-v0.4.0-__IPTOOLS_BUILD_HASH__";
 const GENERATED_ASSETS = /*__IPTOOLS_ASSETS__*/ [];
 const SHELL = [
   "./",

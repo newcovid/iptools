@@ -17,7 +17,7 @@ const TEST_ENDPOINTS: &[(&str, &str)] = &[
 const MAX_DURATION_MS: u64 = 15_000;
 const CONNECT_TIMEOUT_SECS: u64 = 6;
 
-/// Bridge the v0.3.1 endpoint selection and streaming algorithm into the
+/// Bridge the established endpoint selection and streaming algorithm into the
 /// shared runtime protocol without exposing real requests to the Web runtime.
 pub(crate) async fn run_shared(
     job: iptools_core::JobId,

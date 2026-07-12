@@ -19,6 +19,9 @@ an upstream release contains equivalent behavior:
 4. `DomBackend::size` reports the measured terminal parent grid rather than the
    entire browser viewport. The old mismatch let Ratatui place logs, status and
    the footer in rows for which the DOM backend had created no cells.
+5. Ratatui's named ANSI colors use the modern Windows Terminal Campbell palette
+   instead of legacy HTML colors. Explicit RGB theme colors remain unchanged;
+   the classic Web demo therefore follows the native Windows presentation.
 
 `cargo test --manifest-path vendor/ratzilla/Cargo.toml --lib` covers the pure
 width, resize-index and continuation-boundary decisions. Browser behavior,

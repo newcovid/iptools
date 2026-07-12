@@ -1,8 +1,8 @@
 //! Serializable configuration data shared by every runtime.
 //!
 //! Paths, platform language detection and file I/O intentionally stay in the
-//! native crate. These types preserve the v0.3.1 JSON field names and Serde
-//! defaults so older configuration files remain readable.
+//! native crate. These types preserve the published JSON field names and Serde
+//! defaults so existing configuration files remain readable.
 
 use std::collections::BTreeMap;
 
@@ -65,6 +65,62 @@ impl Default for ConfigData {
             session: SessionState::default(),
             public_ip: PublicIpConfig::default(),
         }
+    }
+}
+
+impl ConfigData {
+    /// Apply a persistence-only effect to the shared configuration schema.
+    ///
+    /// Native and Web stores call this same pure function, then persist the
+    /// resulting value using their platform-specific storage backend.
+    pub fn apply_persistence_effect(&mut self, effect: &crate::Effect) -> bool {
+        match effect {
+            crate::Effect::PersistPreferences(preferences) => {
+                self.language = preferences.language;
+                self.theme = preferences.theme;
+                self.scan_concurrency = preferences.scan_concurrency;
+            }
+            crate::Effect::PersistSession(update) => match update {
+                crate::SessionUpdate::Scanner(value) => self.session.scanner = value.clone(),
+                crate::SessionUpdate::CidrHistory(value) => {
+                    self.session.history.cidrs = value.clone();
+                }
+                crate::SessionUpdate::Ping(value) => self.session.ping = value.clone(),
+                crate::SessionUpdate::Trace(value) => self.session.trace = value.clone(),
+                crate::SessionUpdate::PortScan(value) => {
+                    self.session.port_scan = value.clone();
+                }
+                crate::SessionUpdate::LanSpeed(value) => {
+                    self.session.lan_speed = value.clone();
+                }
+                crate::SessionUpdate::LinkQuality(value) => {
+                    self.session.link_quality = value.clone();
+                }
+                crate::SessionUpdate::TargetHistory(value) => {
+                    self.session.history.targets = value.clone();
+                }
+                crate::SessionUpdate::Ui(value) => self.session.ui = value.clone(),
+                crate::SessionUpdate::Reset(ui) => {
+                    self.session = SessionState {
+                        ui: ui.clone(),
+                        ..SessionState::default()
+                    };
+                }
+            },
+            crate::Effect::PersistAdapterEdit {
+                guid,
+                params,
+                history,
+            } => {
+                self.session
+                    .adapter_edit
+                    .adapters
+                    .insert(guid.clone(), params.clone());
+                self.session.history.adapter = history.clone();
+            }
+            _ => return false,
+        }
+        true
     }
 }
 
@@ -255,7 +311,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn v031_minimal_config_keeps_defaults() {
+    fn minimal_legacy_config_keeps_defaults() {
         let config: ConfigData =
             serde_json::from_str(r#"{"language":"En","scan_concurrency":50}"#).unwrap();
         assert_eq!(config.language, Language::En);
@@ -341,7 +397,7 @@ mod tests {
     }
 
     #[test]
-    fn theme_is_optional_for_v031_and_roundtrips_as_a_stable_name() {
+    fn theme_is_optional_for_legacy_configs_and_roundtrips_as_a_stable_name() {
         let config: ConfigData = serde_json::from_str(
             r#"{"language":"Zh","theme":"catppuccin-mocha","scan_concurrency":50}"#,
         )
@@ -349,5 +405,38 @@ mod tests {
         assert_eq!(config.theme, crate::ThemeId::CatppuccinMocha);
         let json = serde_json::to_string(&config).unwrap();
         assert!(json.contains("\"theme\":\"catppuccin-mocha\""));
+    }
+
+    #[test]
+    fn persistence_effects_update_the_same_schema_for_every_store() {
+        let mut config = ConfigData::default();
+        assert!(
+            config.apply_persistence_effect(&crate::Effect::PersistPreferences(
+                crate::Preferences {
+                    language: Language::Zh,
+                    theme: crate::ThemeId::Nord,
+                    scan_concurrency: 80,
+                },
+            ))
+        );
+        assert_eq!(config.language, Language::Zh);
+        assert_eq!(config.theme, crate::ThemeId::Nord);
+        assert_eq!(config.scan_concurrency, 80);
+
+        assert!(
+            config.apply_persistence_effect(&crate::Effect::PersistSession(
+                crate::SessionUpdate::TargetHistory(vec!["1.1.1.1".into()]),
+            ))
+        );
+        assert_eq!(config.session.history.targets, ["1.1.1.1"]);
+
+        assert!(
+            !config.apply_persistence_effect(&crate::Effect::RefreshTraffic {
+                job: crate::JobId {
+                    tool: crate::ToolKind::Traffic,
+                    generation: 1,
+                },
+            })
+        );
     }
 }
