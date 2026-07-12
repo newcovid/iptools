@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{AdapterConfig, AdapterInfo, DiagnosticTool, ScanHost, TrafficRow};
+use crate::{
+    AdapterConfig, AdapterInfo, DashboardSnapshot, DiagnosticTool, PublicIpConfig, ScanHost,
+    TrafficRow,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Preferences {
@@ -16,6 +19,7 @@ pub struct JobId {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ToolKind {
+    Dashboard,
     Scanner,
     Ping,
     Trace,
@@ -23,6 +27,11 @@ pub enum ToolKind {
     PublicSpeed,
     LinkQuality,
     LanSpeed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DashboardRequest {
+    pub public_ip: PublicIpConfig,
 }
 
 impl From<DiagnosticTool> for ToolKind {
@@ -191,7 +200,10 @@ impl Default for LanSpeedRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
     PersistPreferences(Preferences),
-    RefreshDashboard,
+    RefreshDashboard {
+        job: JobId,
+        request: DashboardRequest,
+    },
     RefreshAdapters,
     ApplyAdapterConfig(AdapterConfig),
     StartScan {
@@ -334,11 +346,18 @@ pub struct LanSpeedSummary {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RuntimeEvent {
-    DashboardUpdated {
-        hostname: String,
-        public_ip: String,
-        download_bps: u64,
-        upload_bps: u64,
+    DashboardUpdated(Box<DashboardSnapshot>),
+    DashboardRefreshFinished {
+        job: JobId,
+        snapshot: Box<DashboardSnapshot>,
+    },
+    DashboardRefreshFailed {
+        job: JobId,
+        snapshot: Box<DashboardSnapshot>,
+        error: RuntimeError,
+    },
+    DashboardRefreshCancelled {
+        job: JobId,
     },
     AdaptersUpdated(Vec<AdapterInfo>),
     TrafficUpdated(Vec<TrafficRow>),

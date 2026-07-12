@@ -117,27 +117,111 @@ fn render_dashboard(frame: &mut Frame, area: Rect, model: &AppModel) {
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(area);
-    let local = vec![
-        line("Host", &model.dashboard.hostname),
+    let snapshot = &model.dashboard.snapshot;
+    let mut local = vec![
+        line(tr(model.language, "主机", "Host"), &snapshot.hostname),
         line(
-            "Mode",
+            tr(model.language, "系统", "System"),
+            &format!("{} {}", snapshot.os_name, snapshot.os_version),
+        ),
+        line(
+            tr(model.language, "更新时间", "Updated"),
+            &snapshot.observed_at,
+        ),
+        line(
+            tr(model.language, "模式", "Mode"),
             if model.demo {
-                "Deterministic demo"
+                tr(model.language, "确定性演示", "Deterministic demo")
             } else {
-                "Native"
+                tr(model.language, "原生", "Native")
             },
         ),
-        line("Download", &format_rate(model.dashboard.download_bps)),
-        line("Upload", &format_rate(model.dashboard.upload_bps)),
     ];
+    if let Some(interface) = &snapshot.active_interface {
+        let name = interface.ssid.as_ref().map_or_else(
+            || interface.name.clone(),
+            |ssid| format!("{} (SSID: {ssid})", interface.name),
+        );
+        local.extend([
+            line(tr(model.language, "接口", "Interface"), &name),
+            line(tr(model.language, "本地 IP", "Local IP"), &interface.ipv4),
+            line(
+                tr(model.language, "连接", "Connection"),
+                &format!(
+                    "{} / {}",
+                    if interface.is_physical {
+                        tr(model.language, "物理", "physical")
+                    } else {
+                        tr(model.language, "虚拟", "virtual")
+                    },
+                    if interface.dhcp_enabled {
+                        "DHCP"
+                    } else {
+                        tr(model.language, "静态", "static")
+                    }
+                ),
+            ),
+        ]);
+    }
+    local.extend([
+        line(
+            tr(model.language, "下载", "Download"),
+            &format_rate(snapshot.download_bps),
+        ),
+        line(
+            tr(model.language, "上传", "Upload"),
+            &format_rate(snapshot.upload_bps),
+        ),
+        line(
+            tr(model.language, "总接收", "Received"),
+            &format_bytes(snapshot.total_download),
+        ),
+        line(
+            tr(model.language, "总发送", "Sent"),
+            &format_bytes(snapshot.total_upload),
+        ),
+    ]);
     frame.render_widget(
         Paragraph::new(local)
             .block(Block::bordered().title(tr(model.language, " 本地概览 ", " Local Overview ")))
             .wrap(Wrap { trim: true }),
         cols[0],
     );
-    let public = vec![
-        line("Public IP", &model.dashboard.public_ip),
+    let mut public = vec![
+        line(
+            tr(model.language, "代理", "Proxy"),
+            snapshot
+                .proxy
+                .as_deref()
+                .unwrap_or(tr(model.language, "无", "none")),
+        ),
+        line(
+            tr(model.language, "状态", "Status"),
+            task_label(&model.dashboard.status, model.language),
+        ),
+    ];
+    if let Some(info) = &snapshot.public_info {
+        let location = [&info.city, &info.region, &info.country]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        public.extend([
+            line("Public IP", &info.ip),
+            line(tr(model.language, "位置", "Location"), &location),
+            line("ISP", &info.isp),
+        ]);
+    } else {
+        public.push(line(
+            "Public IP",
+            tr(model.language, "正在获取…", "loading…"),
+        ));
+    }
+    if let Some(error) = &model.dashboard.error {
+        public.push(line(tr(model.language, "错误", "Error"), &error.message));
+    }
+    public.extend([
         Line::from(""),
         Line::from(Span::styled(
             tr(
@@ -147,7 +231,7 @@ fn render_dashboard(frame: &mut Frame, area: Rect, model: &AppModel) {
             ),
             Style::default().fg(Color::Yellow),
         )),
-    ];
+    ]);
     frame.render_widget(
         Paragraph::new(public)
             .block(Block::bordered().title(tr(model.language, " 公网信息 ", " Public Network ")))
@@ -550,6 +634,51 @@ mod tests {
         let text = terminal.backend().to_string();
         assert!(text.contains("DEMO"));
         assert_eq!(ui.hit_test(2, 1), Some(Action::SelectPage(0)));
+    }
+
+    #[test]
+    fn dashboard_states_render_in_both_languages_and_compact_sizes() {
+        for (width, height) in [(80, 24), (120, 36)] {
+            for language in [Language::En, Language::Zh] {
+                for status in [
+                    TaskStatus::Idle,
+                    TaskStatus::Running,
+                    TaskStatus::Done,
+                    TaskStatus::Failed("offline".into()),
+                ] {
+                    let backend = TestBackend::new(width, height);
+                    let mut terminal = Terminal::new(backend).unwrap();
+                    let mut model = AppModel::default();
+                    model.language = language;
+                    model.dashboard.status = status;
+                    model.dashboard.snapshot.hostname = "demo-router".into();
+                    model.dashboard.snapshot.active_interface =
+                        Some(iptools_core::DashboardInterface {
+                            name: "Ethernet".into(),
+                            description: "Physical adapter".into(),
+                            ipv4: "192.168.1.20".into(),
+                            ssid: None,
+                            is_physical: true,
+                            dhcp_enabled: true,
+                        });
+                    model.dashboard.snapshot.public_info = Some(iptools_core::PublicIpInfo {
+                        ip: "203.0.113.10".into(),
+                        city: "杭州".into(),
+                        region: "浙江".into(),
+                        country: "中国".into(),
+                        isp: "Example ISP".into(),
+                    });
+                    let mut ui = UiState::default();
+
+                    terminal
+                        .draw(|frame| render(frame, &model, &mut ui))
+                        .unwrap();
+                    let text = terminal.backend().to_string();
+                    assert!(text.contains("demo-router"));
+                    assert!(text.contains("203.0.113.10"));
+                }
+            }
+        }
     }
 
     #[test]

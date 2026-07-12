@@ -1,11 +1,13 @@
 //! Structured lifecycle management for native background jobs.
 
+mod dashboard;
 mod port_scan;
 mod scanner;
 
 use std::{collections::HashMap, future::Future};
 
 use iptools_core::{Effect, JobId, RuntimeEvent};
+use sysinfo::Networks;
 use tokio::{sync::mpsc, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
@@ -43,6 +45,8 @@ pub struct NativeRuntime {
     cancellations: HashMap<JobId, CancellationToken>,
     event_tx: mpsc::Sender<RuntimeEvent>,
     event_rx: mpsc::Receiver<RuntimeEvent>,
+    dashboard_networks: Networks,
+    dashboard_sample: Option<dashboard::TrafficSample>,
 }
 
 impl Default for NativeRuntime {
@@ -59,6 +63,8 @@ impl NativeRuntime {
             cancellations: HashMap::new(),
             event_tx,
             event_rx,
+            dashboard_networks: Networks::new_with_refreshed_list(),
+            dashboard_sample: None,
         }
     }
 
@@ -68,6 +74,10 @@ impl NativeRuntime {
     /// native handlers have moved out of legacy page objects.
     pub fn dispatch(&mut self, effect: Effect) -> Result<(), RuntimeDispatchError> {
         match effect {
+            Effect::RefreshDashboard { job, request } => {
+                self.spawn_dashboard_refresh(job, request);
+                Ok(())
+            }
             Effect::StartScan { job, request } => {
                 self.spawn_scan(job, request);
                 Ok(())
@@ -187,7 +197,7 @@ impl NativeRuntime {
 fn effect_name(effect: &Effect) -> &'static str {
     match effect {
         Effect::PersistPreferences(_) => "persist-preferences",
-        Effect::RefreshDashboard => "refresh-dashboard",
+        Effect::RefreshDashboard { .. } => "refresh-dashboard",
         Effect::RefreshAdapters => "refresh-adapters",
         Effect::ApplyAdapterConfig(_) => "apply-adapter-config",
         Effect::StartScan { .. } => "start-scan",
