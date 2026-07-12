@@ -1,4 +1,7 @@
-use std::net::{IpAddr, Ipv4Addr};
+use std::{
+    net::{IpAddr, Ipv4Addr},
+    sync::atomic::{AtomicU16, Ordering},
+};
 
 #[derive(Debug, Clone)]
 pub struct InterfaceInfo {
@@ -721,10 +724,17 @@ pub fn has_cap_net_raw() -> bool {
 ///
 /// 三步均 best-effort、各带短超时；任一步拿到「看起来像名字」（非 IP 文本）的结果即返回。
 pub fn resolve_hostname(ip: IpAddr) -> Option<String> {
-    // 1. 反向 DNS：过滤掉「无 PTR 时回填的数字 IP」，否则会出现「名字栏显示 IP」。
+    // 1. 反向 DNS：除了过滤数字 IP，还要求正向解析能回到原 IP（FCrDNS）。
+    // Windows/Winsock 可能把网关等无有效 PTR 的地址错误映射成本机名；不做
+    // forward-confirmation 就会把本机名称贴到其它设备上。
     if let Some(name) = dns_lookup::lookup_addr(&ip)
         .ok()
         .filter(|n| looks_like_hostname(n))
+        .filter(|name| {
+            dns_lookup::lookup_host(name)
+                .ok()
+                .is_some_and(|addresses| forward_lookup_confirms(ip, &addresses))
+        })
     {
         return Some(name);
     }
@@ -747,6 +757,13 @@ fn looks_like_hostname(s: &str) -> bool {
     !s.is_empty() && s.parse::<IpAddr>().is_err()
 }
 
+fn forward_lookup_confirms(expected: IpAddr, addresses: &[IpAddr]) -> bool {
+    addresses.iter().any(|address| match (expected, *address) {
+        (IpAddr::V4(expected), IpAddr::V6(actual)) => actual.to_ipv4_mapped() == Some(expected),
+        _ => *address == expected,
+    })
+}
+
 // -----------------------------------------------------------------------------
 // NetBIOS 节点状态查询（UDP/137）—— 不依赖系统 DNS，直接问设备本身。
 // -----------------------------------------------------------------------------
@@ -756,14 +773,23 @@ fn resolve_netbios(ip: Ipv4Addr) -> Option<String> {
     use std::net::UdpSocket;
     use std::time::Duration;
 
+    static NEXT_TRANSACTION_ID: AtomicU16 = AtomicU16::new(1);
+    let transaction_id = NEXT_TRANSACTION_ID.fetch_add(1, Ordering::Relaxed);
+
     // 节点状态请求报文（固定）：头部 + 问题(查询名 "*" 的首级编码 + Type NBSTAT + Class IN)。
     let mut req: Vec<u8> = vec![
-        0x00, 0x00, // Transaction ID
-        0x00, 0x00, // Flags
-        0x00, 0x01, // Questions = 1
-        0x00, 0x00, // Answer RRs
-        0x00, 0x00, // Authority RRs
-        0x00, 0x00, // Additional RRs
+        (transaction_id >> 8) as u8,
+        transaction_id as u8, // Transaction ID
+        0x00,
+        0x00, // Flags
+        0x00,
+        0x01, // Questions = 1
+        0x00,
+        0x00, // Answer RRs
+        0x00,
+        0x00, // Authority RRs
+        0x00,
+        0x00, // Additional RRs
         0x20, // 名称长度 = 32（首级编码后）
     ];
     // 查询名 "*" 补 0x00 至 16 字节，再做首级编码：每字节高/低半字节各 + 'A'。
@@ -780,17 +806,22 @@ fn resolve_netbios(ip: Ipv4Addr) -> Option<String> {
     let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
     sock.set_read_timeout(Some(Duration::from_millis(250)))
         .ok()?;
-    sock.send_to(&req, (ip, 137)).ok()?;
+    // Connected UDP filters packets from unrelated hosts before they reach us.
+    sock.connect((ip, 137)).ok()?;
+    sock.send(&req).ok()?;
 
     let mut buf = [0u8; 1024];
-    let (n, _) = sock.recv_from(&mut buf).ok()?;
-    parse_netbios_response(&buf[..n])
+    let n = sock.recv(&mut buf).ok()?;
+    parse_netbios_response(&buf[..n], transaction_id)
 }
 
 /// 解析 NetBIOS 节点状态响应的名称表，返回首个「工作站名」(后缀 0x00、非组)，
 /// 否则退回首个非组唯一名。纯函数，便于单测。
-fn parse_netbios_response(buf: &[u8]) -> Option<String> {
-    if buf.len() < 13 {
+fn parse_netbios_response(buf: &[u8], transaction_id: u16) -> Option<String> {
+    if buf.len() < 13
+        || u16::from_be_bytes([buf[0], buf[1]]) != transaction_id
+        || buf[2] & 0x80 == 0
+    {
         return None;
     }
     // 应答记录名长度：压缩指针(高2位=11)占 2 字节；否则 0x20 + 32 + 0x00 = 34 字节。
@@ -836,7 +867,7 @@ fn parse_netbios_response(buf: &[u8]) -> Option<String> {
 /// 组播查询 `d.c.b.a.in-addr.arpa` 的 PTR，解析出设备 `.local` 名。
 fn resolve_mdns(ip: Ipv4Addr) -> Option<String> {
     use std::net::{SocketAddrV4, UdpSocket};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     let o = ip.octets();
     let qname = format!("{}.{}.{}.{}.in-addr.arpa", o[3], o[2], o[1], o[0]);
@@ -861,13 +892,24 @@ fn resolve_mdns(ip: Ipv4Addr) -> Option<String> {
     let mdns = SocketAddrV4::new(Ipv4Addr::new(224, 0, 0, 251), 5353);
     sock.send_to(&req, mdns).ok()?;
 
+    let deadline = Instant::now() + Duration::from_millis(250);
     let mut buf = [0u8; 1500];
-    let (n, _) = sock.recv_from(&mut buf).ok()?;
-    parse_mdns_ptr(&buf[..n])
+    loop {
+        let remaining = deadline.checked_duration_since(Instant::now())?;
+        sock.set_read_timeout(Some(remaining)).ok()?;
+        let (n, source) = sock.recv_from(&mut buf).ok()?;
+        if source.ip() != IpAddr::V4(ip) {
+            continue;
+        }
+        if let Some(name) = parse_mdns_ptr(&buf[..n], &qname) {
+            return Some(name);
+        }
+    }
 }
 
-/// 从 DNS 响应中找首个 PTR 应答并解码其目标名（去掉尾部 `.local`）。纯函数，便于单测。
-fn parse_mdns_ptr(buf: &[u8]) -> Option<String> {
+/// 从 DNS 响应中查找 owner 与查询名一致的 PTR 应答并解码其目标名
+///（去掉尾部 `.local`）。纯函数，便于单测。
+fn parse_mdns_ptr(buf: &[u8], expected_owner: &str) -> Option<String> {
     if buf.len() < 12 {
         return None;
     }
@@ -884,7 +926,7 @@ fn parse_mdns_ptr(buf: &[u8]) -> Option<String> {
     }
     // 遍历应答区找 PTR。
     for _ in 0..an {
-        let after_name = skip_dns_name(buf, off)?;
+        let (owner, after_name) = decode_dns_name(buf, off)?;
         if after_name + 10 > buf.len() {
             return None;
         }
@@ -894,7 +936,7 @@ fn parse_mdns_ptr(buf: &[u8]) -> Option<String> {
         if rdata + rdlen > buf.len() {
             return None;
         }
-        if rtype == 0x000C {
+        if rtype == 0x000C && dns_names_equal(&owner, expected_owner) {
             let (name, _) = decode_dns_name(buf, rdata)?;
             let name = name
                 .trim_end_matches('.')
@@ -908,6 +950,11 @@ fn parse_mdns_ptr(buf: &[u8]) -> Option<String> {
         off = rdata + rdlen;
     }
     None
+}
+
+fn dns_names_equal(left: &str, right: &str) -> bool {
+    left.trim_end_matches('.')
+        .eq_ignore_ascii_case(right.trim_end_matches('.'))
 }
 
 /// 跳过一个 DNS 名称（处理压缩指针），返回其后的偏移。
@@ -1063,19 +1110,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hostname_filter_rejects_ip_text() {
+    fn hostname_filter_and_forward_confirmation_reject_wrong_device_names() {
         assert!(looks_like_hostname("vivo"));
         assert!(looks_like_hostname("MyPC.local"));
         assert!(!looks_like_hostname("192.168.1.5"));
         assert!(!looks_like_hostname(""));
         assert!(!looks_like_hostname("  "));
         assert!(!looks_like_hostname("fe80::1"));
+        assert!(forward_lookup_confirms(
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 35)),
+            &[IpAddr::V4(Ipv4Addr::new(192, 168, 1, 35))]
+        ));
+        assert!(!forward_lookup_confirms(
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
+            &[IpAddr::V4(Ipv4Addr::new(192, 168, 1, 35))]
+        ));
     }
 
     #[test]
     fn netbios_parses_workstation_name() {
         // 构造一个最小节点状态响应：头(12) + 非压缩应答名(34) + 固定 RR 头 + RDATA。
         let mut buf = vec![0u8; 12];
+        let transaction_id = 0x1234_u16;
+        buf[0..2].copy_from_slice(&transaction_id.to_be_bytes());
+        buf[2] = 0x80; // response
         // 应答名：0x20 + 32 字节(随便填) + 0x00
         buf.push(0x20);
         buf.extend([b'A'; 32]);
@@ -1097,7 +1155,11 @@ mod tests {
         buf.push(0x00); // 后缀 = 工作站
         buf.extend_from_slice(&[0x00, 0x00]); // flags：unique
 
-        assert_eq!(parse_netbios_response(&buf).as_deref(), Some("VIVO-PHONE"));
+        assert_eq!(
+            parse_netbios_response(&buf, transaction_id).as_deref(),
+            Some("VIVO-PHONE")
+        );
+        assert_eq!(parse_netbios_response(&buf, 0x9999), None);
     }
 
     #[test]
@@ -1211,6 +1273,10 @@ mod tests {
         buf.extend_from_slice(&rdata);
         let _ = rdata_start;
 
-        assert_eq!(parse_mdns_ptr(&buf).as_deref(), Some("vivo-phone"));
+        assert_eq!(
+            parse_mdns_ptr(&buf, "5.1.168.192.in-addr.arpa").as_deref(),
+            Some("vivo-phone")
+        );
+        assert_eq!(parse_mdns_ptr(&buf, "1.1.168.192.in-addr.arpa"), None);
     }
 }
