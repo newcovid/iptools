@@ -15,9 +15,9 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::net::IpAddr;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 // -----------------------------------------------------------------------------
 // 数据结构
@@ -121,7 +121,7 @@ pub struct PingTool {
 
     tx: mpsc::Sender<PingEvent>,
     rx: mpsc::Receiver<PingEvent>,
-    abort_flag: Arc<Mutex<bool>>,
+    abort_flag: CancellationToken,
 
     history: Rc<RefCell<HistoryStore>>,
     mru: MruState,
@@ -140,7 +140,7 @@ impl PingTool {
             config_state,
             tx,
             rx,
-            abort_flag: Arc::new(Mutex::new(false)),
+            abort_flag: CancellationToken::new(),
             history,
             mru: MruState::default(),
         }
@@ -349,7 +349,7 @@ impl PingTool {
         }
         self.running = true;
         self.stats = PingStats::default();
-        *self.abort_flag.lock().unwrap() = false;
+        self.abort_flag = CancellationToken::new();
 
         let abort = self.abort_flag.clone();
         let tx = self.tx.clone();
@@ -411,7 +411,7 @@ impl PingTool {
 
     fn stop(&mut self) {
         self.running = false;
-        *self.abort_flag.lock().unwrap() = true;
+        self.abort_flag.cancel();
     }
 
     // -------------------------------------------------------------------------
@@ -744,12 +744,226 @@ fn centered_rect(r: Rect, percent_x: u16, percent_y: u16) -> Rect {
 // 平台特定实现 (Windows)
 // -----------------------------------------------------------------------------
 
+/// Bridge the existing platform ping algorithm into the shared runtime protocol.
+pub(crate) async fn run_shared(
+    job: iptools_core::JobId,
+    request: iptools_core::PingRequest,
+    cancellation: CancellationToken,
+    events: mpsc::Sender<iptools_core::RuntimeEvent>,
+) -> Result<(), String> {
+    use iptools_core::{RuntimeError, RuntimeErrorCode, RuntimeEvent};
+    use std::net::IpAddr;
+
+    if request.target.trim().is_empty() {
+        events
+            .send(RuntimeEvent::PingFailed {
+                job,
+                error: RuntimeError::new(
+                    RuntimeErrorCode::InvalidRequest,
+                    "target cannot be empty",
+                ),
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+    let target = request.target.trim().to_string();
+    let target_ip = match target.parse::<IpAddr>() {
+        Ok(ip) => ip,
+        Err(_) => match tokio::net::lookup_host((target.as_str(), 0)).await {
+            Ok(mut values) => match values.next() {
+                Some(value) => value.ip(),
+                None => {
+                    events
+                        .send(RuntimeEvent::PingFailed {
+                            job,
+                            error: RuntimeError::new(
+                                RuntimeErrorCode::ResolveTarget,
+                                "target resolved to no addresses",
+                            ),
+                        })
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    return Ok(());
+                }
+            },
+            Err(error) => {
+                events
+                    .send(RuntimeEvent::PingFailed {
+                        job,
+                        error: RuntimeError::new(
+                            RuntimeErrorCode::ResolveTarget,
+                            error.to_string(),
+                        ),
+                    })
+                    .await
+                    .map_err(|error| error.to_string())?;
+                return Ok(());
+            }
+        },
+    };
+
+    events
+        .send(RuntimeEvent::PingStarted { job })
+        .await
+        .map_err(|error| error.to_string())?;
+    let config = PingConfig {
+        target: TextInput::with_text(&request.target),
+        interval_ms: request.interval_ms.clamp(100, 10_000),
+        timeout_ms: request.timeout_ms.clamp(100, 10_000),
+        packet_size: request.packet_size.min(65_500),
+    };
+    let (tx, mut rx) = mpsc::channel(32);
+    let worker_cancellation = cancellation.child_token();
+    let worker = run_shared_platform(target_ip, config, tx, worker_cancellation.clone());
+    tokio::pin!(worker);
+    let mut stats = SharedPingStats::default();
+    let mut last_emit = None;
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {
+                worker_cancellation.cancel();
+                worker.await;
+                return Ok(());
+            }
+            event = rx.recv() => {
+                let Some(event) = event else { return Ok(()); };
+                match event {
+                    PingEvent::Result { seq, latency, ttl, size } => {
+                        stats.observe(Some(latency));
+                        let now = tokio::time::Instant::now();
+                        if last_emit.is_none_or(|previous| now.duration_since(previous) >= Duration::from_millis(250)) {
+                            last_emit = Some(now);
+                            events.send(RuntimeEvent::PingSample { job, sample: stats.sample(seq, Some(latency), Some(ttl), size) }).await.map_err(|error| error.to_string())?;
+                        }
+                    }
+                    PingEvent::Timeout { seq } => {
+                        stats.observe(None);
+                        let now = tokio::time::Instant::now();
+                        if last_emit.is_none_or(|previous| now.duration_since(previous) >= Duration::from_millis(250)) {
+                            last_emit = Some(now);
+                            events.send(RuntimeEvent::PingSample { job, sample: stats.sample(seq, None, None, request.packet_size as usize) }).await.map_err(|error| error.to_string())?;
+                        }
+                    }
+                    PingEvent::Error { key, detail } => {
+                        worker_cancellation.cancel();
+                        let permission_key = key == "diag_ping_err_perm";
+                        let summary = match key.as_str() {
+                            "diag_ping_err_dns_empty" => "target resolved to no addresses",
+                            "diag_ping_err_dns" => "target resolution failed",
+                            "diag_ping_err_ipv6" => "IPv6 is not supported by this ping backend",
+                            "diag_ping_err_perm" => "raw socket permission denied",
+                            _ => "ping request failed",
+                        };
+                        let message = if detail.is_empty() {
+                            summary.into()
+                        } else {
+                            format!("{summary}: {detail}")
+                        };
+                        let code = if permission_key
+                            || message.to_lowercase().contains("permission")
+                            || message.contains("权限")
+                        {
+                            RuntimeErrorCode::PermissionDenied
+                        } else {
+                            RuntimeErrorCode::Network
+                        };
+                        events.send(RuntimeEvent::PingFailed { job, error: RuntimeError::new(code, message) }).await.map_err(|error| error.to_string())?;
+                        worker.await;
+                        return Ok(());
+                    }
+                }
+            }
+            _ = &mut worker => {
+                return Ok(());
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct SharedPingStats {
+    sent: u64,
+    received: u64,
+    min_ms: Option<u64>,
+    max_ms: Option<u64>,
+    total_ms: u64,
+}
+
+impl SharedPingStats {
+    fn observe(&mut self, latency: Option<u64>) {
+        self.sent += 1;
+        if let Some(latency) = latency {
+            self.received += 1;
+            self.min_ms = Some(self.min_ms.map_or(latency, |value| value.min(latency)));
+            self.max_ms = Some(self.max_ms.map_or(latency, |value| value.max(latency)));
+            self.total_ms = self.total_ms.saturating_add(latency);
+        }
+    }
+
+    fn sample(
+        &self,
+        sequence: u64,
+        latency_ms: Option<u64>,
+        ttl: Option<u8>,
+        size: usize,
+    ) -> iptools_core::PingSample {
+        iptools_core::PingSample {
+            sequence,
+            latency_ms,
+            ttl,
+            size,
+            sent: self.sent,
+            received: self.received,
+            min_ms: self.min_ms,
+            average_ms: (self.received > 0).then(|| self.total_ms as f64 / self.received as f64),
+            max_ms: self.max_ms,
+            loss_percent: if self.sent == 0 {
+                0.0
+            } else {
+                (self.sent - self.received) as f64 * 100.0 / self.sent as f64
+            },
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+async fn run_shared_platform(
+    target: std::net::IpAddr,
+    config: PingConfig,
+    tx: mpsc::Sender<PingEvent>,
+    cancellation: CancellationToken,
+) {
+    if let std::net::IpAddr::V4(target) = target {
+        run_ping_windows(target, config, tx, cancellation).await;
+    } else {
+        let _ = tx
+            .send(PingEvent::Error {
+                key: "diag_ping_err_ipv6".into(),
+                detail: String::new(),
+            })
+            .await;
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+async fn run_shared_platform(
+    target: std::net::IpAddr,
+    config: PingConfig,
+    tx: mpsc::Sender<PingEvent>,
+    cancellation: CancellationToken,
+) {
+    run_ping_unix(target, config, tx, cancellation).await;
+}
+
 #[cfg(target_os = "windows")]
 async fn run_ping_windows(
     target_ip: std::net::Ipv4Addr,
     config: PingConfig,
     tx: mpsc::Sender<PingEvent>,
-    abort: Arc<Mutex<bool>>,
+    abort: CancellationToken,
 ) {
     use std::ffi::c_void;
     use windows::Win32::NetworkManagement::IpHelper::{
@@ -761,7 +975,7 @@ async fn run_ping_windows(
     let mut seq = 0;
 
     loop {
-        if *abort.lock().unwrap() {
+        if abort.is_cancelled() {
             break;
         }
 
@@ -829,7 +1043,10 @@ async fn run_ping_windows(
             }
         }
 
-        tokio::time::sleep(Duration::from_millis(config.interval_ms)).await;
+        tokio::select! {
+            _ = abort.cancelled() => break,
+            _ = tokio::time::sleep(Duration::from_millis(config.interval_ms)) => {}
+        }
         seq += 1;
     }
 }
@@ -839,7 +1056,7 @@ async fn run_ping_unix(
     target_ip: std::net::IpAddr,
     config: PingConfig,
     tx: mpsc::Sender<PingEvent>,
-    abort: Arc<Mutex<bool>>,
+    abort: CancellationToken,
 ) {
     let payload = vec![0u8; config.packet_size as usize];
     // surge-ping 0.8：先建 Client（ICMP 套接字，需 root/CAP_NET_RAW），再按目标地址族建 Pinger。
@@ -871,20 +1088,25 @@ async fn run_ping_unix(
     // 标识符固定（取进程低 16 位），序列号每次自增，匹配回包。
     let ident = surge_ping::PingIdentifier((std::process::id() & 0xFFFF) as u16);
     let mut pinger = client.pinger(target_ip, ident).await;
+    pinger.timeout(Duration::from_millis(config.timeout_ms));
 
     let mut seq = 0;
     let mut interval = tokio::time::interval(Duration::from_millis(config.interval_ms));
 
     loop {
-        if *abort.lock().unwrap() {
+        if abort.is_cancelled() {
             break;
         }
-        interval.tick().await;
+        tokio::select! {
+            _ = abort.cancelled() => break,
+            _ = interval.tick() => {}
+        }
 
-        match pinger
-            .ping(surge_ping::PingSequence(seq as u16), &payload)
-            .await
-        {
+        let result = tokio::select! {
+            _ = abort.cancelled() => break,
+            result = pinger.ping(surge_ping::PingSequence(seq as u16), &payload) => result,
+        };
+        match result {
             Ok((_packet, duration)) => {
                 let ms = duration.as_millis() as u64;
                 let _ = tx
@@ -901,5 +1123,25 @@ async fn run_ping_unix(
             }
         }
         seq += 1;
+    }
+}
+
+#[cfg(test)]
+mod shared_tests {
+    use super::*;
+
+    #[test]
+    fn coalesced_samples_keep_cumulative_loss_statistics() {
+        let mut stats = SharedPingStats::default();
+        stats.observe(Some(10));
+        stats.observe(None);
+        stats.observe(Some(20));
+        let sample = stats.sample(2, Some(20), Some(64), 32);
+        assert_eq!(sample.sent, 3);
+        assert_eq!(sample.received, 2);
+        assert_eq!(sample.min_ms, Some(10));
+        assert_eq!(sample.max_ms, Some(20));
+        assert_eq!(sample.average_ms, Some(15.0));
+        assert!((sample.loss_percent - 33.333).abs() < 0.01);
     }
 }

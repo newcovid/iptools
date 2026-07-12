@@ -84,13 +84,39 @@ pub enum DiagnosticTool {
     LanSpeed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum DiagnosticFocus {
+    #[default]
+    Menu,
+    Main,
+    Config,
+}
+
+impl DiagnosticFocus {
+    fn next(self) -> Self {
+        match self {
+            Self::Menu => Self::Main,
+            Self::Main => Self::Config,
+            Self::Config => Self::Menu,
+        }
+    }
+
+    fn previous(self) -> Self {
+        match self {
+            Self::Menu => Self::Config,
+            Self::Main => Self::Menu,
+            Self::Config => Self::Main,
+        }
+    }
+}
+
 impl DiagnosticTool {
     pub const ALL: [Self; 6] = [
         Self::Ping,
         Self::Trace,
         Self::PortScan,
-        Self::PublicSpeed,
         Self::LinkQuality,
+        Self::PublicSpeed,
         Self::LanSpeed,
     ];
 
@@ -353,6 +379,7 @@ impl Default for ScannerState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DiagnosticCommonState {
     pub status: TaskStatus,
+    pub error: Option<crate::RuntimeError>,
     pub progress: u8,
     pub primary: String,
     pub detail: String,
@@ -364,6 +391,7 @@ impl Default for DiagnosticCommonState {
     fn default() -> Self {
         Self {
             status: TaskStatus::Idle,
+            error: None,
             progress: 0,
             primary: String::new(),
             detail: String::new(),
@@ -379,13 +407,33 @@ pub struct PingState {
     pub common: DiagnosticCommonState,
     pub samples: Vec<crate::PingSample>,
     pub summary: Option<crate::PingSummary>,
+    pub config_selected: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TraceState {
     pub request: crate::TraceRequest,
     pub common: DiagnosticCommonState,
     pub hops: Vec<crate::TraceHop>,
+    pub max_hops_input: String,
+    pub timeout_input: String,
+    pub config_selected: usize,
+    pub selected: usize,
+}
+
+impl Default for TraceState {
+    fn default() -> Self {
+        let request = crate::TraceRequest::default();
+        Self {
+            max_hops_input: request.max_hops.to_string(),
+            timeout_input: request.timeout_ms.to_string(),
+            request,
+            common: DiagnosticCommonState::default(),
+            hops: Vec::new(),
+            config_selected: 0,
+            selected: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -422,7 +470,7 @@ pub struct LanSpeedState {
     pub summary: Option<crate::LanSpeedSummary>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DiagnosticsState {
     pub tool: DiagnosticTool,
     pub ping: PingState,
@@ -431,6 +479,32 @@ pub struct DiagnosticsState {
     pub public_speed: PublicSpeedState,
     pub link_quality: LinkQualityState,
     pub lan_speed: LanSpeedState,
+    pub focused: bool,
+    pub focus: DiagnosticFocus,
+    pub cursor: usize,
+    pub target_history: Vec<String>,
+    pub history_open: bool,
+    pub history_selected: usize,
+}
+
+impl Default for DiagnosticsState {
+    fn default() -> Self {
+        Self {
+            tool: DiagnosticTool::default(),
+            ping: PingState::default(),
+            trace: TraceState::default(),
+            port_scan: PortScanState::default(),
+            public_speed: PublicSpeedState::default(),
+            link_quality: LinkQualityState::default(),
+            lan_speed: LanSpeedState::default(),
+            focused: false,
+            focus: DiagnosticFocus::Menu,
+            cursor: 0,
+            target_history: Vec::new(),
+            history_open: false,
+            history_selected: 0,
+        }
+    }
 }
 
 impl DiagnosticsState {
@@ -519,6 +593,19 @@ impl AppModel {
         self.public_ip_config = config.public_ip.clone();
         self.adapter_edit_persist = config.session.adapter_edit.clone();
         self.adapter_history = config.session.history.adapter.clone();
+        self.diagnostics.ping.request = crate::PingRequest {
+            target: config.session.ping.target.clone(),
+            interval_ms: config.session.ping.interval_ms.clamp(100, 10_000),
+            timeout_ms: config.session.ping.timeout_ms.clamp(100, 10_000),
+            packet_size: config.session.ping.packet_size.min(65_500),
+        };
+        self.diagnostics.trace.request.target = config.session.trace.target.clone();
+        self.diagnostics.trace.max_hops_input = config.session.trace.max_hops.clone();
+        self.diagnostics.trace.timeout_input = config.session.trace.timeout_ms.clone();
+        self.sync_trace_request();
+        self.diagnostics.target_history = config.session.history.targets.clone();
+        self.page = Page::from_index(config.session.ui.last_tab);
+        self.diagnostics.tool = DiagnosticTool::from_index(config.session.ui.last_diag_tool);
     }
 
     pub const fn preferences(&self) -> crate::Preferences {
@@ -564,6 +651,41 @@ impl AppModel {
                 return self.handle_action(global.expect("matched global action"));
             }
             return self.handle_adapter_edit_input(input);
+        }
+
+        if self.page == Page::Diagnostics {
+            let action = match &input {
+                InputEvent::Action(action) => Some(*action),
+                InputEvent::Key(key) => key.action(),
+                InputEvent::Mouse(_) => None,
+            };
+            if let Some(Action::FocusDiagnostic(focus)) = action {
+                self.diagnostics.focused = true;
+                self.diagnostics.focus = focus;
+                self.diagnostics.history_open = false;
+                return Vec::new();
+            }
+            if let Some(Action::SelectDiagnosticField(index, cursor)) = action {
+                self.diagnostics.focused = true;
+                self.diagnostics.focus = DiagnosticFocus::Config;
+                self.set_diagnostic_config_index(index);
+                self.diagnostics.cursor = cursor.min(self.active_diagnostic_field().len());
+                return Vec::new();
+            }
+            if self.diagnostics.focused {
+                if matches!(
+                    action,
+                    Some(
+                        Action::Quit
+                            | Action::ToggleLanguage
+                            | Action::Help
+                            | Action::SelectPage(_)
+                    )
+                ) {
+                    return self.handle_action(action.expect("matched global action"));
+                }
+                return self.handle_diagnostic_input(input);
+            }
         }
         if let InputEvent::Key(key) = input
             && self.page == Page::Scanner
@@ -913,6 +1035,315 @@ impl AppModel {
         }]
     }
 
+    fn handle_diagnostic_input(&mut self, input: InputEvent) -> Vec<Effect> {
+        let key = match &input {
+            InputEvent::Key(key) => Some(*key),
+            _ => None,
+        };
+        let action = match &input {
+            InputEvent::Action(action) => Some(*action),
+            InputEvent::Key(key) => key.action(),
+            InputEvent::Mouse(_) => None,
+        };
+
+        if key.is_some_and(|key| key.code == KeyCode::Tab && !key.modifiers.shift) {
+            self.diagnostics.focus = self.diagnostics.focus.next();
+            self.diagnostics.history_open = false;
+            return Vec::new();
+        }
+        if key.is_some_and(|key| {
+            key.code == KeyCode::BackTab || (key.code == KeyCode::Tab && key.modifiers.shift)
+        }) {
+            self.diagnostics.focus = self.diagnostics.focus.previous();
+            self.diagnostics.history_open = false;
+            return Vec::new();
+        }
+        if action == Some(Action::Back) {
+            if self.diagnostics.history_open {
+                self.diagnostics.history_open = false;
+            } else {
+                self.diagnostics.focused = false;
+                self.diagnostics.focus = DiagnosticFocus::Menu;
+            }
+            return Vec::new();
+        }
+
+        match self.diagnostics.focus {
+            DiagnosticFocus::Menu => match action {
+                Some(Action::Up) => {
+                    self.navigate_diagnostic_tool(-1);
+                    return vec![self.persist_ui_effect()];
+                }
+                Some(Action::Down) => {
+                    self.navigate_diagnostic_tool(1);
+                    return vec![self.persist_ui_effect()];
+                }
+                _ => {}
+            },
+            DiagnosticFocus::Main => match action {
+                Some(Action::Confirm | Action::Toggle) => return self.toggle_diagnostic(),
+                Some(Action::Up) if self.diagnostics.tool == DiagnosticTool::Trace => {
+                    let len = self.diagnostics.trace.hops.len();
+                    if len > 0 {
+                        self.diagnostics.trace.selected =
+                            wrap(self.diagnostics.trace.selected, len, -1);
+                    }
+                }
+                Some(Action::Down) if self.diagnostics.tool == DiagnosticTool::Trace => {
+                    let len = self.diagnostics.trace.hops.len();
+                    if len > 0 {
+                        self.diagnostics.trace.selected =
+                            wrap(self.diagnostics.trace.selected, len, 1);
+                    }
+                }
+                _ => {}
+            },
+            DiagnosticFocus::Config => return self.handle_diagnostic_config(key, action),
+        }
+        Vec::new()
+    }
+
+    fn handle_diagnostic_config(
+        &mut self,
+        key: Option<crate::KeyEvent>,
+        action: Option<Action>,
+    ) -> Vec<Effect> {
+        let running = self.diagnostics.active_common().job.is_some();
+        let selected = self.active_diagnostic_config_index();
+        let target_field = selected == 0
+            && matches!(
+                self.diagnostics.tool,
+                DiagnosticTool::Ping | DiagnosticTool::Trace
+            );
+
+        if action == Some(Action::History) && target_field && !running {
+            self.diagnostics.history_open = !self.diagnostics.history_open;
+            self.diagnostics.history_selected = 0;
+            return Vec::new();
+        }
+        if self.diagnostics.history_open {
+            if let Some(key) = key {
+                match key.code {
+                    KeyCode::Up => {
+                        self.diagnostics.history_selected =
+                            self.diagnostics.history_selected.saturating_sub(1);
+                    }
+                    KeyCode::Down => {
+                        self.diagnostics.history_selected = (self.diagnostics.history_selected + 1)
+                            .min(
+                                self.diagnostics
+                                    .target_history
+                                    .len()
+                                    .min(8)
+                                    .saturating_sub(1),
+                            );
+                    }
+                    KeyCode::Enter | KeyCode::Right => {
+                        if let Some(value) = self
+                            .diagnostics
+                            .target_history
+                            .get(self.diagnostics.history_selected)
+                            .cloned()
+                        {
+                            self.set_active_diagnostic_field(value);
+                            self.diagnostics.cursor = self.active_diagnostic_field().len();
+                            self.diagnostics.history_open = false;
+                            return self.persist_active_diagnostic();
+                        }
+                    }
+                    KeyCode::Esc => self.diagnostics.history_open = false,
+                    _ => {}
+                }
+            }
+            return Vec::new();
+        }
+
+        if !running && target_field {
+            if let Some(key) = key {
+                let current = self.active_diagnostic_field().to_string();
+                if key.code == KeyCode::Right
+                    && !current.is_empty()
+                    && self.diagnostics.cursor == current.len()
+                    && let Some(value) = self
+                        .diagnostics
+                        .target_history
+                        .iter()
+                        .find(|candidate| {
+                            candidate.starts_with(&current) && candidate.len() > current.len()
+                        })
+                        .cloned()
+                {
+                    self.set_active_diagnostic_field(value);
+                    self.diagnostics.cursor = self.active_diagnostic_field().len();
+                    return self.persist_active_diagnostic();
+                }
+                let mut value = current;
+                if edit_ascii(&mut value, &mut self.diagnostics.cursor, key.code, |c| {
+                    c.is_ascii() && !c.is_control() && c != ' '
+                }) {
+                    self.set_active_diagnostic_field(value);
+                    return self.persist_active_diagnostic();
+                }
+            }
+        } else if !running
+            && self.diagnostics.tool == DiagnosticTool::Trace
+            && selected > 0
+            && let Some(key) = key
+        {
+            let mut value = self.active_diagnostic_field().to_string();
+            if edit_ascii(&mut value, &mut self.diagnostics.cursor, key.code, |c| {
+                c.is_ascii_digit()
+            }) {
+                self.set_active_diagnostic_field(value);
+                self.sync_trace_request();
+                return self.persist_active_diagnostic();
+            }
+        }
+
+        match action {
+            Some(Action::Up) => self.move_diagnostic_config(-1),
+            Some(Action::Down) => self.move_diagnostic_config(1),
+            Some(Action::Left | Action::Right)
+                if !running && self.diagnostics.tool == DiagnosticTool::Ping && selected > 0 =>
+            {
+                let dir = if action == Some(Action::Left) { -1 } else { 1 };
+                let request = &mut self.diagnostics.ping.request;
+                match selected {
+                    1 => {
+                        request.interval_ms =
+                            ((request.interval_ms as i64) + dir * 100).clamp(100, 10_000) as u64
+                    }
+                    2 => {
+                        request.timeout_ms =
+                            ((request.timeout_ms as i64) + dir * 100).clamp(100, 10_000) as u64
+                    }
+                    3 => {
+                        request.packet_size =
+                            ((request.packet_size as i64) + dir * 8).clamp(0, 65_500) as u64
+                    }
+                    _ => {}
+                }
+                return self.persist_active_diagnostic();
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    fn navigate_diagnostic_tool(&mut self, delta: isize) {
+        let current = DiagnosticTool::ALL
+            .iter()
+            .position(|tool| *tool == self.diagnostics.tool)
+            .unwrap_or(0);
+        let index = wrap(current, DiagnosticTool::ALL.len(), delta);
+        self.diagnostics.tool = DiagnosticTool::from_index(index as u8);
+        self.diagnostics.history_open = false;
+        self.diagnostics.cursor = self.active_diagnostic_field().len();
+    }
+
+    fn diagnostic_config_count(&self) -> usize {
+        match self.diagnostics.tool {
+            DiagnosticTool::Ping => 4,
+            DiagnosticTool::Trace => 3,
+            _ => 1,
+        }
+    }
+
+    fn active_diagnostic_config_index(&self) -> usize {
+        match self.diagnostics.tool {
+            DiagnosticTool::Ping => self.diagnostics.ping.config_selected,
+            DiagnosticTool::Trace => self.diagnostics.trace.config_selected,
+            _ => 0,
+        }
+    }
+
+    fn set_diagnostic_config_index(&mut self, index: usize) {
+        let index = index.min(self.diagnostic_config_count().saturating_sub(1));
+        match self.diagnostics.tool {
+            DiagnosticTool::Ping => self.diagnostics.ping.config_selected = index,
+            DiagnosticTool::Trace => self.diagnostics.trace.config_selected = index,
+            _ => {}
+        }
+        self.diagnostics.cursor = self.active_diagnostic_field().len();
+        self.diagnostics.history_open = false;
+    }
+
+    fn move_diagnostic_config(&mut self, delta: isize) {
+        let index = wrap(
+            self.active_diagnostic_config_index(),
+            self.diagnostic_config_count(),
+            delta,
+        );
+        self.set_diagnostic_config_index(index);
+    }
+
+    fn active_diagnostic_field(&self) -> &str {
+        match self.diagnostics.tool {
+            DiagnosticTool::Ping => match self.diagnostics.ping.config_selected {
+                0 => &self.diagnostics.ping.request.target,
+                _ => "",
+            },
+            DiagnosticTool::Trace => match self.diagnostics.trace.config_selected {
+                0 => &self.diagnostics.trace.request.target,
+                1 => &self.diagnostics.trace.max_hops_input,
+                _ => &self.diagnostics.trace.timeout_input,
+            },
+            _ => self.diagnostics.active_target(),
+        }
+    }
+
+    fn set_active_diagnostic_field(&mut self, value: String) {
+        match self.diagnostics.tool {
+            DiagnosticTool::Ping if self.diagnostics.ping.config_selected == 0 => {
+                self.diagnostics.ping.request.target = value;
+            }
+            DiagnosticTool::Trace => match self.diagnostics.trace.config_selected {
+                0 => self.diagnostics.trace.request.target = value,
+                1 => self.diagnostics.trace.max_hops_input = value,
+                _ => self.diagnostics.trace.timeout_input = value,
+            },
+            _ => {}
+        }
+    }
+
+    fn sync_trace_request(&mut self) {
+        self.diagnostics.trace.request.max_hops = self
+            .diagnostics
+            .trace
+            .max_hops_input
+            .parse::<u8>()
+            .unwrap_or(30)
+            .clamp(1, 64);
+        self.diagnostics.trace.request.timeout_ms = self
+            .diagnostics
+            .trace
+            .timeout_input
+            .parse::<u64>()
+            .unwrap_or(1_000)
+            .clamp(100, 10_000);
+    }
+
+    fn persist_active_diagnostic(&self) -> Vec<Effect> {
+        match self.diagnostics.tool {
+            DiagnosticTool::Ping => vec![Effect::PersistSession(crate::SessionUpdate::Ping(
+                crate::PingPersist {
+                    target: self.diagnostics.ping.request.target.clone(),
+                    interval_ms: self.diagnostics.ping.request.interval_ms,
+                    timeout_ms: self.diagnostics.ping.request.timeout_ms,
+                    packet_size: self.diagnostics.ping.request.packet_size,
+                },
+            ))],
+            DiagnosticTool::Trace => vec![Effect::PersistSession(crate::SessionUpdate::Trace(
+                crate::TracePersist {
+                    target: self.diagnostics.trace.request.target.clone(),
+                    max_hops: self.diagnostics.trace.max_hops_input.clone(),
+                    timeout_ms: self.diagnostics.trace.timeout_input.clone(),
+                },
+            ))],
+            _ => Vec::new(),
+        }
+    }
+
     fn handle_action(&mut self, action: Action) -> Vec<Effect> {
         use Action::*;
         match action {
@@ -921,9 +1352,18 @@ impl AppModel {
                 self.language = self.language.toggle();
                 return vec![Effect::PersistPreferences(self.preferences())];
             }
-            NextPage => self.page = self.page.next(),
-            PreviousPage => self.page = self.page.previous(),
-            SelectPage(index) => self.page = Page::from_index(index),
+            NextPage => {
+                self.page = self.page.next();
+                return vec![self.persist_ui_effect()];
+            }
+            PreviousPage => {
+                self.page = self.page.previous();
+                return vec![self.persist_ui_effect()];
+            }
+            SelectPage(index) => {
+                self.page = Page::from_index(index);
+                return vec![self.persist_ui_effect()];
+            }
             Help => self.show_help = !self.show_help,
             Back => self.show_help = false,
             ResetDemo => {
@@ -940,16 +1380,33 @@ impl AppModel {
             }
             Edit if self.page == Page::Scanner => self.scanner.editing = true,
             Confirm | Toggle if self.page == Page::Scanner => return self.toggle_scan(),
-            Confirm | Toggle if self.page == Page::Diagnostics => {
-                return self.toggle_diagnostic();
+            Confirm if self.page == Page::Diagnostics => {
+                self.diagnostics.focused = true;
+                self.diagnostics.focus = DiagnosticFocus::Menu;
             }
-            SelectDiagnostic(index) => self.diagnostics.tool = DiagnosticTool::from_index(index),
+            SelectDiagnostic(index) => {
+                self.diagnostics.tool = DiagnosticTool::from_index(index);
+                self.diagnostics.focused = true;
+                self.diagnostics.focus = DiagnosticFocus::Menu;
+                self.diagnostics.history_open = false;
+                return vec![self.persist_ui_effect()];
+            }
             SelectAdapter(index) if !self.adapters.items.is_empty() => {
                 self.adapters.selected = index.min(self.adapters.items.len() - 1)
             }
             Edit if self.page == Page::Adapters => return self.begin_adapter_edit(),
-            Up => self.navigate(-1),
-            Down => self.navigate(1),
+            Up => {
+                self.navigate(-1);
+                if self.page == Page::Diagnostics {
+                    return vec![self.persist_ui_effect()];
+                }
+            }
+            Down => {
+                self.navigate(1);
+                if self.page == Page::Diagnostics {
+                    return vec![self.persist_ui_effect()];
+                }
+            }
             Left if self.page == Page::Settings => {
                 self.scan_concurrency = self.scan_concurrency.saturating_sub(10).max(10);
                 return vec![Effect::PersistPreferences(self.preferences())];
@@ -965,7 +1422,9 @@ impl AppModel {
             | Toggle
             | History
             | SelectAdapter(_)
-            | SelectAdapterField(_, _) => {}
+            | SelectAdapterField(_, _)
+            | FocusDiagnostic(_)
+            | SelectDiagnosticField(_, _) => {}
         }
         Vec::new()
     }
@@ -984,15 +1443,26 @@ impl AppModel {
                     wrap(self.scanner.selected, self.scanner.results.len(), delta)
             }
             Page::Diagnostics => {
-                let index = wrap(
-                    self.diagnostics.tool as usize,
-                    DiagnosticTool::ALL.len(),
-                    delta,
-                );
+                let current = DiagnosticTool::ALL
+                    .iter()
+                    .position(|tool| *tool == self.diagnostics.tool)
+                    .unwrap_or(0);
+                let index = wrap(current, DiagnosticTool::ALL.len(), delta);
                 self.diagnostics.tool = DiagnosticTool::from_index(index as u8);
             }
             _ => {}
         }
+    }
+
+    fn persist_ui_effect(&self) -> Effect {
+        let diagnostic_index = DiagnosticTool::ALL
+            .iter()
+            .position(|tool| *tool == self.diagnostics.tool)
+            .unwrap_or(0) as u8;
+        Effect::PersistSession(crate::SessionUpdate::Ui(crate::UiPersist {
+            last_tab: self.page as u8,
+            last_diag_tool: diagnostic_index,
+        }))
     }
 
     fn next_job(&mut self, tool: ToolKind) -> JobId {
@@ -1062,11 +1532,32 @@ impl AppModel {
             return vec![stop_effect(job)];
         }
 
+        if self.diagnostics.tool == DiagnosticTool::Trace {
+            self.sync_trace_request();
+        }
+        let target = match self.diagnostics.tool {
+            DiagnosticTool::Ping => Some(self.diagnostics.ping.request.target.trim().to_string()),
+            DiagnosticTool::Trace => Some(self.diagnostics.trace.request.target.trim().to_string()),
+            _ => None,
+        };
+        if target.as_ref().is_some_and(String::is_empty) {
+            let common = self.diagnostics.active_common_mut();
+            let error = crate::RuntimeError::new(
+                crate::RuntimeErrorCode::InvalidRequest,
+                "target cannot be empty",
+            );
+            common.status = TaskStatus::Failed(error.message.clone());
+            common.detail = error.message.clone();
+            common.error = Some(error);
+            return Vec::new();
+        }
+
         let tool = ToolKind::from(self.diagnostics.tool);
         let job = self.next_job(tool);
         let common = self.diagnostics.active_common_mut();
         common.job = Some(job);
         common.status = TaskStatus::Running;
+        common.error = None;
         common.progress = 0;
         common.primary.clear();
         common.detail.clear();
@@ -1123,7 +1614,18 @@ impl AppModel {
                 }
             }
         };
-        vec![effect]
+        let mut effects = vec![effect];
+        if let Some(target) = target {
+            self.diagnostics
+                .target_history
+                .retain(|value| value != &target);
+            self.diagnostics.target_history.insert(0, target);
+            self.diagnostics.target_history.truncate(15);
+            effects.push(Effect::PersistSession(crate::SessionUpdate::TargetHistory(
+                self.diagnostics.target_history.clone(),
+            )));
+        }
+        effects
     }
 
     fn handle_runtime(&mut self, event: RuntimeEvent) {
@@ -1262,8 +1764,19 @@ impl AppModel {
                 let common = &mut self.diagnostics.ping.common;
                 common.progress = (sample.sequence.saturating_add(1) * 12).min(99) as u8;
                 common.primary = primary.clone();
-                common.detail = format!("ttl={:?} size={}", sample.ttl, sample.size);
+                common.detail = format!(
+                    "{} / {} received · {:.1}% loss · avg {:?} ms",
+                    sample.received, sample.sent, sample.loss_percent, sample.average_ms
+                );
                 common.log.push(primary);
+                self.diagnostics.ping.summary = Some(crate::PingSummary {
+                    sent: sample.sent,
+                    received: sample.received,
+                    min_ms: sample.min_ms,
+                    average_ms: sample.average_ms,
+                    max_ms: sample.max_ms,
+                    loss_percent: sample.loss_percent,
+                });
                 self.diagnostics.ping.samples.push(sample);
             }
             RuntimeEvent::PingFinished { job, summary }
@@ -1498,13 +2011,16 @@ impl AppModel {
 
 fn finish_common(common: &mut DiagnosticCommonState, summary: String) {
     common.status = TaskStatus::Done;
+    common.error = None;
     common.progress = 100;
     common.detail = summary;
     common.job = None;
 }
 
 fn fail_common(common: &mut DiagnosticCommonState, error: crate::RuntimeError) {
-    common.status = TaskStatus::Failed(error.message);
+    common.status = TaskStatus::Failed(error.message.clone());
+    common.detail = error.message.clone();
+    common.error = Some(error);
     common.job = None;
 }
 
@@ -1531,6 +2047,37 @@ fn stop_effect(job: JobId) -> Effect {
 fn non_empty(value: &str) -> Option<String> {
     let value = value.trim();
     (!value.is_empty()).then(|| value.to_string())
+}
+
+fn edit_ascii(
+    value: &mut String,
+    cursor: &mut usize,
+    code: KeyCode,
+    allow: impl Fn(char) -> bool,
+) -> bool {
+    *cursor = (*cursor).min(value.len());
+    match code {
+        KeyCode::Left => *cursor = cursor.saturating_sub(1),
+        KeyCode::Right => *cursor = (*cursor + 1).min(value.len()),
+        KeyCode::Home => *cursor = 0,
+        KeyCode::End => *cursor = value.len(),
+        KeyCode::Backspace if *cursor > 0 => {
+            *cursor -= 1;
+            value.remove(*cursor);
+            return true;
+        }
+        KeyCode::Delete if *cursor < value.len() => {
+            value.remove(*cursor);
+            return true;
+        }
+        KeyCode::Char(character) if allow(character) && value.len() < 64 => {
+            value.insert(*cursor, character);
+            *cursor += 1;
+            return true;
+        }
+        _ => {}
+    }
+    false
 }
 
 fn adapter_defaults(adapter: &AdapterInfo) -> AdapterEditParams {
@@ -1636,6 +2183,8 @@ mod tests {
             page: Page::Diagnostics,
             ..AppModel::default()
         };
+        app.diagnostics.focused = true;
+        app.diagnostics.focus = DiagnosticFocus::Main;
         let effects = app.update(Input(InputEvent::Action(Action::Toggle)));
         let Effect::StartPing { job, request } = effects[0].clone() else {
             panic!("expected typed ping effect");
@@ -1647,6 +2196,12 @@ mod tests {
             latency_ms: Some(12),
             ttl: Some(64),
             size: 32,
+            sent: 2,
+            received: 2,
+            min_ms: Some(12),
+            average_ms: Some(12.0),
+            max_ms: Some(12),
+            loss_percent: 0.0,
         };
         app.update(Runtime(RuntimeEvent::PingSample {
             job: JobId {
@@ -1669,6 +2224,78 @@ mod tests {
         );
         app.update(Runtime(RuntimeEvent::PingSample { job, sample }));
         assert_eq!(app.diagnostics.ping.samples.len(), 1);
+
+        let effects = app.update(Input(InputEvent::Action(Action::Toggle)));
+        let Effect::StartPing { job: restarted, .. } = effects[0] else {
+            panic!("expected restarted ping effect");
+        };
+        assert!(restarted.generation > job.generation);
+        let summary = crate::PingSummary {
+            sent: 4,
+            received: 4,
+            min_ms: Some(10),
+            average_ms: Some(12.5),
+            max_ms: Some(15),
+            loss_percent: 0.0,
+        };
+        app.update(Runtime(RuntimeEvent::PingFinished {
+            job,
+            summary: summary.clone(),
+        }));
+        assert_eq!(app.diagnostics.ping.common.job, Some(restarted));
+        app.update(Runtime(RuntimeEvent::PingFinished {
+            job: restarted,
+            summary: summary.clone(),
+        }));
+        assert_eq!(app.diagnostics.ping.summary, Some(summary));
+        assert_eq!(app.diagnostics.ping.common.status, TaskStatus::Done);
+    }
+
+    #[test]
+    fn trace_start_cancel_restart_ignores_stale_and_finishes_current_job() {
+        let mut app = AppModel {
+            page: Page::Diagnostics,
+            ..AppModel::default()
+        };
+        app.diagnostics.focused = true;
+        app.diagnostics.focus = DiagnosticFocus::Main;
+        app.diagnostics.tool = DiagnosticTool::Trace;
+
+        let first = app.update(Input(InputEvent::Action(Action::Toggle)));
+        let Effect::StartTrace { job: first, .. } = first[0] else {
+            panic!("expected trace effect");
+        };
+        let hop = crate::TraceHop {
+            ttl: 1,
+            address: Some("192.0.2.1".into()),
+            hostname: None,
+            latency_ms: Some(12),
+        };
+        app.update(Runtime(RuntimeEvent::TraceHop {
+            job: first,
+            hop: hop.clone(),
+        }));
+        assert_eq!(app.diagnostics.trace.hops, [hop]);
+        assert_eq!(
+            app.update(Input(InputEvent::Action(Action::Toggle))),
+            [Effect::StopTrace(first)]
+        );
+
+        let restarted = app.update(Input(InputEvent::Action(Action::Toggle)));
+        let Effect::StartTrace { job: restarted, .. } = restarted[0] else {
+            panic!("expected restarted trace effect");
+        };
+        app.update(Runtime(RuntimeEvent::TraceFinished {
+            job: first,
+            hops: 1,
+        }));
+        assert_eq!(app.diagnostics.trace.common.job, Some(restarted));
+        app.update(Runtime(RuntimeEvent::TraceFinished {
+            job: restarted,
+            hops: 8,
+        }));
+        assert_eq!(app.diagnostics.trace.common.status, TaskStatus::Done);
+        assert_eq!(app.diagnostics.trace.common.job, None);
     }
 
     #[test]
@@ -1677,6 +2304,8 @@ mod tests {
             page: Page::Diagnostics,
             ..AppModel::default()
         };
+        app.diagnostics.focused = true;
+        app.diagnostics.focus = DiagnosticFocus::Main;
         app.diagnostics.tool = DiagnosticTool::Trace;
         let effects = app.update(Input(InputEvent::Action(Action::Toggle)));
         let Effect::StartTrace { job, request } = effects[0].clone() else {
@@ -1693,6 +2322,15 @@ mod tests {
             TaskStatus::Failed("trace timeout".into())
         );
         assert_eq!(app.diagnostics.trace.common.job, None);
+        assert_eq!(
+            app.diagnostics
+                .trace
+                .common
+                .error
+                .as_ref()
+                .map(|error| error.code),
+            Some(crate::RuntimeErrorCode::Timeout)
+        );
         assert_eq!(app.diagnostics.ping.common.status, TaskStatus::Idle);
     }
 
@@ -1702,6 +2340,8 @@ mod tests {
             page: Page::Diagnostics,
             ..AppModel::default()
         };
+        app.diagnostics.focused = true;
+        app.diagnostics.focus = DiagnosticFocus::Main;
         app.diagnostics.tool = DiagnosticTool::PortScan;
         app.scan_concurrency = 64;
         app.diagnostics.port_scan.request = crate::PortScanRequest {
@@ -2052,6 +2692,7 @@ mod tests {
             .insert("adapter-guid".into(), params.clone());
         config.session.history.adapter = vec!["9.9.9.9".into()];
         app.apply_config(&config);
+        app.page = Page::Adapters;
         app.update(Input(InputEvent::Action(Action::Edit)));
         assert_eq!(app.adapters.edit.as_ref().unwrap().params, params);
         app.update(Input(InputEvent::Action(Action::SelectAdapterField(
@@ -2093,5 +2734,88 @@ mod tests {
         ));
         app.update(Input(InputEvent::Action(Action::Quit)));
         assert!(!app.running);
+    }
+
+    #[test]
+    fn diagnostics_focus_and_ping_config_match_v031_interaction() {
+        let mut app = AppModel {
+            page: Page::Diagnostics,
+            ..AppModel::default()
+        };
+        app.update(Input(InputEvent::Key(KeyEvent::plain(KeyCode::Enter))));
+        assert!(app.diagnostics.focused);
+        assert_eq!(app.diagnostics.focus, DiagnosticFocus::Menu);
+        app.update(Input(InputEvent::Key(KeyEvent::plain(KeyCode::Tab))));
+        assert_eq!(app.diagnostics.focus, DiagnosticFocus::Main);
+        app.update(Input(InputEvent::Key(KeyEvent::plain(KeyCode::BackTab))));
+        assert_eq!(app.diagnostics.focus, DiagnosticFocus::Menu);
+        app.update(Input(InputEvent::Key(KeyEvent::plain(KeyCode::Tab))));
+
+        let effects = app.update(Input(InputEvent::Key(KeyEvent::plain(KeyCode::Char(' ')))));
+        assert!(matches!(effects.first(), Some(Effect::StartPing { .. })));
+        assert!(matches!(
+            effects.get(1),
+            Some(Effect::PersistSession(crate::SessionUpdate::TargetHistory(
+                _
+            )))
+        ));
+        let Effect::StartPing { job, .. } = effects[0] else {
+            panic!()
+        };
+        assert_eq!(
+            app.update(Input(InputEvent::Key(KeyEvent::plain(KeyCode::Char(' '))))),
+            [Effect::StopPing(job)]
+        );
+
+        app.update(Input(InputEvent::Key(KeyEvent::plain(KeyCode::Tab))));
+        assert_eq!(app.diagnostics.focus, DiagnosticFocus::Config);
+        app.diagnostics.cursor = 0;
+        let effects = app.update(Input(InputEvent::Key(KeyEvent::plain(KeyCode::Char('x')))));
+        assert_eq!(app.diagnostics.ping.request.target, "x8.8.8.8");
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::PersistSession(crate::SessionUpdate::Ping(_))]
+        ));
+        app.update(Input(InputEvent::Action(Action::SelectDiagnosticField(
+            1, 0,
+        ))));
+        let effects = app.update(Input(InputEvent::Action(Action::Right)));
+        assert_eq!(app.diagnostics.ping.request.interval_ms, 1_100);
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::PersistSession(crate::SessionUpdate::Ping(_))]
+        ));
+
+        app.update(Input(InputEvent::Key(KeyEvent::plain(KeyCode::Esc))));
+        assert!(!app.diagnostics.focused);
+    }
+
+    #[test]
+    fn trace_raw_config_loads_persists_and_clamps_at_execution() {
+        let mut app = AppModel::default();
+        let mut config = crate::ConfigData::default();
+        config.session.trace = crate::TracePersist {
+            target: "trace.example".into(),
+            max_hops: "999".into(),
+            timeout_ms: "1".into(),
+        };
+        config.session.history.targets = vec!["trace.example".into()];
+        app.apply_config(&config);
+        assert_eq!(app.diagnostics.trace.max_hops_input, "999");
+        assert_eq!(app.diagnostics.trace.request.max_hops, 30);
+        assert_eq!(app.diagnostics.trace.request.timeout_ms, 100);
+
+        app.page = Page::Diagnostics;
+        app.update(Input(InputEvent::Action(Action::SelectDiagnostic(1))));
+        app.update(Input(InputEvent::Action(Action::FocusDiagnostic(
+            DiagnosticFocus::Main,
+        ))));
+        let effects = app.update(Input(InputEvent::Action(Action::Toggle)));
+        let Effect::StartTrace { request, .. } = &effects[0] else {
+            panic!()
+        };
+        assert_eq!(request.max_hops, 30);
+        assert_eq!(request.timeout_ms, 100);
+        assert_eq!(request.target, "trace.example");
     }
 }

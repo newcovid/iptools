@@ -24,6 +24,10 @@ try {
   await page.waitForTimeout(600);
   await page.evaluate(() => document.fonts.ready);
   assert.match(await page.locator(".demo-badge").textContent(), /v0\.4 PREVIEW.*SIMULATED DATA/);
+  assert.ok(
+    (await page.locator(".demo-badge").boundingBox())?.height <= 24,
+    "Preview badge should remain on one line",
+  );
   await page.locator("#terminal").focus();
   assert.equal(await page.evaluate(() => document.activeElement?.id), "terminal");
   assert.equal(
@@ -272,6 +276,64 @@ try {
   });
   await trafficPage.close();
 
+  const diagnosticsPage = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  await diagnosticsPage.goto(`${baseURL}?scenario=home-network&lang=zh&renderer=dom`, {
+    waitUntil: "domcontentloaded",
+  });
+  await diagnosticsPage.waitForSelector("#terminal_ratzilla_grid");
+  await diagnosticsPage.locator("#terminal").focus();
+  for (let index = 0; index < 4; index += 1) {
+    await diagnosticsPage.keyboard.press("Tab");
+  }
+  await diagnosticsPage.waitForFunction(() =>
+    document.getElementById("terminal")?.textContent?.includes("按 Enter 进入诊断工具"),
+  );
+  await diagnosticsPage.keyboard.press("Enter");
+  await diagnosticsPage.keyboard.press("Tab");
+  await diagnosticsPage.keyboard.press("Shift+Tab");
+  await waitForStableTerminal(diagnosticsPage);
+  const diagnosticMenuFocus = hash(await diagnosticsPage.locator("#terminal").screenshot());
+  await diagnosticsPage.keyboard.press("ArrowDown");
+  await waitForStableTerminal(diagnosticsPage);
+  assert.notEqual(
+    hash(await diagnosticsPage.locator("#terminal").screenshot()),
+    diagnosticMenuFocus,
+    "Shift+Tab should return diagnostic focus to the tool menu",
+  );
+  await diagnosticsPage.keyboard.press("ArrowUp");
+  await diagnosticsPage.keyboard.press("Tab");
+  await diagnosticsPage.keyboard.press("Space");
+  await diagnosticsPage.waitForFunction(() =>
+    /reply 1: \d+ ms/.test(document.getElementById("terminal")?.textContent ?? ""),
+  );
+  await diagnosticsPage.keyboard.press("Space");
+  await diagnosticsPage.keyboard.press("Tab");
+  await diagnosticsPage.keyboard.press("ArrowDown");
+  await diagnosticsPage.keyboard.press("ArrowRight");
+  await diagnosticsPage.waitForFunction(() =>
+    /间隔\s+1100 ms/.test(document.getElementById("terminal")?.textContent ?? ""),
+  );
+  await diagnosticsPage.keyboard.press("ArrowUp");
+  await diagnosticsPage.keyboard.press("Control+r");
+  await diagnosticsPage.waitForFunction(() =>
+    document.getElementById("terminal")?.textContent?.includes("目标历史"),
+  );
+  await diagnosticsPage.keyboard.press("Escape");
+  await diagnosticsPage.keyboard.press("Escape");
+  await diagnosticsPage.keyboard.press("Enter");
+  await diagnosticsPage.keyboard.press("ArrowDown");
+  await diagnosticsPage.keyboard.press("Tab");
+  await diagnosticsPage.keyboard.press("Space");
+  await diagnosticsPage.waitForFunction(() =>
+    document.getElementById("terminal")?.textContent?.includes("192.0.2.1"),
+  );
+  await waitForStableTerminal(diagnosticsPage);
+  await diagnosticsPage.screenshot({
+    path: "../../target/playwright-web-ping-trace-zh.png",
+    fullPage: false,
+  });
+  await diagnosticsPage.close();
+
   const narrowPage = await browser.newPage({ viewport: { width: 390, height: 844 } });
   await narrowPage.goto(`${baseURL}?lang=zh`, { waitUntil: "domcontentloaded" });
   assert.notEqual(
@@ -288,6 +350,23 @@ try {
 
 function hash(buffer) {
   return crypto.createHash("sha256").update(buffer).digest("hex");
+}
+
+async function waitForStableTerminal(page) {
+  let previous = null;
+  let stableFrames = 0;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const current = hash(await page.locator("#terminal").screenshot());
+    if (current === previous) {
+      stableFrames += 1;
+      if (stableFrames >= 2) return;
+    } else {
+      previous = current;
+      stableFrames = 0;
+    }
+    await page.waitForTimeout(50);
+  }
+  assert.fail("Terminal did not reach a stable rendered frame");
 }
 
 async function measureInputLatencies(page, iterations) {

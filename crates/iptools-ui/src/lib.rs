@@ -2,7 +2,7 @@
 
 use iptools_core::{
     Action, AdapterApplyOutcome, AdapterEditPhase, AdapterField, AdapterValidationError, AppModel,
-    DiagnosticTool, Language, Page, TaskStatus,
+    DiagnosticFocus, DiagnosticTool, Language, Page, RuntimeErrorCode, TaskStatus,
 };
 use ratatui::{
     Frame,
@@ -24,7 +24,8 @@ pub struct UiState {
     page_regions: Vec<(Rect, Page)>,
     diagnostic_regions: Vec<(Rect, DiagnosticTool)>,
     scanner_action: Option<Rect>,
-    diagnostic_action: Option<Rect>,
+    diagnostic_main: Option<Rect>,
+    diagnostic_fields: Vec<(Rect, usize, u16)>,
     adapter_regions: Vec<(Rect, usize)>,
     adapter_fields: Vec<(Rect, AdapterField, u16)>,
 }
@@ -60,12 +61,25 @@ impl UiState {
         {
             return Some(Action::SelectDiagnostic(*tool as u8));
         }
+        if let Some((area, index, value_x)) = self
+            .diagnostic_fields
+            .iter()
+            .find(|(area, _, _)| contains(*area, column, row))
+        {
+            return Some(Action::SelectDiagnosticField(
+                *index,
+                column.saturating_sub(*value_x).min(area.width) as usize,
+            ));
+        }
+        if self
+            .diagnostic_main
+            .is_some_and(|area| contains(area, column, row))
+        {
+            return Some(Action::FocusDiagnostic(DiagnosticFocus::Main));
+        }
         if self
             .scanner_action
             .is_some_and(|area| contains(area, column, row))
-            || self
-                .diagnostic_action
-                .is_some_and(|area| contains(area, column, row))
         {
             return Some(Action::Toggle);
         }
@@ -769,6 +783,14 @@ fn render_diagnostics(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut 
         ])
         .split(area);
 
+    let focus_style = |focus| {
+        if model.diagnostics.focused && model.diagnostics.focus == focus {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default().fg(MUTED)
+        }
+    };
+
     let mut items = Vec::new();
     let menu_inner = Block::bordered().inner(cols[0]);
     for (index, tool) in DiagnosticTool::ALL.into_iter().enumerate() {
@@ -788,50 +810,179 @@ fn render_diagnostics(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut 
         );
     }
     frame.render_widget(
-        List::new(items).block(Block::bordered().title(" Tools ")),
+        List::new(items).block(
+            Block::bordered()
+                .title(tr(model.language, " 工具 ", " Tools "))
+                .border_style(focus_style(DiagnosticFocus::Menu)),
+        ),
         cols[0],
     );
 
-    let mut lines = vec![
-        Line::from(Span::styled(
-            common.primary.clone(),
-            Style::default().fg(SECONDARY).add_modifier(Modifier::BOLD),
-        )),
-        Line::from(common.detail.clone()),
-        Line::from(""),
-    ];
-    lines.extend(
-        model
-            .diagnostics
-            .active_common()
-            .log
-            .iter()
-            .rev()
-            .take(cols[1].height.saturating_sub(6) as usize)
-            .rev()
-            .cloned()
-            .map(Line::from),
-    );
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(Block::bordered().title(format!(" {} ", tool_label(model.diagnostics.tool))))
-            .wrap(Wrap { trim: true }),
-        cols[1],
-    );
+    ui.diagnostic_main = Some(cols[1]);
+    let main_block = Block::bordered()
+        .title(format!(" {} ", tool_label(model.diagnostics.tool)))
+        .border_style(focus_style(DiagnosticFocus::Main));
+    let main_inner = main_block.inner(cols[1]);
+    frame.render_widget(main_block, cols[1]);
+    if let Some(failure) = diagnostic_failure(common, model.language) {
+        let mut lines = vec![
+            Line::from(Span::styled(
+                tr(model.language, "诊断失败", "Diagnostic failed"),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(failure),
+            Line::from(""),
+        ];
+        lines.extend(
+            common
+                .log
+                .iter()
+                .rev()
+                .take(main_inner.height.saturating_sub(4) as usize)
+                .rev()
+                .cloned()
+                .map(Line::from),
+        );
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), main_inner);
+    } else {
+        match model.diagnostics.tool {
+            DiagnosticTool::Trace => {
+                let rows = model
+                    .diagnostics
+                    .trace
+                    .hops
+                    .iter()
+                    .enumerate()
+                    .map(|(index, hop)| {
+                        Row::new(vec![
+                            hop.ttl.to_string(),
+                            hop.address.clone().unwrap_or_else(|| "*".into()),
+                            hop.latency_ms
+                                .map_or_else(|| "—".into(), |value| format!("{value} ms")),
+                            hop.hostname.clone().unwrap_or_default(),
+                        ])
+                        .style(
+                            if index == model.diagnostics.trace.selected {
+                                Style::default().bg(SELECTED)
+                            } else {
+                                Style::default()
+                            },
+                        )
+                    });
+                frame.render_widget(
+                    Table::new(
+                        rows,
+                        [
+                            Constraint::Length(5),
+                            Constraint::Length(17),
+                            Constraint::Length(10),
+                            Constraint::Min(8),
+                        ],
+                    )
+                    .header(
+                        Row::new(["Hop", "Address", "RTT", "Host"])
+                            .style(Style::default().fg(PRIMARY)),
+                    ),
+                    main_inner,
+                );
+            }
+            _ => {
+                let mut lines = vec![
+                    Line::from(Span::styled(
+                        common.primary.clone(),
+                        Style::default().fg(SECONDARY).add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(common.detail.clone()),
+                    Line::from(""),
+                ];
+                lines.extend(
+                    common
+                        .log
+                        .iter()
+                        .rev()
+                        .take(main_inner.height.saturating_sub(4) as usize)
+                        .rev()
+                        .cloned()
+                        .map(Line::from),
+                );
+                frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), main_inner);
+            }
+        }
+    }
 
     let config_rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(5),
-            Constraint::Length(3),
-            Constraint::Min(1),
-        ])
+        .constraints([Constraint::Min(7), Constraint::Length(3)])
         .split(cols[2]);
-    frame.render_widget(
-        Paragraph::new(format!("Target\n{}", model.diagnostics.active_target()))
-            .block(Block::bordered().title(" Configuration ")),
-        config_rows[0],
-    );
+    let config_block = Block::bordered()
+        .title(tr(model.language, " 配置 ", " Configuration "))
+        .border_style(focus_style(DiagnosticFocus::Config));
+    let config_inner = config_block.inner(config_rows[0]);
+    frame.render_widget(config_block, config_rows[0]);
+    let fields = diagnostic_fields(model);
+    for (index, (label, raw_value)) in fields.into_iter().enumerate() {
+        if index >= config_inner.height as usize {
+            break;
+        }
+        let row = Rect::new(
+            config_inner.x,
+            config_inner.y + index as u16,
+            config_inner.width,
+            1,
+        );
+        let value_x = row.x.saturating_add(11.min(row.width));
+        ui.diagnostic_fields.push((row, index, value_x));
+        let selected = model.diagnostics.focused
+            && model.diagnostics.focus == DiagnosticFocus::Config
+            && active_diagnostic_config_index(model) == index;
+        let text_editable = index == 0 || model.diagnostics.tool == DiagnosticTool::Trace;
+        let mut spans = vec![Span::styled(
+            format!("{} {label:<8}", if selected { ">" } else { " " }),
+            if selected {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default().fg(MUTED)
+            },
+        )];
+        if selected && common.job.is_none() && text_editable {
+            let cursor = model.diagnostics.cursor.min(raw_value.len());
+            spans.push(Span::styled(
+                raw_value[..cursor].to_string(),
+                Style::default().fg(Color::Yellow),
+            ));
+            spans.push(Span::styled("█", Style::default().fg(Color::Yellow)));
+            spans.push(Span::styled(
+                raw_value[cursor..].to_string(),
+                Style::default().fg(Color::Yellow),
+            ));
+            if index == 0
+                && !raw_value.is_empty()
+                && cursor == raw_value.len()
+                && let Some(candidate) = model.diagnostics.target_history.iter().find(|candidate| {
+                    candidate.starts_with(&raw_value) && candidate.len() > raw_value.len()
+                })
+            {
+                spans.push(Span::styled(
+                    candidate[raw_value.len()..].to_string(),
+                    Style::default().fg(MUTED),
+                ));
+            }
+        } else {
+            spans.push(Span::styled(
+                raw_value,
+                if common.job.is_some() {
+                    Style::default().fg(MUTED)
+                } else if selected {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::White)
+                },
+            ));
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), row);
+    }
     frame.render_widget(
         Gauge::default()
             .block(Block::bordered().title(task_label(&common.status, model.language)))
@@ -839,7 +990,126 @@ fn render_diagnostics(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut 
             .percent(common.progress.min(100) as u16),
         config_rows[1],
     );
-    ui.diagnostic_action = Some(config_rows[1]);
+
+    if model.diagnostics.history_open {
+        let popup = centered(cols[2], 90, 55);
+        frame.render_widget(Clear, popup);
+        let items = model
+            .diagnostics
+            .target_history
+            .iter()
+            .take(8)
+            .enumerate()
+            .map(|(index, value)| {
+                ListItem::new(value.clone()).style(if index == model.diagnostics.history_selected {
+                    Style::default().bg(SELECTED)
+                } else {
+                    Style::default()
+                })
+            });
+        frame.render_widget(
+            List::new(items).block(Block::bordered().title(tr(
+                model.language,
+                " 目标历史 ",
+                " Target history ",
+            ))),
+            popup,
+        );
+    }
+
+    if !model.diagnostics.focused {
+        let hint = centered(cols[1], 70, 18);
+        frame.render_widget(
+            Paragraph::new(tr(
+                model.language,
+                "按 Enter 进入诊断工具",
+                "Press Enter to focus diagnostics",
+            ))
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(MUTED)),
+            hint,
+        );
+    }
+}
+
+fn diagnostic_failure(
+    common: &iptools_core::DiagnosticCommonState,
+    language: Language,
+) -> Option<String> {
+    let TaskStatus::Failed(status_message) = &common.status else {
+        return None;
+    };
+    let label = match common.error.as_ref().map(|error| error.code) {
+        Some(RuntimeErrorCode::InvalidRequest) => tr(language, "参数无效", "Invalid request"),
+        Some(RuntimeErrorCode::ResolveTarget) => {
+            tr(language, "无法解析目标", "Target resolution failed")
+        }
+        Some(RuntimeErrorCode::PermissionDenied) => tr(language, "权限不足", "Permission denied"),
+        Some(RuntimeErrorCode::Timeout) => tr(language, "请求超时", "Request timed out"),
+        Some(RuntimeErrorCode::Network) => tr(language, "网络错误", "Network error"),
+        Some(RuntimeErrorCode::Cancelled) => tr(language, "任务已取消", "Task cancelled"),
+        Some(RuntimeErrorCode::Internal) => tr(language, "内部错误", "Internal error"),
+        None => tr(language, "执行失败", "Operation failed"),
+    };
+    let detail = common
+        .error
+        .as_ref()
+        .map(|error| error.message.as_str())
+        .unwrap_or(status_message);
+    if detail.is_empty() || detail.starts_with("diag_") {
+        Some(label.into())
+    } else {
+        Some(format!("{label}: {detail}"))
+    }
+}
+
+fn active_diagnostic_config_index(model: &AppModel) -> usize {
+    match model.diagnostics.tool {
+        DiagnosticTool::Ping => model.diagnostics.ping.config_selected,
+        DiagnosticTool::Trace => model.diagnostics.trace.config_selected,
+        _ => 0,
+    }
+}
+
+fn diagnostic_fields(model: &AppModel) -> Vec<(&'static str, String)> {
+    match model.diagnostics.tool {
+        DiagnosticTool::Ping => vec![
+            (
+                tr(model.language, "目标", "Target"),
+                model.diagnostics.ping.request.target.clone(),
+            ),
+            (
+                tr(model.language, "间隔", "Interval"),
+                format!("{} ms", model.diagnostics.ping.request.interval_ms),
+            ),
+            (
+                tr(model.language, "超时", "Timeout"),
+                format!("{} ms", model.diagnostics.ping.request.timeout_ms),
+            ),
+            (
+                tr(model.language, "载荷", "Payload"),
+                format!("{} B", model.diagnostics.ping.request.packet_size),
+            ),
+        ],
+        DiagnosticTool::Trace => vec![
+            (
+                tr(model.language, "目标", "Target"),
+                model.diagnostics.trace.request.target.clone(),
+            ),
+            (
+                tr(model.language, "最大跳数", "Max hops"),
+                model.diagnostics.trace.max_hops_input.clone(),
+            ),
+            (
+                tr(model.language, "超时", "Timeout"),
+                model.diagnostics.trace.timeout_input.clone(),
+            ),
+        ],
+        _ => vec![(
+            tr(model.language, "目标", "Target"),
+            model.diagnostics.active_target().to_string(),
+        )],
+    }
 }
 
 fn render_settings(frame: &mut Frame, area: Rect, model: &AppModel) {
@@ -1206,6 +1476,7 @@ mod tests {
                     TaskStatus::Done,
                     TaskStatus::Failed("resolve failed".into()),
                 ] {
+                    let failed = matches!(&status, TaskStatus::Failed(_));
                     let backend = TestBackend::new(width, height);
                     let mut terminal = Terminal::new(backend).unwrap();
                     let mut model = AppModel::default();
@@ -1225,10 +1496,85 @@ mod tests {
                         .unwrap();
                     let text = terminal.backend().to_string();
                     assert!(text.contains("192.0.2.10"));
-                    assert!(text.contains("open: 443"));
-                    assert!(ui.diagnostic_action.is_some());
+                    if failed {
+                        assert!(text.contains(if language == Language::Zh {
+                            "执行失败"
+                        } else {
+                            "Operation failed"
+                        }));
+                    } else {
+                        assert!(text.contains("open: 443"));
+                    }
+                    assert!(ui.diagnostic_main.is_some());
                 }
             }
+        }
+    }
+
+    #[test]
+    fn ping_and_trace_shared_focus_config_and_results_render_in_both_languages() {
+        for language in [Language::En, Language::Zh] {
+            let backend = TestBackend::new(120, 36);
+            let mut terminal = Terminal::new(backend).unwrap();
+            let mut model = AppModel::default();
+            model.page = Page::Diagnostics;
+            model.language = language;
+            model.diagnostics.focused = true;
+            model.diagnostics.focus = DiagnosticFocus::Config;
+            model.diagnostics.ping.common.status = TaskStatus::Running;
+            model.diagnostics.ping.common.primary = "reply 4: 18 ms".into();
+            model.diagnostics.ping.common.detail = "4 / 4 received".into();
+            model.diagnostics.ping.common.log = vec!["reply 3: 20 ms".into()];
+            let mut ui = UiState::default();
+            terminal
+                .draw(|frame| render(frame, &model, &mut ui))
+                .unwrap();
+            let text = terminal.backend().to_string();
+            assert!(text.contains("8.8.8.8"), "{text}");
+            assert!(text.contains("1000 ms"), "{text}");
+            assert_eq!(
+                ui.hit_test(107, 4),
+                Some(Action::SelectDiagnosticField(0, 1))
+            );
+            assert_eq!(
+                ui.hit_test(25, 5),
+                Some(Action::FocusDiagnostic(DiagnosticFocus::Main))
+            );
+
+            model.diagnostics.tool = DiagnosticTool::Trace;
+            model.diagnostics.focus = DiagnosticFocus::Main;
+            model.diagnostics.trace.hops = vec![iptools_core::TraceHop {
+                ttl: 1,
+                address: Some("192.0.2.1".into()),
+                hostname: Some("gateway.example".into()),
+                latency_ms: Some(7),
+            }];
+            terminal
+                .draw(|frame| render(frame, &model, &mut ui))
+                .unwrap();
+            let text = terminal.backend().to_string();
+            assert!(text.contains("192.0.2.1"), "{text}");
+            assert!(text.contains("gateway.example"), "{text}");
+            assert!(text.contains("30"), "{text}");
+
+            let error = iptools_core::RuntimeError::new(
+                RuntimeErrorCode::PermissionDenied,
+                "raw socket permission denied",
+            );
+            model.diagnostics.trace.common.status = TaskStatus::Failed(error.message.clone());
+            model.diagnostics.trace.common.error = Some(error);
+            terminal
+                .draw(|frame| render(frame, &model, &mut ui))
+                .unwrap();
+            let text = terminal.backend().to_string();
+            assert!(
+                text.contains(if language == Language::Zh {
+                    "权限不足"
+                } else {
+                    "Permission denied"
+                }),
+                "{text}"
+            );
         }
     }
 }
