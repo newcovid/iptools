@@ -109,7 +109,9 @@ impl DemoRuntime {
 
     pub fn dispatch(&mut self, effect: Effect) -> Vec<RuntimeEvent> {
         match effect {
-            Effect::PersistPreferences(_) | Effect::PersistAdapterEdit { .. } => Vec::new(),
+            Effect::PersistPreferences(_)
+            | Effect::PersistSession(_)
+            | Effect::PersistAdapterEdit { .. } => Vec::new(),
             Effect::RefreshDashboard { job, .. } => {
                 vec![RuntimeEvent::DashboardRefreshFinished {
                     job,
@@ -289,6 +291,12 @@ impl DemoRuntime {
                         latency_ms: Some(self.scenario.latency_ms + step as u64 % 4),
                         ttl: Some(64),
                         size: request.packet_size as usize,
+                        sent: step as u64,
+                        received: step as u64,
+                        min_ms: Some(self.scenario.latency_ms),
+                        average_ms: Some(self.scenario.latency_ms as f64 + 1.5),
+                        max_ms: Some(self.scenario.latency_ms + 3),
+                        loss_percent: 0.0,
                     },
                 },
             );
@@ -691,6 +699,26 @@ mod tests {
             event,
             RuntimeEvent::PingFinished { job: current, .. } if *current == job
         )));
+
+        let trace = JobId {
+            tool: ToolKind::Trace,
+            generation: 2,
+        };
+        runtime.dispatch(Effect::StartTrace {
+            job: trace,
+            request: iptools_core::TraceRequest::default(),
+        });
+        assert!(matches!(
+            runtime.dispatch(Effect::StopTrace(trace)).as_slice(),
+            [RuntimeEvent::TraceFinished { job: current, hops: 0 }]
+                if *current == trace
+        ));
+        assert!(
+            runtime
+                .advance(10_000)
+                .iter()
+                .all(|event| event_job(event) != Some(trace))
+        );
     }
 
     #[test]

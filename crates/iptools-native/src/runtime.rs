@@ -2,6 +2,7 @@
 
 mod adapter_edit;
 mod dashboard;
+mod diagnostics;
 mod network_read;
 mod port_scan;
 mod scanner;
@@ -111,6 +112,22 @@ impl NativeRuntime {
                 self.spawn_port_scan(job, request);
                 Ok(())
             }
+            Effect::StartPing { job, request } => {
+                self.spawn_ping(job, request);
+                Ok(())
+            }
+            Effect::StopPing(job) => {
+                self.cancel(job);
+                Ok(())
+            }
+            Effect::StartTrace { job, request } => {
+                self.spawn_trace(job, request);
+                Ok(())
+            }
+            Effect::StopTrace(job) => {
+                self.cancel(job);
+                Ok(())
+            }
             Effect::StopPortScan(job) => {
                 self.cancel(job);
                 Ok(())
@@ -200,15 +217,28 @@ impl NativeRuntime {
             token.cancel();
         }
         self.cancellations.clear();
-        while let Some(result) = self.tasks.join_next().await {
-            match result {
-                Ok(task) => {
-                    if let Err(error) = task.result {
-                        tracing::warn!(tool = ?task.job.tool, generation = task.job.generation, %error, "runtime job failed during shutdown");
+        while !self.tasks.is_empty() {
+            tokio::select! {
+                result = self.tasks.join_next() => {
+                    match result {
+                        Some(Ok(task)) => {
+                            if let Err(error) = task.result {
+                                tracing::warn!(tool = ?task.job.tool, generation = task.job.generation, %error, "runtime job failed during shutdown");
+                            }
+                        }
+                        Some(Err(error)) => {
+                            tracing::warn!(%error, "runtime job failed to join during shutdown");
+                        }
+                        None => break,
                     }
                 }
-                Err(error) => {
-                    tracing::warn!(%error, "runtime job failed to join during shutdown");
+                // A producer may already be awaiting capacity when shutdown
+                // cancels it. Keep draining until every owned task has joined,
+                // otherwise a full bounded queue can deadlock terminal exit.
+                event = self.event_rx.recv() => {
+                    if event.is_none() {
+                        break;
+                    }
                 }
             }
         }
@@ -218,6 +248,7 @@ impl NativeRuntime {
 fn effect_name(effect: &Effect) -> &'static str {
     match effect {
         Effect::PersistPreferences(_) => "persist-preferences",
+        Effect::PersistSession(_) => "persist-session",
         Effect::PersistAdapterEdit { .. } => "persist-adapter-edit",
         Effect::RefreshDashboard { .. } => "refresh-dashboard",
         Effect::RefreshAdapters { .. } => "refresh-adapters",
@@ -307,5 +338,35 @@ mod tests {
         }
         assert!(runtime.tasks.is_empty());
         assert!(!runtime.cancellations.contains_key(&job));
+    }
+
+    #[tokio::test]
+    async fn shutdown_drains_a_full_event_queue_before_joining_producers() {
+        let mut runtime = NativeRuntime::new();
+        let job = JobId {
+            tool: ToolKind::Scanner,
+            generation: 1,
+        };
+        runtime.spawn(job, move |_, events| async move {
+            for current in 0..=EVENT_CAPACITY as u64 {
+                events
+                    .send(RuntimeEvent::ScanProgress {
+                        job,
+                        current,
+                        total: EVENT_CAPACITY as u64 + 1,
+                    })
+                    .await
+                    .map_err(|error| RuntimeTaskError::Operation(error.to_string()))?;
+            }
+            Ok(())
+        });
+
+        while runtime.event_rx.len() < EVENT_CAPACITY {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(1), runtime.shutdown())
+            .await
+            .expect("shutdown must drain backpressured producers");
+        assert!(runtime.tasks.is_empty());
     }
 }

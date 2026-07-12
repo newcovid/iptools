@@ -75,6 +75,17 @@ fn dispatch_effects(
                 config.scan_concurrency = preferences.scan_concurrency;
                 config.save();
             }
+            Effect::PersistSession(update) => {
+                match update {
+                    iptools_core::SessionUpdate::Ping(value) => config.session.ping = value,
+                    iptools_core::SessionUpdate::Trace(value) => config.session.trace = value,
+                    iptools_core::SessionUpdate::TargetHistory(value) => {
+                        config.session.history.targets = value;
+                    }
+                    iptools_core::SessionUpdate::Ui(value) => config.session.ui = value,
+                }
+                config.save();
+            }
             Effect::PersistAdapterEdit {
                 guid,
                 params,
@@ -226,6 +237,54 @@ mod tests {
             Some(&params)
         );
         assert_eq!(saved.session.history.adapter, ["10.0.0.8"]);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn native_demo_persists_shared_ping_trace_and_target_history() {
+        let path = std::env::temp_dir().join(format!(
+            "iptools-demo-diagnostics-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut config = Config::load(Some(path.to_str().unwrap()));
+        let mut model = AppModel::default();
+        let mut runtime = DemoRuntime::new(ScenarioId::HomeNetwork).unwrap();
+        let ping = iptools_core::PingPersist {
+            target: "ping.example".into(),
+            interval_ms: 500,
+            timeout_ms: 900,
+            packet_size: 64,
+        };
+        let trace = iptools_core::TracePersist {
+            target: "trace.example".into(),
+            max_hops: "12".into(),
+            timeout_ms: "800".into(),
+        };
+        dispatch_effects(
+            &mut model,
+            &mut runtime,
+            &mut config,
+            vec![
+                Effect::PersistSession(iptools_core::SessionUpdate::Ping(ping.clone())),
+                Effect::PersistSession(iptools_core::SessionUpdate::Trace(trace.clone())),
+                Effect::PersistSession(iptools_core::SessionUpdate::TargetHistory(vec![
+                    "trace.example".into(),
+                    "ping.example".into(),
+                ])),
+            ],
+        );
+        let saved: iptools_core::ConfigData =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved.session.ping, ping);
+        assert_eq!(saved.session.trace, trace);
+        assert_eq!(
+            saved.session.history.targets,
+            ["trace.example", "ping.example"]
+        );
         std::fs::remove_file(path).unwrap();
     }
 }

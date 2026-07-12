@@ -127,7 +127,8 @@ impl NativeRuntime {
 #[cfg(test)]
 mod tests {
     use iptools_core::{
-        Action, AppModel, DiagnosticTool, Effect, InputEvent, Message, Page, TaskStatus, ToolKind,
+        Action, AppModel, DiagnosticFocus, DiagnosticTool, Effect, InputEvent, Message, Page,
+        TaskStatus, ToolKind,
     };
 
     use super::*;
@@ -153,6 +154,8 @@ mod tests {
     async fn native_handler_drives_the_shared_port_scan_reducer() {
         let mut model = AppModel::default();
         model.page = Page::Diagnostics;
+        model.diagnostics.focused = true;
+        model.diagnostics.focus = DiagnosticFocus::Main;
         model.diagnostics.tool = DiagnosticTool::PortScan;
         model.diagnostics.port_scan.request = PortScanRequest {
             target: "127.0.0.1".into(),
@@ -178,6 +181,8 @@ mod tests {
     async fn invalid_request_returns_typed_failure() {
         let mut model = AppModel::default();
         model.page = Page::Diagnostics;
+        model.diagnostics.focused = true;
+        model.diagnostics.focus = DiagnosticFocus::Main;
         model.diagnostics.tool = DiagnosticTool::PortScan;
         model.diagnostics.port_scan.request = PortScanRequest {
             target: String::new(),

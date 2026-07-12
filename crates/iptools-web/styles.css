@@ -32,8 +32,9 @@ header {
   gap: 1rem;
 }
 
+header > div { flex: 0 0 auto; white-space: nowrap; }
 header strong { font-size: 1.35rem; color: #5ee8ff; }
-nav { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+nav { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: .5rem; }
 button, select, a {
   border: 1px solid #31526b;
   border-radius: .35rem;
