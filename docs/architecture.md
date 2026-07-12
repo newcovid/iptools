@@ -47,13 +47,13 @@ Web 和 native `--demo` 使用 `iptools-demo::DemoRuntime` 的固定 seed 与定
 
 ## 原生 Runtime 与迁移桥
 
-顶层唯一的 `NativeRuntime` 使用 `JoinSet<TaskResult>`、容量 512 的有界 mpsc 与 `CancellationToken` 管理共享架构中的任务。每项任务带 `JobId { tool, generation }`；同一工具的新任务先取消旧任务，core 会忽略旧 generation 的迟到事件。退出时 runtime 取消并等待所有子任务。终端输入使用独立的容量 128 有界通道，并在恢复终端前 shutdown/join。
+顶层唯一的 `NativeRuntime` 使用 `JoinSet<TaskResult>`、容量 512 的有界 mpsc 与 `CancellationToken` 管理共享架构中的任务。每项任务带 `JobId { tool, generation }`；同一工具的新任务先取消旧任务，core 会忽略旧 generation 的迟到事件。退出时 runtime 取消并等待所有子任务；shutdown 在 join 期间持续排空事件队列，避免生产者已被有界队列背压时与退出流程互相等待。终端输入使用独立的容量 128 有界通道，并在恢复终端前 shutdown/join。
 
 跨平台协议当前为 `ARCHITECTURE_VERSION = 2`。Ping、Trace、Port Scan、Public Speed、Link Quality 与 LAN Speed 各自拥有强类型 Request、Sample、Summary 和 Failed RuntimeEvent；禁止用通用字符串进度承载业务数据。
 
 真实原生页面的既有网络算法暂时保留在 `iptools-native/src/modules` 和 `utils` 中，作为兼容迁移桥；新增跨端行为必须进入 core/ui/runtime 边界，不能继续增加 detached spawn 或无界通道。迁移桥删除前，真实网络算法行为不得因 Web 展览而改变。
 
-Scanner、Port Scan、Dashboard、Adapter 读取、Traffic 与 Adapter Edit 已进入阶段 3 的垂直切片：ARP/主机名解析、TCP 连接扫描、Dashboard 的系统/公网信息、适配器枚举和流量采样，以及网卡 DHCP/静态地址写入均已移到 `NativeRuntime::dispatch(Effect)`。所有操作均使用 JobId；同一工具的新任务取代旧 generation，core 丢弃迟到结果。Adapter 读取与写入共用单许可 blocking gate，确保不可中断的系统写入完成并被等待后，更新的写入才会执行；Traffic 仍使用独立的快速采样路径。Adapter Edit 在 core 与 native 边界各自校验请求，区分永久生效、Linux 运行时临时生效与 Demo 模拟生效；Web 永远只修改确定性场景。旧原生页继续作为兼容迁移桥，共享 `AppModel` 已可直接由这些 native handler 驱动。
+Scanner、Port Scan、Dashboard、Adapter 读取、Traffic、Adapter Edit、Ping 与 Trace 已进入阶段 3 的垂直切片：ARP/主机名解析、TCP 连接扫描、Dashboard 的系统/公网信息、适配器枚举和流量采样、网卡 DHCP/静态地址写入、ICMP Ping 与逐跳跟踪均已移到 `NativeRuntime::dispatch(Effect)`。所有操作均使用 JobId；同一工具的新任务取代旧 generation，core 丢弃迟到结果。Ping 的累计统计最多以 4 Hz 进入 UI；Trace 保留 v0.3.1 的 IPv4 逐跳算法。两者共用 v0.3.1 的目标 MRU 和 Menu/Main/Config 焦点模型，参数继续写入兼容的 session JSON。Adapter 读取与写入共用单许可 blocking gate，确保不可中断的系统写入完成并被等待后，更新的写入才会执行；Traffic 仍使用独立的快速采样路径。Adapter Edit 在 core 与 native 边界各自校验请求，区分永久生效、Linux 运行时临时生效与 Demo 模拟生效；Web 永远只修改确定性场景。旧原生页继续作为兼容迁移桥，共享 `AppModel` 已可直接由这些 native handler 驱动。
 
 错误策略：binary 顶层可用 `anyhow`，领域与 runtime 边界使用强类型错误；结构化日志使用 `tracing`，core 不依赖 tracing。
 
@@ -87,3 +87,5 @@ pwsh scripts/check-web-size.ps1
 ```
 
 Playwright 覆盖 Chromium、Firefox、WebKit 的键盘、软键、Canvas/DOM 和同源资源约束。真实网络权限、平台 FFI 和适配器写入仍须在 Windows/Linux 非关键网卡上实测。
+
+`cargo audit` 当前会报告信息级 [`RUSTSEC-2026-0097`](https://rustsec.org/advisories/RUSTSEC-2026-0097.html)：`atomic-write-file 0.3.0` 传递引入 `rand 0.9.2`。实际 feature 图未启用该 advisory 的必要 `rand/log` feature，iptools 也没有“自定义 logger 内调用 `rand::rng()`”的触发路径，因此记录为不适用；一旦上游发布不受影响的依赖版本，仍应移除这条传递依赖警告。

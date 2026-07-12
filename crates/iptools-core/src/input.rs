@@ -92,6 +92,8 @@ pub enum Action {
     Help,
     SelectPage(u8),
     SelectDiagnostic(u8),
+    FocusDiagnostic(crate::DiagnosticFocus),
+    SelectDiagnosticField(usize, usize),
     ResetDemo,
     History,
     SelectAdapter(usize),

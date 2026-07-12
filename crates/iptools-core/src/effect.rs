@@ -268,6 +268,7 @@ impl Default for LanSpeedRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
     PersistPreferences(Preferences),
+    PersistSession(SessionUpdate),
     PersistAdapterEdit {
         guid: String,
         params: AdapterEditParams,
@@ -324,6 +325,14 @@ pub enum Effect {
     StopLanSpeed(JobId),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionUpdate {
+    Ping(crate::PingPersist),
+    Trace(crate::TracePersist),
+    TargetHistory(Vec<String>),
+    Ui(crate::UiPersist),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RuntimeErrorCode {
     InvalidRequest,
@@ -356,6 +365,12 @@ pub struct PingSample {
     pub latency_ms: Option<u64>,
     pub ttl: Option<u8>,
     pub size: usize,
+    pub sent: u64,
+    pub received: u64,
+    pub min_ms: Option<u64>,
+    pub average_ms: Option<f64>,
+    pub max_ms: Option<u64>,
+    pub loss_percent: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

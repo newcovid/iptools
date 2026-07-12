@@ -81,6 +81,7 @@ mod wasm {
             for effect in effects {
                 match effect {
                     Effect::PersistPreferences(preferences) => persist_settings(preferences),
+                    Effect::PersistSession(_) => {}
                     effect => {
                         for event in self.runtime.dispatch(effect) {
                             self.model.update(Message::Runtime(event));
