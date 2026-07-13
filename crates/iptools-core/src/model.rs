@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
+use std::net::IpAddr;
 
 use crate::{
     Action, AdapterEditParams, AdapterValidationError, Effect, InputEvent, JobId, KeyCode,
@@ -382,6 +384,8 @@ impl Default for DashboardState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScannerState {
     pub cidr: String,
+    #[serde(skip, default = "scanner_auto_cidr_default")]
+    pub auto_cidr: bool,
     pub editing: bool,
     pub cursor: usize,
     pub history: Vec<String>,
@@ -399,6 +403,7 @@ impl Default for ScannerState {
     fn default() -> Self {
         Self {
             cidr: "192.168.1.0/24".into(),
+            auto_cidr: true,
             editing: false,
             cursor: 0,
             history: Vec::new(),
@@ -412,6 +417,10 @@ impl Default for ScannerState {
             job: None,
         }
     }
+}
+
+const fn scanner_auto_cidr_default() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -663,6 +672,7 @@ impl AppModel {
             config.session.scanner.cidr.clone()
         };
         self.scanner.cursor = self.scanner.cidr.len();
+        self.scanner.auto_cidr = true;
         self.scanner.history = config.session.history.cidrs.clone();
         self.diagnostics.ping.request = crate::PingRequest {
             target: config.session.ping.target.clone(),
@@ -838,6 +848,7 @@ impl AppModel {
         if let Some(Action::SelectScannerHistory(index)) = action {
             if let Some(value) = self.scanner.history.get(index).cloned() {
                 self.scanner.cidr = value;
+                self.scanner.auto_cidr = false;
                 self.scanner.cursor = self.scanner.cidr.len();
                 self.scanner.history_open = false;
                 return self.persist_scanner();
@@ -862,6 +873,7 @@ impl AppModel {
                         .cloned()
                     {
                         self.scanner.cidr = value;
+                        self.scanner.auto_cidr = false;
                         self.scanner.cursor = self.scanner.cidr.len();
                         self.scanner.history_open = false;
                         return self.persist_scanner();
@@ -898,6 +910,7 @@ impl AppModel {
                     .cloned()
                 {
                     self.scanner.cidr = value;
+                    self.scanner.auto_cidr = false;
                     self.scanner.cursor = self.scanner.cidr.len();
                     return self.persist_scanner();
                 }
@@ -915,6 +928,7 @@ impl AppModel {
             ) && value.len() <= 32
             {
                 self.scanner.cidr = value;
+                self.scanner.auto_cidr = false;
                 return self.persist_scanner();
             }
         }
@@ -1791,6 +1805,30 @@ impl AppModel {
         self.load_selected_link_quality_params();
     }
 
+    fn sync_scanner_cidr(&mut self, adapters: &[AdapterInfo]) {
+        if !self.scanner.auto_cidr {
+            return;
+        }
+        let usable = |adapter: &&AdapterInfo| {
+            !adapter.ipv4.is_empty()
+                && adapter.ipv4 != "—"
+                && !adapter.ipv4.starts_with("127.")
+                && adapter.cidr.is_some()
+                && !adapter.status.to_ascii_lowercase().contains("down")
+                && !adapter.status.to_ascii_lowercase().contains("disconnected")
+        };
+        let adapter = adapters
+            .iter()
+            .filter(usable)
+            .find(|adapter| adapter.is_physical)
+            .or_else(|| adapters.iter().find(usable));
+        let Some(cidr) = adapter.and_then(active_network_cidr) else {
+            return;
+        };
+        self.scanner.cidr = cidr;
+        self.scanner.cursor = self.scanner.cidr.len();
+    }
+
     fn switch_link_quality_adapter(&mut self, delta: isize) {
         self.stash_link_quality_params();
         let len = self.diagnostics.link_quality.adapters.len();
@@ -2409,6 +2447,7 @@ impl AppModel {
                 self.dashboard.job = None;
             }
             RuntimeEvent::AdaptersUpdated(adapters) => {
+                self.sync_scanner_cidr(&adapters);
                 self.adapters.items = adapters;
                 self.sync_link_quality_adapters();
             }
@@ -2428,6 +2467,7 @@ impl AppModel {
                     .and_then(|name| adapters.iter().position(|adapter| adapter.name == name))
                     .unwrap_or(0)
                     .min(adapters.len().saturating_sub(1));
+                self.sync_scanner_cidr(&adapters);
                 self.adapters.items = adapters;
                 self.sync_link_quality_adapters();
                 self.adapters.status = TaskStatus::Done;
@@ -2506,7 +2546,21 @@ impl AppModel {
                 self.scanner.total = total;
             }
             RuntimeEvent::ScanHostFound { job, host } if self.scanner.job == Some(job) => {
-                self.scanner.results.push(host)
+                let selected_ip = self
+                    .scanner
+                    .results
+                    .get(self.scanner.selected)
+                    .map(|host| host.ip.clone());
+                self.scanner.results.push(host);
+                self.scanner.results.sort_by(scan_host_ip_order);
+                if let Some(selected_ip) = selected_ip {
+                    self.scanner.selected = self
+                        .scanner
+                        .results
+                        .iter()
+                        .position(|host| host.ip == selected_ip)
+                        .unwrap_or(0);
+                }
             }
             RuntimeEvent::ScanFinished { job } | RuntimeEvent::ScanCancelled { job }
                 if self.scanner.job == Some(job) =>
@@ -2824,6 +2878,28 @@ impl AppModel {
     }
 }
 
+fn scan_host_ip_order(left: &ScanHost, right: &ScanHost) -> Ordering {
+    match (left.ip.parse::<IpAddr>(), right.ip.parse::<IpAddr>()) {
+        (Ok(left), Ok(right)) => left.cmp(&right),
+        (Ok(_), Err(_)) => Ordering::Less,
+        (Err(_), Ok(_)) => Ordering::Greater,
+        (Err(_), Err(_)) => left.ip.cmp(&right.ip),
+    }
+}
+
+fn active_network_cidr(adapter: &AdapterInfo) -> Option<String> {
+    let (_, prefix) = adapter.cidr.as_deref()?.rsplit_once('/')?;
+    let prefix = prefix.parse::<u8>().ok().filter(|prefix| *prefix <= 32)?;
+    let address = adapter.ipv4.parse::<std::net::Ipv4Addr>().ok()?;
+    let mask = if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix)
+    };
+    let network = std::net::Ipv4Addr::from(u32::from(address) & mask);
+    Some(format!("{network}/{prefix}"))
+}
+
 fn finish_common(common: &mut DiagnosticCommonState, summary: String) {
     common.status = TaskStatus::Done;
     common.error = None;
@@ -3008,11 +3084,27 @@ mod tests {
         app.update(Runtime(RuntimeEvent::ScanHostFound {
             job,
             host: ScanHost {
-                ip: "192.168.1.1".into(),
+                ip: "192.168.1.10".into(),
                 ..ScanHost::default()
             },
         }));
         assert_eq!(app.scanner.results.len(), 1);
+        app.update(Runtime(RuntimeEvent::ScanHostFound {
+            job,
+            host: ScanHost {
+                ip: "192.168.1.2".into(),
+                ..ScanHost::default()
+            },
+        }));
+        assert_eq!(
+            app.scanner
+                .results
+                .iter()
+                .map(|host| host.ip.as_str())
+                .collect::<Vec<_>>(),
+            ["192.168.1.2", "192.168.1.10"]
+        );
+        assert_eq!(app.scanner.selected, 1);
     }
 
     #[test]
@@ -3058,6 +3150,38 @@ mod tests {
             effect,
             Effect::PersistSession(crate::SessionUpdate::CidrHistory(_))
         )));
+    }
+
+    #[test]
+    fn scanner_defaults_to_the_active_adapter_network_until_user_edits_it() {
+        let mut config = crate::ConfigData::default();
+        config.session.scanner.cidr = "10.20.30.0/24".into();
+        let mut app = AppModel::default();
+        app.apply_config(&config);
+        app.update(Runtime(RuntimeEvent::AdaptersUpdated(vec![AdapterInfo {
+            name: "WLAN".into(),
+            ipv4: "192.168.50.35".into(),
+            cidr: Some("192.168.50.35/24".into()),
+            status: "up".into(),
+            is_physical: true,
+            ..AdapterInfo::default()
+        }])));
+        assert_eq!(app.scanner.cidr, "192.168.50.0/24");
+
+        app.page = Page::Scanner;
+        app.scanner.editing = true;
+        app.scanner.cursor = app.scanner.cidr.len();
+        app.update(Input(InputEvent::Key(KeyEvent::plain(KeyCode::Backspace))));
+        assert!(!app.scanner.auto_cidr);
+        let edited = app.scanner.cidr.clone();
+        app.update(Runtime(RuntimeEvent::AdaptersUpdated(vec![AdapterInfo {
+            ipv4: "172.16.8.9".into(),
+            cidr: Some("172.16.8.9/16".into()),
+            status: "up".into(),
+            is_physical: true,
+            ..AdapterInfo::default()
+        }])));
+        assert_eq!(app.scanner.cidr, edited);
     }
 
     #[test]

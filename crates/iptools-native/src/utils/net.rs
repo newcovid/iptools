@@ -723,7 +723,13 @@ pub fn has_cap_net_raw() -> bool {
 ///    `xxx.local` 名，同样**绕开系统 DNS**。Apple/打印机/部分安卓会响应。
 ///
 /// 三步均 best-effort、各带短超时；任一步拿到「看起来像名字」（非 IP 文本）的结果即返回。
-pub fn resolve_hostname(ip: IpAddr) -> Option<String> {
+pub fn resolve_hostname_until_cancelled(
+    ip: IpAddr,
+    cancelled: impl Fn() -> bool,
+) -> Option<String> {
+    if cancelled() {
+        return None;
+    }
     // 1. 反向 DNS：除了过滤数字 IP，还要求正向解析能回到原 IP（FCrDNS）。
     // Windows/Winsock 可能把网关等无有效 PTR 的地址错误映射成本机名；不做
     // forward-confirmation 就会把本机名称贴到其它设备上。
@@ -739,10 +745,17 @@ pub fn resolve_hostname(ip: IpAddr) -> Option<String> {
         return Some(name);
     }
 
+    if cancelled() {
+        return None;
+    }
+
     // 2 & 3. 仅 IPv4 局域网设备适用 NetBIOS / mDNS。
     if let IpAddr::V4(v4) = ip {
         if let Some(name) = resolve_netbios(v4).filter(|n| looks_like_hostname(n)) {
             return Some(name);
+        }
+        if cancelled() {
+            return None;
         }
         if let Some(name) = resolve_mdns(v4).filter(|n| looks_like_hostname(n)) {
             return Some(name);
@@ -1278,5 +1291,15 @@ mod tests {
             Some("vivo-phone")
         );
         assert_eq!(parse_mdns_ptr(&buf, "1.1.168.192.in-addr.arpa"), None);
+    }
+
+    #[test]
+    fn cancelled_hostname_lookup_returns_before_network_resolution() {
+        let started = std::time::Instant::now();
+        assert_eq!(
+            resolve_hostname_until_cancelled("192.0.2.1".parse().unwrap(), || true),
+            None
+        );
+        assert!(started.elapsed() < std::time::Duration::from_millis(50));
     }
 }

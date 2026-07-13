@@ -81,10 +81,13 @@ pub async fn run(config_path: Option<String>) -> Result<()> {
     }
     .await;
 
-    // The runtime and event producer must be joined before terminal recovery.
-    runtime.shutdown().await;
-    events.shutdown().await;
+    // Restore the user's terminal immediately after Quit. Scanner workers may
+    // still be finishing their current short, blocking OS probe; they no
+    // longer keep the alternate screen visible while structured shutdown
+    // joins them.
     let exit_result = frontend::exit(&mut terminal);
+    events.shutdown().await;
+    runtime.shutdown().await;
     run_result?;
     exit_result?;
     Ok(())

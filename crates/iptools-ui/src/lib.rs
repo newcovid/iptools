@@ -43,6 +43,9 @@ pub struct UiState {
     adapter_fields: Vec<(Rect, AdapterField, u16)>,
     settings_regions: Vec<(Rect, usize)>,
     footer_regions: Vec<(Rect, Action)>,
+    adapter_viewport: usize,
+    scanner_viewport: usize,
+    traffic_viewport: usize,
 }
 
 impl UiState {
@@ -144,7 +147,19 @@ impl UiState {
 
 /// Render the shared application model using any Ratatui backend.
 pub fn render(frame: &mut Frame, model: &AppModel, ui: &mut UiState) {
-    *ui = UiState::default();
+    ui.overlay_regions.clear();
+    ui.page_regions.clear();
+    ui.diagnostic_regions.clear();
+    ui.diagnostic_menu = None;
+    ui.diagnostic_main = None;
+    ui.diagnostic_config = None;
+    ui.diagnostic_fields.clear();
+    ui.scanner_input = None;
+    ui.scanner_panel = None;
+    ui.adapter_regions.clear();
+    ui.adapter_fields.clear();
+    ui.settings_regions.clear();
+    ui.footer_regions.clear();
     let areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -159,7 +174,7 @@ pub fn render(frame: &mut Frame, model: &AppModel, ui: &mut UiState) {
         Page::Dashboard => render_dashboard(frame, areas[1], model),
         Page::Adapters => render_adapters(frame, areas[1], model, ui),
         Page::Scanner => render_scanner(frame, areas[1], model, ui),
-        Page::Traffic => render_traffic(frame, areas[1], model),
+        Page::Traffic => render_traffic(frame, areas[1], model, ui),
         Page::Diagnostics => render_diagnostics(frame, areas[1], model, ui),
         Page::Settings => render_settings(frame, areas[1], model, ui),
     }
@@ -532,14 +547,15 @@ fn render_adapters(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut UiS
     let cols =
         Layout::horizontal([Constraint::Percentage(30), Constraint::Percentage(70)]).split(area);
     let list_inner = Block::bordered().inner(cols[0]);
-    for index in 0..model.adapters.items.len().min(list_inner.height as usize) {
+    let visible = visible_range(
+        model.adapters.items.len(),
+        model.adapters.selected,
+        list_inner.height as usize,
+        &mut ui.adapter_viewport,
+    );
+    for (row, index) in visible.clone().enumerate() {
         ui.adapter_regions.push((
-            Rect::new(
-                list_inner.x,
-                list_inner.y + index as u16,
-                list_inner.width,
-                1,
-            ),
+            Rect::new(list_inner.x, list_inner.y + row as u16, list_inner.width, 1),
             index,
         ));
     }
@@ -548,6 +564,8 @@ fn render_adapters(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut UiS
         .items
         .iter()
         .enumerate()
+        .skip(visible.start)
+        .take(visible.len())
         .map(|(index, adapter)| {
             let selected = index == model.adapters.selected;
             let prefix = if adapter.is_physical { "[P] " } else { "[V] " };
@@ -1101,11 +1119,20 @@ fn render_scanner(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut UiSt
     } else {
         model.scanner.current as f64 / model.scanner.total as f64
     };
+    let table_inner_height = rows[1].height.saturating_sub(4) as usize;
+    let visible = visible_range(
+        model.scanner.results.len(),
+        model.scanner.selected,
+        table_inner_height,
+        &mut ui.scanner_viewport,
+    );
     let table_rows = model
         .scanner
         .results
         .iter()
         .enumerate()
+        .skip(visible.start)
+        .take(visible.len())
         .map(|(index, host)| {
             Row::new(vec![
                 format!(
@@ -1228,28 +1255,42 @@ fn render_scanner(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut UiSt
     }
 }
 
-fn render_traffic(frame: &mut Frame, area: Rect, model: &AppModel) {
-    let rows = model.traffic.rows.iter().enumerate().map(|(index, row)| {
-        Row::new(vec![
-            Cell::from(row.name.clone()),
-            Cell::from(format!("↓ {}", format_rate(row.download_bps))),
-            Cell::from(format!("↑ {}", format_rate(row.upload_bps))),
-            Cell::from(vec![
-                Line::from(format!("↓ {}", format_bytes(row.session_download))),
-                Line::from(format!("↑ {}", format_bytes(row.session_upload))),
-            ]),
-            Cell::from(vec![
-                Line::from(format!("↓ {}", format_bytes(row.total_download))),
-                Line::from(format!("↑ {}", format_bytes(row.total_upload))),
-            ]),
-        ])
-        .height(2)
-        .style(if index == model.traffic.selected {
-            Style::default().bg(SELECTED)
-        } else {
-            Style::default()
-        })
-    });
+fn render_traffic(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut UiState) {
+    let visible_rows = area.height.saturating_sub(4) as usize / 2;
+    let visible = visible_range(
+        model.traffic.rows.len(),
+        model.traffic.selected,
+        visible_rows,
+        &mut ui.traffic_viewport,
+    );
+    let rows = model
+        .traffic
+        .rows
+        .iter()
+        .enumerate()
+        .skip(visible.start)
+        .take(visible.len())
+        .map(|(index, row)| {
+            Row::new(vec![
+                Cell::from(row.name.clone()),
+                Cell::from(format!("↓ {}", format_rate(row.download_bps))),
+                Cell::from(format!("↑ {}", format_rate(row.upload_bps))),
+                Cell::from(vec![
+                    Line::from(format!("↓ {}", format_bytes(row.session_download))),
+                    Line::from(format!("↑ {}", format_bytes(row.session_upload))),
+                ]),
+                Cell::from(vec![
+                    Line::from(format!("↓ {}", format_bytes(row.total_download))),
+                    Line::from(format!("↑ {}", format_bytes(row.total_upload))),
+                ]),
+            ])
+            .height(2)
+            .style(if index == model.traffic.selected {
+                Style::default().bg(SELECTED)
+            } else {
+                Style::default()
+            })
+        });
     let inner_width = area.width.saturating_sub(2);
     let (rate_width, byte_width) = if inner_width >= 100 {
         (14, 18)
@@ -2750,13 +2791,13 @@ fn render_footer(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut UiSta
     let buttons = match model.language {
         Language::Zh => vec![
             (format!("[{next}/{previous}] 切换菜单"), Action::NextPage),
-            (format!("[{language}] 切换语言"), Action::ToggleLanguage),
+            (format!("[{language}] Language"), Action::ToggleLanguage),
             (format!("[{help}] 帮助"), Action::Help),
             (format!("[{quit}] 退出"), Action::Quit),
         ],
         Language::En => vec![
             (format!("[{next}/{previous}] Switch"), Action::NextPage),
-            (format!("[{language}] Language"), Action::ToggleLanguage),
+            (format!("[{language}] 切换语言"), Action::ToggleLanguage),
             (format!("[{help}] Help"), Action::Help),
             (format!("[{quit}] Quit"), Action::Quit),
         ],
@@ -2777,6 +2818,27 @@ fn render_footer(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut UiSta
         x = x.saturating_add(width);
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn visible_range(
+    total: usize,
+    selected: usize,
+    capacity: usize,
+    offset: &mut usize,
+) -> std::ops::Range<usize> {
+    if total == 0 || capacity == 0 {
+        *offset = 0;
+        return 0..0;
+    }
+    let capacity = capacity.min(total);
+    let selected = selected.min(total - 1);
+    *offset = (*offset).min(total - capacity);
+    if selected < *offset {
+        *offset = selected;
+    } else if selected >= *offset + capacity {
+        *offset = selected + 1 - capacity;
+    }
+    *offset..(*offset + capacity)
 }
 
 fn render_help(frame: &mut Frame, model: &AppModel) {
@@ -2957,6 +3019,71 @@ mod tests {
         assert_eq!(scan_address_count("192.168.1.0/31"), Some(2));
         assert_eq!(scan_address_count("192.168.1.1/32"), Some(1));
         assert_eq!(scan_address_count("invalid"), None);
+    }
+
+    #[test]
+    fn list_viewport_follows_the_selected_row() {
+        let mut offset = 0;
+        assert_eq!(visible_range(20, 0, 5, &mut offset), 0..5);
+        assert_eq!(visible_range(20, 7, 5, &mut offset), 3..8);
+        assert_eq!(visible_range(20, 19, 5, &mut offset), 15..20);
+        assert_eq!(visible_range(20, 18, 5, &mut offset), 15..20);
+        assert_eq!(visible_range(20, 15, 5, &mut offset), 15..20);
+        assert_eq!(visible_range(20, 14, 5, &mut offset), 14..19);
+        assert_eq!(visible_range(0, 0, 5, &mut offset), 0..0);
+    }
+
+    #[test]
+    fn scanner_and_adapter_views_keep_late_selections_visible() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut model = AppModel::default();
+        model.page = Page::Scanner;
+        model.scanner.results = (1..=30)
+            .map(|last| iptools_core::ScanHost {
+                ip: format!("192.168.1.{last}"),
+                ..iptools_core::ScanHost::default()
+            })
+            .collect();
+        model.scanner.selected = 29;
+        let mut ui = UiState::default();
+        terminal
+            .draw(|frame| render(frame, &model, &mut ui))
+            .unwrap();
+        let text = terminal.backend().to_string();
+        assert!(text.contains("192.168.1.30"));
+        assert!(!text.contains("192.168.1.1 "));
+
+        model.page = Page::Adapters;
+        model.adapters.items = (0..30)
+            .map(|index| iptools_core::AdapterInfo {
+                name: format!("adapter-{index}"),
+                ..iptools_core::AdapterInfo::default()
+            })
+            .collect();
+        model.adapters.selected = 29;
+        terminal
+            .draw(|frame| render(frame, &model, &mut ui))
+            .unwrap();
+        let text = terminal.backend().to_string();
+        assert!(text.contains("adapter-29"));
+        assert!(!text.contains("adapter-0 "));
+        assert!(ui.adapter_regions.iter().any(|(_, index)| *index == 29));
+    }
+
+    #[test]
+    fn language_button_names_the_language_available_after_switching() {
+        for (language, expected) in [(Language::Zh, "Language"), (Language::En, "切换语言")] {
+            let backend = TestBackend::new(120, 36);
+            let mut terminal = Terminal::new(backend).unwrap();
+            let mut model = AppModel::default();
+            model.language = language;
+            let mut ui = UiState::default();
+            terminal
+                .draw(|frame| render(frame, &model, &mut ui))
+                .unwrap();
+            assert!(terminal.backend().to_string().contains(expected));
+        }
     }
 
     #[test]

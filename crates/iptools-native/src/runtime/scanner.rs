@@ -65,8 +65,11 @@ impl NativeRuntime {
                                 if let Some(mac) = net::resolve_mac_address(ip)
                                     && !token.is_cancelled()
                                 {
-                                    let hostname = net::resolve_hostname(IpAddr::V4(ip))
-                                        .unwrap_or_default();
+                                    let hostname = net::resolve_hostname_until_cancelled(
+                                        IpAddr::V4(ip),
+                                        || token.is_cancelled(),
+                                    )
+                                    .unwrap_or_default();
                                     if !token.is_cancelled() {
                                         let _ = events.blocking_send(RuntimeEvent::ScanHostFound {
                                             job,
