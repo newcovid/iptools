@@ -29,9 +29,12 @@ try {
     /\[Ctrl\+C\].*(退出|Quit)/,
     "DOM terminal size must keep the bottom footer inside the visible grid",
   );
-  assert.match(await page.locator(".demo-badge").textContent(), /v0\.4\.0.*SIMULATED DATA/);
+  assert.equal(await page.locator("html").getAttribute("lang"), "zh-CN");
+  assert.equal(await page.locator("html").getAttribute("data-theme"), "classic");
+  assert.match(await page.locator(".exhibit-intro").textContent(), /浏览器.*演示场景/);
+  assert.match(await page.locator(".demo-badge:visible").textContent(), /模拟数据/);
   assert.ok(
-    (await page.locator(".demo-badge").boundingBox())?.height <= 24,
+    (await page.locator(".demo-badge:visible").boundingBox())?.height <= 24,
     "Version badge should remain on one line",
   );
   await page.locator("#terminal").focus();
@@ -41,6 +44,12 @@ try {
     true,
     "Bundled CJK terminal font should be loaded",
   );
+  await page.keyboard.press("Control+l");
+  await page.waitForFunction(() => document.documentElement.lang === "en");
+  assert.match(await page.locator(".exhibit-intro").textContent(), /Experience iptools/);
+  await page.keyboard.press("Control+l");
+  await page.waitForFunction(() => document.documentElement.lang === "zh-CN");
+  assert.match(await page.locator(".exhibit-intro").textContent(), /浏览器.*演示场景/);
   assert.equal(
     await page.locator("#terminal_ratzilla_grid span").evaluateAll((elements) =>
       elements.some((element) => getComputedStyle(element).color === "rgb(19, 161, 14)"),
@@ -163,7 +172,7 @@ try {
       Number(document.getElementById("terminal")?.dataset.renderedInputGeneration) > generation,
     wheelGeneration,
   );
-  await page.getByRole("button", { name: "Reset" }).click();
+  await page.locator('button[data-action="reset"]').click();
   await page.waitForFunction(() => {
     const text = document.getElementById("terminal")?.textContent ?? "";
     return text.includes("field-laptop.demo") && text.includes("198.51.100.27");
@@ -183,9 +192,9 @@ try {
   });
 
   if (browserName === "chromium") {
-    await page.getByRole("button", { name: "Fullscreen" }).click();
+    await page.locator("#fullscreen-button").click();
     await page.waitForFunction(() => document.fullscreenElement !== null);
-    await page.getByRole("button", { name: "Exit fullscreen" }).click();
+    await page.locator("#fullscreen-button").click();
     await page.waitForFunction(() => document.fullscreenElement === null);
   }
 
@@ -212,7 +221,7 @@ try {
     await page.context().setOffline(true);
     await page.reload({ waitUntil: "domcontentloaded" });
     await page.waitForSelector("#terminal_ratzilla_grid");
-    assert.match(await page.locator(".demo-badge").textContent(), /SIMULATED DATA/);
+    assert.match(await page.locator(".demo-badge:visible").textContent(), /模拟数据/);
     await page.context().setOffline(false);
   }
 
@@ -317,6 +326,14 @@ try {
     const saved = JSON.parse(localStorage.getItem("iptools.web.v1.config") ?? "{}");
     return saved.theme === "nord";
   });
+  await settingsPage.waitForFunction(
+    () => document.documentElement.dataset.theme === "nord",
+  );
+  assert.equal(
+    await settingsPage.locator(".stage").evaluate((element) => getComputedStyle(element).borderColor),
+    "rgb(76, 86, 106)",
+    "The Web shell should follow the selected Nord theme",
+  );
   await settingsPage.waitForFunction(() =>
     [...document.querySelectorAll("#terminal_ratzilla_grid span")].some((element) =>
       /^rgba?\(46, 52, 64(?:, 1)?\)$/.test(getComputedStyle(element).backgroundColor),
@@ -324,6 +341,7 @@ try {
   );
   await settingsPage.reload({ waitUntil: "domcontentloaded" });
   await settingsPage.waitForSelector("#terminal_ratzilla_grid");
+  assert.equal(await settingsPage.locator("html").getAttribute("data-theme"), "nord");
   assert.match(await settingsPage.locator("#terminal").textContent(), /Color theme\s*:\s*Nord/);
   for (let index = 0; index < 3; index += 1) {
     await settingsPage.keyboard.press("ArrowDown");
@@ -562,20 +580,10 @@ async function waitForStableTerminal(page) {
       terminal.dataset.pendingStateRevision === terminal.dataset.renderedStateRevision
     );
   });
-  let previous = null;
-  let stableFrames = 0;
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    const current = hash(await page.locator("#terminal").screenshot());
-    if (current === previous) {
-      stableFrames += 1;
-      if (stableFrames >= 2) return;
-    } else {
-      previous = current;
-      stableFrames = 0;
-    }
-    await page.waitForTimeout(50);
-  }
-  assert.fail("Terminal did not reach a stable rendered frame");
+  // The dashboard clock intentionally changes once per second, so pixel hashes
+  // cannot be a reliable stability signal on slower browsers or CI runners.
+  // The renderer's revision handshake is the authoritative frame boundary.
+  await page.waitForTimeout(100);
 }
 
 async function isolateStorage(page) {

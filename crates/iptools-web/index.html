@@ -1,12 +1,12 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="classic">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-    <meta name="theme-color" content="#081018" />
-    <meta name="description" content="Interactive iptools network diagnostics TUI demo" />
+    <meta name="theme-color" content="#0c0c0c" />
+    <meta name="description" content="iptools 交互式网络诊断 TUI 演示 / Interactive network diagnostics TUI demo" />
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'self'" />
-    <title>iptools · Interactive Demo</title>
+    <title>iptools · 交互式演示</title>
     <link rel="manifest" href="manifest.webmanifest" />
     <link rel="icon" href="icon.svg" type="image/svg+xml" />
     <link rel="preload" href="assets/fonts/maple-mono-cn-iptools.woff2" as="font" type="font/woff2" crossorigin />
@@ -18,107 +18,119 @@
     <link data-trunk rel="rust" data-wasm-opt="z" />
   </head>
   <body>
-    <header>
-      <div>
-        <strong>iptools</strong>
-        <span class="demo-badge">v0.4.0 · SIMULATED DATA</span>
+    <div class="ambient" aria-hidden="true"></div>
+    <header class="masthead">
+      <a class="brand" href="https://github.com/newcovid/iptools" aria-label="iptools GitHub">
+        <span class="brand-mark" aria-hidden="true">ip</span>
+        <span class="brand-copy">
+          <strong>iptools</strong>
+          <small class="i18n i18n-zh">网络诊断工具箱</small>
+          <small class="i18n i18n-en">Network diagnostics toolbox</small>
+        </span>
+      </a>
+      <div class="edition">
+        <span class="status-dot" aria-hidden="true"></span>
+        <span>v0.4.0</span>
+        <span class="edition-separator" aria-hidden="true"></span>
+        <span class="demo-badge i18n i18n-zh">模拟数据</span>
+        <span class="demo-badge i18n i18n-en">Simulated data</span>
       </div>
-      <nav aria-label="Demo controls">
-        <label>Scenario
-          <select id="scenario-select">
-            <option value="home-network">Home network</option>
-            <option value="wifi-degraded">Wi-Fi degraded</option>
-            <option value="multi-adapter">Multi-adapter</option>
-          </select>
-        </label>
-        <button data-action="language" type="button">中文 / EN</button>
-        <button data-action="reset" type="button">Reset</button>
-        <button id="fullscreen-button" type="button">Fullscreen</button>
-        <a href="https://github.com/newcovid/iptools/actions/workflows/pages.yml" title="Download the portable Web artifact from the latest Pages run">Portable Web</a>
-        <a href="https://github.com/newcovid/iptools/releases/latest">Download</a>
-        <a href="https://github.com/newcovid/iptools">GitHub</a>
+      <nav class="utility-links" aria-label="项目链接">
+        <a href="https://github.com/newcovid/iptools/actions/workflows/pages.yml" title="Portable Web dist">Web dist</a>
+        <a href="https://github.com/newcovid/iptools/releases/latest">
+          <span class="i18n i18n-zh">下载</span><span class="i18n i18n-en">Download</span>
+        </a>
+        <a href="https://github.com/newcovid/iptools">GitHub ↗</a>
       </nav>
     </header>
 
-    <p class="notice">This exhibit runs entirely in your browser. It does not scan your device or local network.</p>
-    <p class="rotate">For the complete terminal layout, rotate your device to landscape.</p>
-    <main id="terminal" tabindex="0" aria-label="Interactive iptools terminal demo"></main>
+    <section class="exhibit-bar" aria-label="演示控制">
+      <div class="exhibit-intro">
+        <span class="eyebrow i18n i18n-zh">在线展览 · 01</span>
+        <span class="eyebrow i18n i18n-en">Online exhibit · 01</span>
+        <p class="i18n i18n-zh">在浏览器中完整体验 iptools。所有网络状态均为可重复的演示场景。</p>
+        <p class="i18n i18n-en">Experience iptools in the browser. Every network state comes from a repeatable demo scenario.</p>
+      </div>
+      <div class="controls">
+        <label class="scenario-control" for="scenario-select">
+          <span class="control-label i18n i18n-zh">场景</span>
+          <span class="control-label i18n i18n-en">Scenario</span>
+          <select id="scenario-select" aria-label="Scenario">
+            <option value="home-network" data-zh="家庭网络" data-en="Home network">家庭网络</option>
+            <option value="wifi-degraded" data-zh="Wi-Fi 信号弱" data-en="Wi-Fi degraded">Wi-Fi 信号弱</option>
+            <option value="multi-adapter" data-zh="多网卡" data-en="Multi-adapter">多网卡</option>
+          </select>
+        </label>
+        <button class="icon-button" data-action="language" type="button" aria-label="切换语言">
+          <span aria-hidden="true">文</span><span class="button-label">中文 / EN</span>
+        </button>
+        <button class="icon-button" data-action="reset" type="button">
+          <span aria-hidden="true">↺</span><span class="button-label i18n i18n-zh">重置</span><span class="button-label i18n i18n-en">Reset</span>
+        </button>
+        <button class="icon-button" id="fullscreen-button" type="button">
+          <span aria-hidden="true">⛶</span><span id="fullscreen-label">全屏</span>
+        </button>
+      </div>
+    </section>
 
-    <section class="soft-keys" aria-label="Touch keyboard">
-      <button data-action="previous">⇧ Tab</button>
-      <button data-action="next">Tab</button>
-      <button data-action="up">↑</button>
-      <button data-action="left">←</button>
-      <button data-action="down">↓</button>
-      <button data-action="right">→</button>
-      <button data-action="confirm">Enter</button>
-      <button data-action="toggle">Space</button>
-      <button data-action="history">Ctrl+R</button>
-      <button data-action="back">Esc</button>
-      <button data-action="help">F1</button>
+    <section class="stage" aria-label="iptools 交互式终端">
+      <div class="stage-meta">
+        <span class="stage-number">IPT / 004</span>
+        <span class="stage-title i18n i18n-zh">交互式终端</span>
+        <span class="stage-title i18n i18n-en">Interactive terminal</span>
+        <span class="stage-rule" aria-hidden="true"></span>
+        <span class="privacy-note i18n i18n-zh">仅在本地浏览器运行 · 不扫描真实设备</span>
+        <span class="privacy-note i18n i18n-en">Runs locally · Never scans your device</span>
+      </div>
+      <p class="rotate"><span class="i18n i18n-zh">请旋转至横屏，以查看完整终端布局。</span><span class="i18n i18n-en">Rotate to landscape for the complete terminal layout.</span></p>
+      <main id="terminal" tabindex="0" aria-label="iptools interactive terminal demo"></main>
+    </section>
+
+    <section class="soft-keys" aria-label="触控键盘">
+      <span class="soft-key-label i18n i18n-zh">触控键盘</span>
+      <span class="soft-key-label i18n i18n-en">Touch keys</span>
+      <button data-action="previous">⇧ Tab</button><button data-action="next">Tab</button>
+      <button data-action="up">↑</button><button data-action="left">←</button><button data-action="down">↓</button><button data-action="right">→</button>
+      <button data-action="confirm">Enter</button><button data-action="toggle">Space</button>
+      <button data-action="history">Ctrl+R</button><button data-action="back">Esc</button><button data-action="help">F1</button>
     </section>
 
     <div id="update-toast" role="status" aria-live="polite" hidden>
-      A new version is available.
-      <button id="reload-button" type="button">Reload</button>
+      <span class="i18n i18n-zh">新版本已准备就绪。</span><span class="i18n i18n-en">A new version is ready.</span>
+      <button id="reload-button" type="button"><span class="i18n i18n-zh">刷新</span><span class="i18n i18n-en">Reload</span></button>
     </div>
-    <noscript>This demo requires JavaScript and WebAssembly.</noscript>
+    <noscript>此演示需要 JavaScript 与 WebAssembly。 / This demo requires JavaScript and WebAssembly.</noscript>
     <script>
       const params = new URLSearchParams(location.search);
-      const scenario = params.get("scenario") || localStorage.getItem("iptools.web.v1.scenario") || "home-network";
+      const initialLanguage = (params.get("lang") || localStorage.getItem("iptools.web.v1.language") || navigator.language || "en").toLowerCase().startsWith("zh") ? "zh" : "en";
       const select = document.getElementById("scenario-select");
-      select.value = scenario;
-      select.addEventListener("change", () => {
-        const url = new URL(location.href);
-        url.searchParams.set("scenario", select.value);
-        location.href = url;
-      });
+      select.value = params.get("scenario") || localStorage.getItem("iptools.web.v1.scenario") || "home-network";
+      const syncStaticShell = () => {
+        const isZh = document.documentElement.lang.startsWith("zh");
+        document.title = isZh ? "iptools · 交互式演示" : "iptools · Interactive demo";
+        select.setAttribute("aria-label", isZh ? "演示场景" : "Demo scenario");
+        for (const option of select.options) option.textContent = option.dataset[isZh ? "zh" : "en"];
+        document.getElementById("fullscreen-label").textContent = document.fullscreenElement ? (isZh ? "退出全屏" : "Exit fullscreen") : (isZh ? "全屏" : "Fullscreen");
+      };
+      document.documentElement.lang = initialLanguage === "zh" ? "zh-CN" : "en";
+      syncStaticShell();
+      new MutationObserver(syncStaticShell).observe(document.documentElement, { attributes: true, attributeFilter: ["lang"] });
+      select.addEventListener("change", () => { const url = new URL(location.href); url.searchParams.set("scenario", select.value); location.href = url; });
       const terminal = document.getElementById("terminal");
       const fullscreenButton = document.getElementById("fullscreen-button");
-      fullscreenButton.addEventListener("click", async () => {
-        if (document.fullscreenElement) {
-          await document.exitFullscreen();
-        } else {
-          await document.documentElement.requestFullscreen();
-        }
-        terminal.focus();
-      });
-      document.addEventListener("fullscreenchange", () => {
-        fullscreenButton.textContent = document.fullscreenElement ? "Exit fullscreen" : "Fullscreen";
-        terminal.focus();
-      });
+      fullscreenButton.addEventListener("click", async () => { document.fullscreenElement ? await document.exitFullscreen() : await document.documentElement.requestFullscreen(); terminal.focus(); });
+      document.addEventListener("fullscreenchange", () => { syncStaticShell(); terminal.focus(); });
 
       let waitingWorker;
       let reloadingForUpdate = false;
       if ("serviceWorker" in navigator) {
         navigator.serviceWorker.register("service-worker.js").then((registration) => {
-          if (registration.waiting) {
-            waitingWorker = registration.waiting;
-            document.getElementById("update-toast").hidden = false;
-          }
-          registration.addEventListener("updatefound", () => {
-            const worker = registration.installing;
-            worker?.addEventListener("statechange", () => {
-              if (worker.state === "installed" && navigator.serviceWorker.controller) {
-                waitingWorker = worker;
-                document.getElementById("update-toast").hidden = false;
-              }
-            });
-          });
+          if (registration.waiting) { waitingWorker = registration.waiting; document.getElementById("update-toast").hidden = false; }
+          registration.addEventListener("updatefound", () => { const worker = registration.installing; worker?.addEventListener("statechange", () => { if (worker.state === "installed" && navigator.serviceWorker.controller) { waitingWorker = worker; document.getElementById("update-toast").hidden = false; } }); });
         });
-        navigator.serviceWorker.addEventListener("controllerchange", () => {
-          if (!reloadingForUpdate) return;
-          location.reload();
-        });
+        navigator.serviceWorker.addEventListener("controllerchange", () => { if (reloadingForUpdate) location.reload(); });
       }
-      document.getElementById("reload-button").addEventListener("click", () => {
-        if (!waitingWorker) {
-          location.reload();
-          return;
-        }
-        reloadingForUpdate = true;
-        waitingWorker.postMessage({ type: "SKIP_WAITING" });
-      });
+      document.getElementById("reload-button").addEventListener("click", () => { if (!waitingWorker) { location.reload(); return; } reloadingForUpdate = true; waitingWorker.postMessage({ type: "SKIP_WAITING" }); });
     </script>
   </body>
 </html>

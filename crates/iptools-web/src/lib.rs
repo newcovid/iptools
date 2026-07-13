@@ -8,7 +8,7 @@ mod wasm {
 
     use iptools_core::{
         Action, AppModel, ConfigData, Effect, InputEvent, KeyCode, KeyEvent, Language, Message,
-        Modifiers, SessionState,
+        Modifiers, SessionState, ThemeId,
     };
     use iptools_demo::{DemoRuntime, ScenarioId};
     use iptools_ui::UiState;
@@ -68,6 +68,7 @@ mod wasm {
             let previous_language = self.model.language;
             let effects = self.model.update(Message::Input(input));
             self.dispatch(effects);
+            sync_shell(self.model.language, self.model.theme);
             if self.model.language != previous_language {
                 if let Err(error) = replace_language_query(self.model.language) {
                     web_sys::console::warn_1(&error);
@@ -89,6 +90,7 @@ mod wasm {
             self.last_clock_second = 0;
             self.input_generation = self.input_generation.saturating_add(1);
             self.state_revision = self.state_revision.saturating_add(1);
+            sync_shell(self.model.language, self.model.theme);
             Ok(())
         }
 
@@ -156,6 +158,10 @@ mod wasm {
         persist_preferences(scenario, &config);
 
         let app = Rc::new(RefCell::new(WebApp::new(scenario, config)?));
+        {
+            let state = app.borrow();
+            sync_shell(state.model.language, state.model.theme);
+        }
         install_soft_keys(Rc::clone(&app))?;
         install_wheel(Rc::clone(&app))?;
 
@@ -502,6 +508,44 @@ mod wasm {
             .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
         {
             let _ = terminal.focus();
+        }
+    }
+
+    fn sync_shell(language: Language, theme: ThemeId) {
+        let Some(document) = window().and_then(|value| value.document()) else {
+            return;
+        };
+        let Some(root) = document.document_element() else {
+            return;
+        };
+        let language = if language == Language::Zh {
+            "zh-CN"
+        } else {
+            "en"
+        };
+        let theme = match theme {
+            ThemeId::Classic => "classic",
+            ThemeId::Nord => "nord",
+            ThemeId::CatppuccinMocha => "catppuccin-mocha",
+            ThemeId::Dracula => "dracula",
+        };
+        if root.get_attribute("lang").as_deref() != Some(language) {
+            let _ = root.set_attribute("lang", language);
+        }
+        let theme_changed = root.get_attribute("data-theme").as_deref() != Some(theme);
+        if theme_changed {
+            let _ = root.set_attribute("data-theme", theme);
+        }
+
+        if theme_changed && let Ok(Some(meta)) = document.query_selector("meta[name='theme-color']")
+        {
+            let color = match theme {
+                "nord" => "#242933",
+                "catppuccin-mocha" => "#11111b",
+                "dracula" => "#191a21",
+                _ => "#080b0f",
+            };
+            let _ = meta.set_attribute("content", color);
         }
     }
 
