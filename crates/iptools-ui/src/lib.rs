@@ -32,7 +32,7 @@ const GHOST: Color = Color::Indexed(244);
 pub struct UiState {
     overlay_regions: Vec<(Rect, Action)>,
     page_regions: Vec<(Rect, Page)>,
-    diagnostic_regions: Vec<(Rect, DiagnosticTool)>,
+    diagnostic_regions: Vec<(Rect, u8)>,
     diagnostic_menu: Option<Rect>,
     diagnostic_main: Option<Rect>,
     diagnostic_config: Option<Rect>,
@@ -93,12 +93,12 @@ impl UiState {
         {
             return Some(*action);
         }
-        if let Some((_, tool)) = self
+        if let Some((_, index)) = self
             .diagnostic_regions
             .iter()
             .find(|(area, _)| contains(*area, column, row))
         {
-            return Some(Action::SelectDiagnostic(*tool as u8));
+            return Some(Action::SelectDiagnostic(*index));
         }
         if let Some((area, index, value_x)) = self
             .diagnostic_fields
@@ -1366,7 +1366,7 @@ fn render_diagnostics(frame: &mut Frame, area: Rect, model: &AppModel, ui: &mut 
             menu_inner.width,
             1,
         );
-        ui.diagnostic_regions.push((row, tool));
+        ui.diagnostic_regions.push((row, index as u8));
         let selected = tool == model.diagnostics.tool;
         items.push(
             ListItem::new(format!(
@@ -3765,6 +3765,14 @@ mod tests {
         terminal
             .draw(|frame| render(frame, &model, &mut ui))
             .unwrap();
+
+        for (index, (area, menu_index)) in ui.diagnostic_regions.iter().enumerate() {
+            assert_eq!(*menu_index, index as u8);
+            assert_eq!(
+                ui.hit_test(area.x, area.y),
+                Some(Action::SelectDiagnostic(index as u8))
+            );
+        }
 
         for (area, focus) in [
             (ui.diagnostic_menu.unwrap(), DiagnosticFocus::Menu),

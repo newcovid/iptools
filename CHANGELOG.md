@@ -2,6 +2,12 @@
 
 本项目的用户可见变化记录在此。版本号遵循 [Semantic Versioning](https://semver.org/)。
 
+## [0.4.2] - 2026-07-13
+
+### 修复
+
+- 修复诊断工具列表的鼠标命中映射：点击“公网测速”或“链路质量”会选中对应项。
+
 ## [0.4.1] - 2026-07-13
 
 ### 修复与改进
@@ -37,5 +43,6 @@
 - 保留 `iptools` 二进制名、CLI 参数和既有配置 JSON 的兼容读取；
 - Web 始终使用模拟数据，不读取或修改浏览器所在设备的网络配置。
 
+[0.4.2]: https://github.com/newcovid/iptools/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/newcovid/iptools/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/newcovid/iptools/compare/v0.3.1...v0.4.0
