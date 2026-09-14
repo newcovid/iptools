@@ -183,7 +183,7 @@ pub fn query(guid: &str) -> Option<WirelessInfo> {
                     &iface_guid,
                     None,
                     dot11_BSS_type_infrastructure,
-                    sec.bSecurityEnabled,
+                    sec.bSecurityEnabled.as_bool(),
                     None,
                     &mut bss_list,
                 ) == 0
