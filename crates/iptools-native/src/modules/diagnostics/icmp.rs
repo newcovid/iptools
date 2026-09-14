@@ -202,7 +202,6 @@ pub fn echo_once_from(
     payload_len: usize,
 ) -> EchoResult {
     use std::ffi::c_void;
-    use windows::Win32::Foundation::HANDLE;
     use windows::Win32::NetworkManagement::IpHelper::{
         ICMP_ECHO_REPLY, IP_OPTION_INFORMATION, IcmpCloseHandle, IcmpCreateFile, IcmpSendEcho2Ex,
     };
@@ -235,7 +234,7 @@ pub fn echo_once_from(
     let count = unsafe {
         IcmpSendEcho2Ex(
             handle,
-            HANDLE::default(),
+            None,
             None,
             None,
             src_u32,
