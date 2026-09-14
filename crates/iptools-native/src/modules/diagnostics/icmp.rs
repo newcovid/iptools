@@ -315,7 +315,7 @@ fn unix_send(
             };
         }
     };
-    if sock.set_ttl(ttl as u32).is_err()
+    if sock.set_ttl_v4(ttl as u32).is_err()
         || sock
             .set_read_timeout(Some(Duration::from_millis(timeout_ms.max(1) as u64)))
             .is_err()
