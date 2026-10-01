@@ -36,7 +36,7 @@ unicode-width.workspace = true
 dns-lookup = "2.0"
 
 [target.'cfg(unix)'.dependencies]
-surge-ping = "0.8"
+surge-ping = "0.9"
 socket2 = { version = "0.6", features = ["all"] }
 nix = { version = "0.30", features = ["net"] }
 libc = "0.2"
